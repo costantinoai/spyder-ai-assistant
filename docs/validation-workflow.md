@@ -41,6 +41,8 @@ The main entry points are:
 - `python -m tools.spyder_validation.run_chat_prompt_preset_restore_validation`
 - `python -m tools.spyder_validation.run_chat_inference_controls_validation`
 - `python -m tools.spyder_validation.run_chat_inference_controls_restore_validation`
+- `python -m tools.spyder_validation.run_chat_exchange_deletion_validation`
+- `python -m tools.spyder_validation.run_chat_exchange_deletion_restore_validation`
 - `python -m tools.spyder_validation.run_chat_history_browser_validation`
 - `python -m tools.spyder_validation.run_chat_history_browser_restore_validation`
 - `python -m tools.spyder_validation.run_chat_use_console_smoke`
@@ -58,6 +60,8 @@ DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_prompt_pres
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_prompt_preset_restore_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_inference_controls_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_inference_controls_restore_validation
+DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_exchange_deletion_validation
+DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_exchange_deletion_restore_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_history_browser_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_history_browser_restore_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_use_console_smoke
@@ -125,6 +129,21 @@ it clears stale local build artifacts before rebuilding the sdist and wheel.
 - confirm the `Settings` button and tooltip follow the restored active tab
 - confirm resolved request options after restart still match the saved state
 
+### Exchange-deletion validation
+
+- open the real delete-exchange dialog from the active chat tab
+- delete a middle exchange from a multi-turn conversation
+- confirm the visible transcript loses only that selected exchange
+- confirm regenerate still works on the remaining last turn
+- confirm the saved session file no longer contains the deleted exchange
+
+### Exchange-deletion restore validation
+
+- reopen Spyder against the same project after deleting an exchange
+- confirm the deleted turn stays gone after restart
+- confirm the delete browser now lists only the remaining exchanges
+- confirm restored transcript order still matches the saved session file
+
 ### History browser validation
 
 - real `History` button and modal dialog path
@@ -178,6 +197,8 @@ For example:
   preset ids in the JSON artifact
 - inference-control tests should show per-tab resolved options, reset behavior,
   and restored override state in both the log and JSON artifacts
+- exchange-deletion tests should show the deleted-turn gap in both the restored
+  transcript and the delete-browser row list
 - restore tests should show the expected save and restore counts
 
 ## Release usage

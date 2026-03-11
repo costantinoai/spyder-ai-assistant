@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 from qtpy.QtCore import QTimer
-from qtpy.QtWidgets import QApplication
+from qtpy.QtWidgets import QApplication, QMessageBox
 
 from spyder.api.plugins import Plugins
 from spyder.app.mainwindow import MainWindow
@@ -23,6 +23,7 @@ from spyder.app.mainwindow import MainWindow
 from spyder_ai_assistant.utils.prompt_library import (
     normalize_chat_prompt_preset,
 )
+from spyder_ai_assistant.widgets.exchange_delete_dialog import ExchangeDeleteDialog
 from spyder_ai_assistant.widgets.chat_settings_dialog import ChatSettingsDialog
 
 
@@ -249,6 +250,76 @@ def apply_chat_settings(widget, temperature_override=None,
         raise RuntimeError(state["error"])
     if not closed:
         raise RuntimeError("Chat settings dialog did not close")
+    QApplication.instance().processEvents()
+
+
+def delete_chat_exchange_via_dialog(widget, exchange_index):
+    """Open the real delete-exchange dialog and confirm one selection."""
+    state = {"error": None}
+
+    def _confirm_delete(attempt=0):
+        dialog = next(
+            (
+                top_level for top_level in QApplication.topLevelWidgets()
+                if isinstance(top_level, ExchangeDeleteDialog)
+                and top_level.isVisible()
+            ),
+            None,
+        )
+        if dialog is None:
+            if attempt < 40:
+                QTimer.singleShot(50, lambda: _confirm_delete(attempt + 1))
+            else:
+                state["error"] = "Exchange delete dialog did not open"
+            return
+
+        if not dialog.select_exchange_index(exchange_index):
+            state["error"] = f"Exchange {exchange_index} not available in dialog"
+            dialog.reject()
+            return
+
+        def _accept_message_box(message_attempt=0):
+            message_box = next(
+                (
+                    top_level for top_level in QApplication.topLevelWidgets()
+                    if isinstance(top_level, QMessageBox)
+                    and top_level.isVisible()
+                ),
+                None,
+            )
+            if message_box is None:
+                if message_attempt < 40:
+                    QTimer.singleShot(
+                        25,
+                        lambda: _accept_message_box(message_attempt + 1),
+                    )
+                else:
+                    state["error"] = "Delete confirmation dialog did not open"
+                return
+
+            message_box.button(QMessageBox.Yes).click()
+
+        QTimer.singleShot(0, _accept_message_box)
+        dialog.request_delete()
+
+    QTimer.singleShot(50, _confirm_delete)
+    widget.delete_turn_btn.click()
+    closed = wait_for(
+        lambda: not any(
+            (
+                isinstance(top_level, ExchangeDeleteDialog)
+                or isinstance(top_level, QMessageBox)
+            )
+            and top_level.isVisible()
+            for top_level in QApplication.topLevelWidgets()
+        ),
+        timeout_ms=5000,
+        step_ms=50,
+    )
+    if state["error"] is not None:
+        raise RuntimeError(state["error"])
+    if not closed:
+        raise RuntimeError("Exchange delete flow did not close")
     QApplication.instance().processEvents()
 
 

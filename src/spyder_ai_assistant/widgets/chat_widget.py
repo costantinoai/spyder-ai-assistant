@@ -30,6 +30,10 @@ from qtpy.QtWidgets import (
 from spyder.api.widgets.main_widget import PluginMainWidget
 
 from spyder_ai_assistant.backend.worker import OllamaWorker
+from spyder_ai_assistant.utils.chat_exchanges import (
+    build_chat_exchange_rows,
+    delete_chat_exchange,
+)
 from spyder_ai_assistant.utils.chat_inference import (
     describe_chat_inference_source,
     format_chat_temperature,
@@ -64,6 +68,7 @@ from spyder_ai_assistant.utils.chat_workflows import (
 )
 from spyder_ai_assistant.widgets.chat_input import ChatInput
 from spyder_ai_assistant.widgets.chat_settings_dialog import ChatSettingsDialog
+from spyder_ai_assistant.widgets.exchange_delete_dialog import ExchangeDeleteDialog
 from spyder_ai_assistant.widgets.session_history_dialog import SessionHistoryDialog
 from spyder_ai_assistant.widgets.chat_display import ChatDisplay
 
@@ -333,6 +338,11 @@ class ChatWidget(PluginMainWidget):
             text="Export Chat...",
             triggered=self._export_chat,
         )
+        delete_exchange_action = self.create_action(
+            "ai_chat_delete_exchange",
+            text="Delete Exchange...",
+            triggered=self._open_exchange_delete_dialog,
+        )
         chat_settings_action = self.create_action(
             "ai_chat_tab_settings",
             text="Chat Settings...",
@@ -347,6 +357,7 @@ class ChatWidget(PluginMainWidget):
         self.add_item_to_menu(refresh_action, menu=options_menu)
         self.add_item_to_menu(new_tab_action, menu=options_menu)
         self.add_item_to_menu(chat_settings_action, menu=options_menu)
+        self.add_item_to_menu(delete_exchange_action, menu=options_menu)
         self.add_item_to_menu(history_action, menu=options_menu)
         self.add_item_to_menu(export_action, menu=options_menu)
 
@@ -393,6 +404,10 @@ class ChatWidget(PluginMainWidget):
         self.use_variables_btn = self._create_debug_button("use_variables")
         self.use_console_btn = self._create_debug_button("use_console")
         self.regenerate_btn = QPushButton("Regenerate")
+        self.delete_turn_btn = QPushButton("Delete Turn")
+        self.delete_turn_btn.setToolTip(
+            "Delete one saved exchange from the active chat tab"
+        )
         self.regenerate_btn.setToolTip(
             "Remove the last assistant answer on this tab and ask again"
         )
@@ -401,7 +416,8 @@ class ChatWidget(PluginMainWidget):
                 self.fix_traceback_btn,
                 self.use_variables_btn,
                 self.use_console_btn,
-                self.regenerate_btn):
+                self.regenerate_btn,
+                self.delete_turn_btn):
             debug_layout.addWidget(button)
         debug_layout.addStretch()
 
@@ -477,6 +493,7 @@ class ChatWidget(PluginMainWidget):
             lambda: self._send_debug_prompt("use_console")
         )
         self.regenerate_btn.clicked.connect(self._regenerate_last_turn)
+        self.delete_turn_btn.clicked.connect(self._open_exchange_delete_dialog)
         self.model_combo.currentIndexChanged.connect(
             self._on_model_changed
         )
@@ -682,7 +699,7 @@ class ChatWidget(PluginMainWidget):
                 "role": "assistant", "content": clean_text
             })
             session.touch()
-            self._maybe_rename_tab(session)
+            self._refresh_session_title(session)
             self._notify_session_state_changed("assistant-response")
 
         self._pending_turn = None
@@ -1133,37 +1150,25 @@ class ChatWidget(PluginMainWidget):
             self._sessions.remove_for_widget(widget)
             widget.deleteLater()
 
-    def _maybe_rename_tab(self, session):
-        """Auto-rename a tab based on the first user message.
+    def _refresh_session_title(self, session):
+        """Keep the tab title aligned with the first visible user message."""
+        title = "Chat"
+        for msg in session.messages:
+            if msg.get("role") != "user":
+                continue
+            short = msg.get("content", "")[:30].strip()
+            if len(msg.get("content", "")) > 30:
+                short += "..."
+            title = short.replace("\n", " ") or "Chat"
+            break
 
-        Uses the first ~30 characters of the first user message as the
-        tab title, which is more descriptive than "Chat N". Only renames
-        if the tab still has its default auto-generated title.
-
-        Args:
-            session: The ChatSession to potentially rename.
-        """
-        # Only rename if still using the default title
-        if not session.title.startswith("Chat "):
+        if session.title == title:
             return
 
-        # Find the first user message for a descriptive title
-        for msg in session.messages:
-            if msg["role"] == "user":
-                # Truncate to ~30 chars for the tab label
-                short = msg["content"][:30].strip()
-                if len(msg["content"]) > 30:
-                    short += "..."
-                # Replace newlines with spaces for the tab label
-                short = short.replace("\n", " ")
-                session.title = short
-
-                # Update the tab label in the QTabWidget
-                index = self._sessions.index_of(self._tab_widget, session)
-                if index >= 0:
-                    self._tab_widget.setTabText(index, short)
-                session.touch()
-                break
+        session.title = title
+        index = self._sessions.index_of(self._tab_widget, session)
+        if index >= 0:
+            self._tab_widget.setTabText(index, title)
 
     def _find_session_by_id(self, session_id):
         """Return the currently open session with one persisted id."""
@@ -1316,6 +1321,69 @@ class ChatWidget(PluginMainWidget):
         self._notify_session_state_changed("history-delete")
         return True
 
+    def _create_exchange_delete_dialog(self, session=None):
+        """Build the delete-exchange browser for the active session."""
+        session = session or self._active_session
+        rows = build_chat_exchange_rows(getattr(session, "messages", []))
+        logger.info(
+            "Built exchange delete browser with %d exchange(s) for session %s",
+            len(rows),
+            getattr(session, "session_id", "<unknown>"),
+        )
+        return ExchangeDeleteDialog(
+            rows=rows,
+            session_title=getattr(session, "title", ""),
+            parent=self,
+        )
+
+    def _open_exchange_delete_dialog(self):
+        """Open the delete-exchange browser for the active chat tab."""
+        session = self._active_session
+        if session is None or not session.messages:
+            if session:
+                session.display.append_error("No exchanges are available to delete.")
+            return False
+        if session is self._generating_session:
+            session.display.append_error(
+                "Stop the active response before deleting an exchange."
+            )
+            return False
+
+        dialog = self._create_exchange_delete_dialog(session)
+        logger.info(
+            "Opened exchange delete browser for session %s",
+            session.session_id,
+        )
+        if dialog.exec_() != dialog.Accepted:
+            return False
+
+        exchange_index = dialog.selected_exchange_index()
+        if exchange_index is None:
+            return False
+        return self._delete_exchange_from_session(session, exchange_index)
+
+    def _delete_exchange_from_session(self, session, exchange_index):
+        """Delete one selected exchange from a chat session."""
+        updated_messages, removed = delete_chat_exchange(
+            session.messages,
+            exchange_index,
+        )
+        if not removed:
+            session.display.append_error("The selected exchange no longer exists.")
+            return False
+
+        session.messages = updated_messages
+        session.touch()
+        session.display.rebuild_from_messages(session.messages)
+        self._refresh_session_title(session)
+        logger.info(
+            "Deleted exchange %d from session %s",
+            exchange_index + 1,
+            session.session_id,
+        )
+        self._notify_session_state_changed("exchange-delete")
+        return True
+
     def _send_prompt_text(self, text):
         """Append one user prompt to the active session and dispatch it."""
         if self._generating:
@@ -1340,7 +1408,7 @@ class ChatWidget(PluginMainWidget):
         session.display.append_user_message(prompt_text)
         session.messages.append({"role": "user", "content": prompt_text})
         session.touch()
-        self._maybe_rename_tab(session)
+        self._refresh_session_title(session)
         self._notify_session_state_changed("user-message")
         return self._dispatch_messages(
             session,

@@ -139,6 +139,22 @@ Assistant code blocks expose three actions:
 
 `Insert at cursor` preserves any selected text and inserts at the active caret position. `Replace selection` replaces the current selection when one exists, and falls back to inserting at the caret when there is no selection.
 
+## Exchange deletion
+
+The active chat tab exposes two entry points for exchange deletion:
+
+- `Delete Turn` button in the quick-action row
+- `Delete Exchange...` action in the pane options menu
+
+Behavior:
+
+- the delete browser lists visible exchanges in the active tab only
+- each row previews one user turn plus its assistant answer when present
+- deleting an exchange updates the authoritative session history first
+- the display is rebuilt from the updated session history after deletion
+- exports and persisted session files then reflect the same reduced transcript
+- regenerate continues to operate on the remaining last user turn
+
 ## Regenerate
 
 `Regenerate` operates on the active chat tab only.
@@ -177,9 +193,12 @@ Useful log lines include:
 - `Updated chat settings for session ...: temperature=0.2 (tab override), max_tokens=128 (tab override)`
 - `Building chat system prompt with preset debugging for session ...`
 - `Built chat history browser with 2 saved session(s)`
+- `Built exchange delete browser with 3 exchange(s) for session ...`
 - `History browser selected action 'open' for session ...`
 - `History browser selected action 'duplicate' for session ...`
 - `History browser selected action 'delete' for session ...`
+- `Opened exchange delete browser for session ...`
+- `Deleted exchange 2 from session ...`
 - `Reopened chat session from history: ...`
 - `Duplicated chat session from history: ... -> ...`
 - `Deleted chat session from history: ...`
@@ -206,5 +225,7 @@ Useful log lines include:
 10. Open `Settings` on one tab, set a low temperature and low max-token override, then confirm the button changes to `Settings*` and its tooltip shows the overridden values.
 11. Open `Settings` on another tab, set custom values, then click `Use Global Defaults` and confirm the button returns to `Settings`.
 12. Click `History`, confirm the browser shows the current scope, reopen a saved session, duplicate another one, and delete a saved session.
-13. Close and reopen Spyder with the same project open, then confirm the chat tabs, active tab, prompt presets, and per-tab overrides restore from `.spyproject/ai-assistant/chat-sessions.json`.
-14. Export the conversation and confirm the Markdown contains model, chat mode, per-tab settings, editor context, and runtime metadata.
+13. Open `Delete Turn`, remove one middle exchange from the active tab, and confirm the visible conversation rebuilds without that exchange.
+14. Click `Regenerate` after deleting a middle exchange and confirm the remaining last user turn still reruns correctly.
+15. Close and reopen Spyder with the same project open, then confirm the chat tabs, active tab, prompt presets, per-tab overrides, and deleted exchange state restore from `.spyproject/ai-assistant/chat-sessions.json`.
+16. Export the conversation and confirm the Markdown contains model, chat mode, per-tab settings, editor context, and runtime metadata without the deleted exchange.
