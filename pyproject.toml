@@ -50,9 +50,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/andreaivancostantino/spyder-ai-chat"
-Repository = "https://github.com/andreaivancostantino/spyder-ai-chat"
-Issues = "https://github.com/andreaivancostantino/spyder-ai-chat/issues"
+Homepage = "https://github.com/costantinoai/spyder-ai-chat"
+Repository = "https://github.com/costantinoai/spyder-ai-chat"
+Issues = "https://github.com/costantinoai/spyder-ai-chat/issues"
 
 # Register the dockable chat panel plugin with Spyder.
 [project.entry-points."spyder.plugins"]

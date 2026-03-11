@@ -48,13 +48,13 @@ For **code completions** (inline suggestions while typing), pull a fast code mod
 ### 3. Install the plugin
 
 ```bash
-pip install git+https://github.com/YOUR_USER/spyder-ai-chat.git
+pip install git+https://github.com/costantinoai/spyder-ai-chat.git
 ```
 
 Or for development:
 
 ```bash
-git clone https://github.com/YOUR_USER/spyder-ai-chat.git
+git clone https://github.com/costantinoai/spyder-ai-chat.git
 cd spyder-ai-chat
 pip install -e .
 ```
@@ -260,7 +260,7 @@ src/spyder_ai_chat/
 ## Development
 
 ```bash
-git clone https://github.com/YOUR_USER/spyder-ai-chat.git
+git clone https://github.com/costantinoai/spyder-ai-chat.git
 cd spyder-ai-chat
 pip install -e ".[dev]"
 
