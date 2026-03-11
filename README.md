@@ -186,15 +186,7 @@ src/spyder_ai_assistant/
 
 ## Development
 
-```bash
-git clone https://github.com/costantinoai/spyder-ai-assistant.git
-cd spyder-ai-assistant
-pip install -e ".[dev]"
-pytest          # run tests
-spyder          # launch with the plugin
-```
-
-Requires `spyder >= 6.0.0`, `ollama >= 0.4.0`, and Python 3.11+. Pygments (for syntax highlighting) ships with Spyder.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, release process, and how to contribute.
 
 ---
 
@@ -239,12 +231,6 @@ A redesigned chat panel with better typography and smoother streaming. Tables an
 Multi-step task execution where the AI plans and applies changes across multiple files (with approval gates). Git-aware context that includes recent diffs and branch information in the AI's awareness.
 
 ---
-
-## Contributing
-
-This project is in early alpha. It works on my machine, but it hasn't been widely tested yet. If you try it out, I'd genuinely appreciate hearing about your experience — what works, what breaks, what's missing.
-
-Open an issue at [github.com/costantinoai/spyder-ai-assistant/issues](https://github.com/costantinoai/spyder-ai-assistant/issues) for bug reports, feature requests, or general feedback. Pull requests are welcome too.
 
 ---
 
