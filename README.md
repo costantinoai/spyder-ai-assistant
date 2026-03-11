@@ -285,8 +285,10 @@ Planned features and improvements, roughly in priority order.
 
 ### Deep Terminal & Kernel Integration *(top priority)*
 
-- **Live kernel variable access** — The AI can inspect variables in the running Spyder/IPython kernel: types, shapes, values, dtypes. Ask "what's in `df`?" and get a real answer, not a guess.
-- **Runtime-aware suggestions** — Completions and chat responses informed by the actual state of the session: loaded modules, defined functions, DataFrame columns, tensor shapes, fitted model parameters.
+> **Scope:** This applies to the **chat panel only**. Autocompletion stays lightweight — it only sees the code surrounding the cursor, not the kernel or variables.
+
+- **Live kernel variable access** — The chat AI can inspect variables in the running Spyder/IPython kernel: types, shapes, values, dtypes. Ask "what's in `df`?" and get a real answer, not a guess.
+- **Runtime-aware chat** — Chat responses informed by the actual state of the session: loaded modules, defined functions, DataFrame columns, tensor shapes, fitted model parameters.
 - **Error diagnosis from terminal output** — AI reads tracebacks and stderr from the IPython console and proactively suggests fixes, with one-click "apply fix" actions.
 - **Command execution** — Let the AI run commands in the IPython console on your behalf (with confirmation), e.g., "show me the first 5 rows of `df`" → executes `df.head()` and feeds the result back into the conversation.
 - **Variable explorer integration** — Bridge with Spyder's Variable Explorer so the AI knows what's in your workspace without you having to describe it.
