@@ -1,4 +1,4 @@
-# spyder-ai-chat
+# spyder-ai-assistant
 
 [![Alpha](https://img.shields.io/badge/status-alpha-orange)]()
 [![License: CC BY-NC 4.0](https://img.shields.io/badge/license-CC%20BY--NC%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/4.0/)
@@ -54,7 +54,7 @@ You'll want at least one model for chat. A separate smaller model for completion
 ### 3. Install the plugin
 
 ```bash
-pip install git+https://github.com/costantinoai/spyder-ai-chat.git
+pip install git+https://github.com/costantinoai/spyder-ai-assistant.git
 ```
 
 > Install into the same Python environment where Spyder lives (e.g., your conda env).
@@ -133,7 +133,7 @@ Without a GPU, Ollama falls back to CPU. Expect 1–3 tokens/sec on a 3B model �
 
 **Completions aren't appearing** — Check that they're enabled in Preferences > Completion and linting > AI Chat. The status bar should show "AI: model-name". If it says "AI: offline", Ollama isn't reachable. Check Spyder's Internal Console (View > Panes > Internal Console) for error messages.
 
-**Chat panel doesn't show up** — Look in View > Panes for "AI Chat". If it's not listed, the plugin may be installed in a different Python environment than Spyder. Verify with `python -c "import spyder_ai_chat; print('OK')"` and restart Spyder.
+**Chat panel doesn't show up** — Look in View > Panes for "AI Chat". If it's not listed, the plugin may be installed in a different Python environment than Spyder. Verify with `python -c "import spyder_ai_assistant; print('OK')"` and restart Spyder.
 
 **Slow responses** — Try a smaller or more aggressively quantized model. Check GPU usage with `nvidia-smi` or `rocm-smi`. The first request after startup is always slower while the model loads into VRAM.
 
@@ -156,7 +156,7 @@ spyder.completions →  AIChatCompletionProvider (SpyderCompletionProvider)
 Both share the same `OllamaClient` backend but operate independently. You can use chat without completions and vice versa.
 
 ```
-src/spyder_ai_chat/
+src/spyder_ai_assistant/
 ├── plugin.py                 # Main plugin: pane, menus, actions
 ├── completion_provider.py    # Completion provider: FIM completions
 ├── backend/
@@ -178,8 +178,8 @@ src/spyder_ai_chat/
 ## Development
 
 ```bash
-git clone https://github.com/costantinoai/spyder-ai-chat.git
-cd spyder-ai-chat
+git clone https://github.com/costantinoai/spyder-ai-assistant.git
+cd spyder-ai-assistant
 pip install -e ".[dev]"
 pytest          # run tests
 spyder          # launch with the plugin
@@ -235,7 +235,7 @@ Multi-step task execution where the AI plans and applies changes across multiple
 
 This project is in early alpha. It works on my machine, but it hasn't been widely tested yet. If you try it out, I'd genuinely appreciate hearing about your experience — what works, what breaks, what's missing.
 
-Open an issue at [github.com/costantinoai/spyder-ai-chat/issues](https://github.com/costantinoai/spyder-ai-chat/issues) for bug reports, feature requests, or general feedback. Pull requests are welcome too.
+Open an issue at [github.com/costantinoai/spyder-ai-assistant/issues](https://github.com/costantinoai/spyder-ai-assistant/issues) for bug reports, feature requests, or general feedback. Pull requests are welcome too.
 
 ---
 

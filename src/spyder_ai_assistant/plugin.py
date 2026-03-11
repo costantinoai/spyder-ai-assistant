@@ -2,7 +2,7 @@
 
 Registers the AI Chat dockable pane with Spyder's plugin system.
 This is the entry point discovered by Spyder via the pyproject.toml
-entry point: [spyder.plugins] ai_chat = "spyder_ai_chat.plugin:AIChatPlugin"
+entry point: [spyder.plugins] ai_chat = "spyder_ai_assistant.plugin:AIChatPlugin"
 
 Features:
 - Dockable chat panel with streaming Ollama responses
@@ -23,7 +23,7 @@ from spyder.api.plugin_registration.decorators import (
     on_plugin_available, on_plugin_teardown,
 )
 
-from spyder_ai_chat.utils.context import (
+from spyder_ai_assistant.utils.context import (
     get_editor_context,
     get_open_files_context,
     get_project_context,
@@ -31,9 +31,9 @@ from spyder_ai_chat.utils.context import (
     get_toolbar_context,
     build_action_prompt,
 )
-from spyder_ai_chat.widgets.chat_widget import ChatWidget
-from spyder_ai_chat.widgets.config_page import AIChatConfigPage
-from spyder_ai_chat.widgets.ghost_text import GhostTextManager
+from spyder_ai_assistant.widgets.chat_widget import ChatWidget
+from spyder_ai_assistant.widgets.config_page import AIChatConfigPage
+from spyder_ai_assistant.widgets.ghost_text import GhostTextManager
 
 logger = logging.getLogger(__name__)
 

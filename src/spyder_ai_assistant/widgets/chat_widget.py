@@ -28,10 +28,10 @@ from qtpy.QtWidgets import (
 
 from spyder.api.widgets.main_widget import PluginMainWidget
 
-from spyder_ai_chat.backend.worker import OllamaWorker
-from spyder_ai_chat.utils.context import build_system_context_block
-from spyder_ai_chat.widgets.chat_input import ChatInput
-from spyder_ai_chat.widgets.chat_display import ChatDisplay
+from spyder_ai_assistant.backend.worker import OllamaWorker
+from spyder_ai_assistant.utils.context import build_system_context_block
+from spyder_ai_assistant.widgets.chat_input import ChatInput
+from spyder_ai_assistant.widgets.chat_display import ChatDisplay
 
 logger = logging.getLogger(__name__)
 

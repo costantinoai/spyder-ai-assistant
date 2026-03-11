@@ -317,7 +317,7 @@ def _build_file_tree(root_path, max_depth=MAX_TREE_DEPTH,
 
     Produces output like:
         src/
-          spyder_ai_chat/
+          spyder_ai_assistant/
             plugin.py
             backend/
               client.py

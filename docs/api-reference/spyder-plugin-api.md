@@ -202,14 +202,14 @@ def shutdown(self):
 ```toml
 # pyproject.toml
 [project.entry-points."spyder.plugins"]
-ai_chat = "spyder_ai_chat.plugin:AIChatPlugin"
+ai_chat = "spyder_ai_assistant.plugin:AIChatPlugin"
 ```
 
 ### For completion providers:
 
 ```toml
 [project.entry-points."spyder.completions"]
-ai_chat = "spyder_ai_chat.completion_provider:AIChatCompletionProvider"
+ai_chat = "spyder_ai_assistant.completion_provider:AIChatCompletionProvider"
 ```
 
 Both can coexist in the same package.

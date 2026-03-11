@@ -16,7 +16,7 @@ import logging
 
 from qtpy.QtCore import QObject, Signal, QMutex, QMutexLocker
 
-from spyder_ai_chat.backend.client import OllamaClient
+from spyder_ai_assistant.backend.client import OllamaClient
 
 logger = logging.getLogger(__name__)
 

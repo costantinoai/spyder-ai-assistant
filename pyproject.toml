@@ -3,7 +3,7 @@ requires = ["setuptools>=64", "setuptools-scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "spyder-ai-chat"
+name = "spyder-ai-assistant"
 dynamic = ["version"]
 description = "AI chat and code completion plugin for Spyder IDE using local Ollama models"
 readme = "README.md"
@@ -50,19 +50,19 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/costantinoai/spyder-ai-chat"
-Repository = "https://github.com/costantinoai/spyder-ai-chat"
-Issues = "https://github.com/costantinoai/spyder-ai-chat/issues"
+Homepage = "https://github.com/costantinoai/spyder-ai-assistant"
+Repository = "https://github.com/costantinoai/spyder-ai-assistant"
+Issues = "https://github.com/costantinoai/spyder-ai-assistant/issues"
 
 # Register the dockable chat panel plugin with Spyder.
 [project.entry-points."spyder.plugins"]
-ai_chat = "spyder_ai_chat.plugin:AIChatPlugin"
+ai_chat = "spyder_ai_assistant.plugin:AIChatPlugin"
 
 # Register the AI completion provider with Spyder's completion system.
 # This is separate from the chat plugin — it handles inline code completions
 # via Ollama's FIM API and shows up in Completion and Linting preferences.
 [project.entry-points."spyder.completions"]
-ai_chat = "spyder_ai_chat.completion_provider:AIChatCompletionProvider"
+ai_chat = "spyder_ai_assistant.completion_provider:AIChatCompletionProvider"
 
 # Version is derived from git tags automatically.
 # Tag a release as v0.1.0, v0.2.0, etc. and setuptools-scm picks it up.

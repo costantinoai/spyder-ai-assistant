@@ -28,8 +28,8 @@ from spyder.plugins.completion.api import (
     SpyderCompletionProvider,
 )
 
-from spyder_ai_chat.backend.client import OllamaClient
-from spyder_ai_chat.widgets.status import AIChatCompletionStatus
+from spyder_ai_assistant.backend.client import OllamaClient
+from spyder_ai_assistant.widgets.status import AIChatCompletionStatus
 
 logger = logging.getLogger(__name__)
 

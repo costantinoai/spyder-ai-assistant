@@ -7,7 +7,7 @@
 #   4. This workflow builds and uploads to PyPI automatically
 #
 # Uses PyPI Trusted Publisher (OIDC) — no API tokens needed.
-# Configure once at: https://pypi.org/manage/project/spyder-ai-chat/settings/publishing/
+# Configure once at: https://pypi.org/manage/project/spyder-ai-assistant/settings/publishing/
 
 name: Publish to PyPI
 
