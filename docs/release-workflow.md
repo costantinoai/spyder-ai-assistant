@@ -15,7 +15,7 @@ The release workflow is pinned to the current Node 24-ready major versions of th
 - `actions/checkout@v6`
 - `actions/setup-python@v6`
 - `actions/upload-artifact@v6`
-- `actions/download-artifact@v5`
+- `actions/download-artifact@v8`
 - `pypa/gh-action-pypi-publish@release/v1`
 
 This avoids the GitHub-hosted runner warning about Node 20 action runtimes on release jobs.
