@@ -10,6 +10,8 @@ AI-powered code assistance for [Spyder IDE](https://www.spyder-ide.org/) using *
 - **Thinking/reasoning display** — Models that emit `<think>` blocks show a collapsible reasoning section above the response.
 - **Fully local** — Runs on your GPU via Ollama. Works offline, works air-gapped.
 
+![Chat panel with AI explaining a Python script](docs/screenshots/chat-panel.png)
+
 ---
 
 ## Quick Start
