@@ -2,9 +2,9 @@
 
 This project publishes from tags.
 
-Pushing a version tag such as `v0.2.0` triggers [.github/workflows/publish.yml](../.github/workflows/publish.yml), which:
+Pushing a version tag such as `vX.Y.Z` triggers [.github/workflows/publish.yml](../.github/workflows/publish.yml), which:
 
-1. builds the sdist and wheel
+1. builds the sdist and wheel from a clean tree
 2. publishes them to PyPI through trusted publishing
 3. creates a GitHub Release for the same tag
 
@@ -31,10 +31,15 @@ If you ever mirror this workflow to self-hosted runners, keep the runner version
 ```bash
 git checkout main
 git pull --ff-only
-git tag -a v0.2.0 -m "v0.2.0"
+python -m tools.release.build_dist
+git tag -a vX.Y.Z -m "vX.Y.Z"
 git push origin main
-git push origin v0.2.0
+git push origin vX.Y.Z
 ```
+
+The tracked build helper removes stale `build/`, `dist/`, and generated
+`.egg-info` directories before rebuilding. That avoids local contamination from
+older package names and keeps CI and local release checks aligned.
 
 ## Post-release checks
 
@@ -49,7 +54,7 @@ gh run watch --exit-status
 2. confirm the GitHub Release exists:
 
 ```bash
-gh release view v0.2.0
+gh release view vX.Y.Z
 ```
 
 3. confirm PyPI serves the new package:
@@ -58,4 +63,8 @@ gh release view v0.2.0
 python -m pip index versions spyder-ai-assistant
 ```
 
-If all three pass, the release path is healthy.
+4. reinstall the published package into the real `spyder-ai` environment and
+run the tracked live validation harnesses from
+[docs/validation-workflow.md](validation-workflow.md).
+
+If all four pass, the release path is healthy.

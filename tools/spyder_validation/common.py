@@ -1,0 +1,252 @@
+"""Shared helpers for live Spyder validation harnesses.
+
+These scripts run against a real Spyder session in the `spyder-ai`
+environment. They are intentionally small and explicit so the steps of each
+validation remain easy to follow in the individual harnesses.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sys
+import time
+from pathlib import Path
+
+from qtpy.QtCore import QTimer
+from qtpy.QtWidgets import QApplication
+
+from spyder.api.plugins import Plugins
+from spyder.app.mainwindow import MainWindow
+
+
+ARTIFACT_ROOT = Path("/tmp/spyder-ai-assistant-validation")
+DEFAULT_CHAT_MODEL = (
+    "huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q3_K_M"
+)
+
+
+def artifact_path(*parts):
+    """Return one artifact path under the shared validation root."""
+    path = ARTIFACT_ROOT.joinpath(*parts)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def wait_for(predicate, timeout_ms=5000, step_ms=50):
+    """Process Qt events until `predicate()` succeeds or timeout expires."""
+    app = QApplication.instance()
+    deadline = time.monotonic() + (timeout_ms / 1000.0)
+    while time.monotonic() < deadline:
+        app.processEvents()
+        value = predicate()
+        if value:
+            return value
+        time.sleep(step_ms / 1000.0)
+    app.processEvents()
+    return predicate()
+
+
+def _close_main_window(window):
+    """Shut Spyder down through its normal plugin teardown path."""
+    if window.closing(cancelable=False, close_immediately=True):
+        QApplication.instance().quit()
+
+
+def _terminate_process(window):
+    """Exit the process with the recorded validation status."""
+    exit_code = int(getattr(window, "_validation_exit_code", 1))
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code)
+
+
+def finalize(window):
+    """Close Spyder cleanly after a validation run."""
+    app = QApplication.instance()
+    if not getattr(window, "_validation_exit_hook_connected", False):
+        app.aboutToQuit.connect(lambda: _terminate_process(window))
+        window._validation_exit_hook_connected = True
+    QTimer.singleShot(0, lambda: _close_main_window(window))
+    QTimer.singleShot(1500, lambda: app.quit())
+    QTimer.singleShot(10000, lambda: os._exit(1))
+
+
+def write_json(path, payload):
+    """Write one JSON artifact with pretty formatting."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def record_validation_result(window, path, payload):
+    """Persist one validation result and record the intended exit code."""
+    window._validation_exit_code = 1 if payload.get("errors") else 0
+    write_json(path, payload)
+
+
+def write_file(path, text):
+    """Write a small text fixture file used by validation harnesses."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def get_ai_plugin(window):
+    """Return the dockable chat plugin instance."""
+    return window.get_plugin("ai_chat")
+
+
+def get_chat_widget(window):
+    """Return the main chat widget."""
+    return get_ai_plugin(window).get_widget()
+
+
+def get_editor_plugin(window):
+    """Return the Editor plugin or raise with a clear message."""
+    plugin = window.get_plugin(Plugins.Editor)
+    if plugin is None:
+        raise RuntimeError("Editor plugin not available")
+    return plugin
+
+
+def get_ipython_plugin(window):
+    """Return the IPython Console plugin or raise with a clear message."""
+    plugin = window.get_plugin(Plugins.IPythonConsole)
+    if plugin is None:
+        raise RuntimeError("IPython Console plugin not available")
+    return plugin
+
+
+def get_projects_plugin(window):
+    """Return the Projects plugin or raise with a clear message."""
+    plugin = window.get_plugin(Plugins.Projects)
+    if plugin is None:
+        raise RuntimeError("Projects plugin not available")
+    return plugin
+
+
+def get_provider(window):
+    """Return the AI completion provider instance."""
+    completions = window.get_plugin(Plugins.Completions)
+    provider = completions.get_provider("ai_chat")
+    if provider is None:
+        raise RuntimeError("AI completion provider not available")
+    return provider
+
+
+def get_runtime_service(window):
+    """Return the runtime context service owned by the plugin."""
+    return get_ai_plugin(window)._runtime_context
+
+
+def get_current_shell(window):
+    """Return the active shellwidget."""
+    shell = get_ipython_plugin(window).get_current_shellwidget()
+    if shell is None:
+        raise RuntimeError("No active shellwidget")
+    return shell
+
+
+def select_model(widget, model_name):
+    """Select one chat model from the widget dropdown."""
+    if not wait_for(lambda: widget.model_combo.count() > 0, timeout_ms=20000):
+        raise RuntimeError("Chat model list did not load")
+
+    for index in range(widget.model_combo.count()):
+        if widget.model_combo.itemData(index) == model_name:
+            widget.model_combo.setCurrentIndex(index)
+            QApplication.instance().processEvents()
+            return True
+    raise RuntimeError(f"Requested chat model not found: {model_name}")
+
+
+def set_input_text(widget, text):
+    """Replace the current chat input text."""
+    widget.chat_input.setPlainText(text)
+    QApplication.instance().processEvents()
+
+
+def wait_for_assistant_turn(widget, session, previous_count, timeout_ms=120000):
+    """Wait until a chat turn appends one assistant response."""
+    wait_for(lambda: widget._generating, timeout_ms=5000, step_ms=50)
+    return wait_for(
+        lambda: (
+            not widget._generating
+            and len(session.messages) >= previous_count + 2
+            and session.messages[-1].get("role") == "assistant"
+        ),
+        timeout_ms=timeout_ms,
+        step_ms=200,
+    )
+
+
+def send_prompt(widget, prompt, timeout_ms=120000):
+    """Send one normal prompt and return the assistant reply."""
+    session = widget._active_session
+    previous_count = len(session.messages)
+    set_input_text(widget, prompt)
+    widget.send_btn.click()
+    completed = wait_for_assistant_turn(
+        widget,
+        session,
+        previous_count,
+        timeout_ms=timeout_ms,
+    )
+    if not completed:
+        raise RuntimeError("Timed out waiting for prompt response")
+    return session.messages[-1]["content"]
+
+
+def schedule_validation(run_validation, attr_name, delay_ms=3500):
+    """Patch `MainWindow.post_visible_setup` to run one validation callback."""
+    original_post_visible_setup = MainWindow.post_visible_setup
+
+    def _patched_post_visible_setup(self, *args, **kwargs):
+        result = original_post_visible_setup(self, *args, **kwargs)
+        if not getattr(self, attr_name, False):
+            setattr(self, attr_name, True)
+            QTimer.singleShot(delay_ms, lambda: run_validation(self))
+        return result
+
+    MainWindow.post_visible_setup = _patched_post_visible_setup
+
+
+def run_spyder_validation(config_dir, filter_log, run_validation, attr_name,
+                          delay_ms=3500):
+    """Launch Spyder and schedule one validation callback after startup."""
+    config_dir = Path(config_dir)
+    if config_dir.exists():
+        shutil.rmtree(config_dir)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    schedule_validation(run_validation, attr_name=attr_name, delay_ms=delay_ms)
+
+    sys.argv = [
+        "spyder",
+        "--new-instance",
+        "--safe-mode",
+        "--conf-dir",
+        str(config_dir),
+        "--debug-info",
+        "verbose",
+        "--debug-output",
+        "terminal",
+        "--filter-log",
+        filter_log,
+    ]
+
+    from spyder.app.start import main as spyder_main
+
+    previous_pytest = os.environ.get("SPYDER_PYTEST")
+    os.environ["SPYDER_PYTEST"] = "1"
+    try:
+        window = spyder_main()
+        if window is None:
+            raise RuntimeError("Spyder did not create a main window")
+        return QApplication.instance().exec_()
+    finally:
+        if previous_pytest is None:
+            os.environ.pop("SPYDER_PYTEST", None)
+        else:
+            os.environ["SPYDER_PYTEST"] = previous_pytest

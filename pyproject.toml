@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=64", "setuptools-scm>=8", "wheel"]
+requires = ["setuptools>=77", "setuptools-scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,8 @@ name = "spyder-ai-assistant"
 dynamic = ["version"]
 description = "AI chat and code completion plugin for Spyder IDE using local Ollama models"
 readme = "README.md"
-license = {text = "CC-BY-NC-4.0"}
+license = "CC-BY-NC-4.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [
     {name = "Andrea Ivan Costantino"},
@@ -27,7 +28,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: Education",
     "Intended Audience :: Science/Research",
-    "License :: Other/Proprietary License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -47,6 +47,7 @@ dev = [
     "pytest-qt",
     "build",
     "twine",
+    "PyYAML",
 ]
 
 [project.urls]

@@ -215,7 +215,7 @@ src/spyder_ai_assistant/
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and contribution guidance, [docs/runtime-inspection.md](docs/runtime-inspection.md) for the runtime bridge design and validation checklist, [docs/chat-workflows.md](docs/chat-workflows.md) for the current chat UX, and [docs/release-workflow.md](docs/release-workflow.md) for the tag-driven release pipeline and post-release checks.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and contribution guidance, [docs/runtime-inspection.md](docs/runtime-inspection.md) for the runtime bridge design and validation checklist, [docs/chat-workflows.md](docs/chat-workflows.md) for the current chat UX, [docs/validation-workflow.md](docs/validation-workflow.md) for the tracked live Spyder validation harnesses, and [docs/release-workflow.md](docs/release-workflow.md) for the tag-driven release pipeline and post-release checks.
 
 ---
 
