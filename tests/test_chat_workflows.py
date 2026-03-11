@@ -34,6 +34,12 @@ def test_build_export_markdown_includes_metadata_and_messages():
         ],
         model_name="qwen-test",
         prompt_preset_label="Documentation",
+        inference_metadata={
+            "temperature": 0.2,
+            "temperature_source": "override",
+            "num_predict": 256,
+            "num_predict_source": "override",
+        },
         context_label="main.py",
         runtime_context={
             "status": "ready",
@@ -48,6 +54,8 @@ def test_build_export_markdown_includes_metadata_and_messages():
     assert "# AI Chat Export" in markdown
     assert "**Model:** qwen-test" in markdown
     assert "**Chat mode:** Documentation" in markdown
+    assert "**Temperature:** 0.2 (tab override)" in markdown
+    assert "**Max tokens:** 256 (tab override)" in markdown
     assert "**Editor context:** main.py" in markdown
     assert "**Runtime status:** ready" in markdown
     assert "**Runtime variables tracked:** 1" in markdown

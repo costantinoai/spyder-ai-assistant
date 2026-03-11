@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from spyder_ai_assistant.utils.chat_inference import (
+    describe_chat_inference_source,
+    format_chat_temperature,
+)
+
 
 DEBUG_ACTION_LABELS = {
     "explain_error": "Explain Error",
@@ -66,7 +71,8 @@ def build_debug_prompt(action, user_text="", context_label=""):
 
 
 def build_export_markdown(messages, model_name="", context_label="",
-                          runtime_context=None, prompt_preset_label=""):
+                          runtime_context=None, prompt_preset_label="",
+                          inference_metadata=None):
     """Render one conversation plus metadata as Markdown."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = [f"# AI Chat Export — {timestamp}\n"]
@@ -75,6 +81,8 @@ def build_export_markdown(messages, model_name="", context_label="",
         lines.append(f"**Model:** {model_name}")
     if prompt_preset_label:
         lines.append(f"**Chat mode:** {prompt_preset_label}")
+    inference_lines = _build_inference_metadata_lines(inference_metadata or {})
+    lines.extend(inference_lines)
     if context_label:
         lines.append(f"**Editor context:** {context_label}")
 
@@ -92,6 +100,32 @@ def build_export_markdown(messages, model_name="", context_label="",
             lines.append(f"## AI\n\n{content}\n")
 
     return "\n".join(lines)
+
+
+def _build_inference_metadata_lines(inference_metadata):
+    """Return exportable per-tab inference metadata lines when available."""
+    if not inference_metadata:
+        return []
+
+    temperature = inference_metadata.get("temperature")
+    temperature_source = describe_chat_inference_source(
+        inference_metadata.get("temperature_source")
+    )
+    num_predict = inference_metadata.get("num_predict")
+    num_predict_source = describe_chat_inference_source(
+        inference_metadata.get("num_predict_source")
+    )
+
+    if temperature is None or num_predict is None:
+        return []
+
+    return [
+        (
+            "**Temperature:** "
+            f"{format_chat_temperature(temperature)} ({temperature_source})"
+        ),
+        f"**Max tokens:** {int(num_predict)} ({num_predict_source})",
+    ]
 
 
 def _build_runtime_metadata_lines(runtime_context):

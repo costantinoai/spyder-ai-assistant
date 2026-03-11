@@ -39,6 +39,8 @@ The main entry points are:
 - `python -m tools.spyder_validation.run_chat_persistence_verify`
 - `python -m tools.spyder_validation.run_chat_prompt_preset_validation`
 - `python -m tools.spyder_validation.run_chat_prompt_preset_restore_validation`
+- `python -m tools.spyder_validation.run_chat_inference_controls_validation`
+- `python -m tools.spyder_validation.run_chat_inference_controls_restore_validation`
 - `python -m tools.spyder_validation.run_chat_history_browser_validation`
 - `python -m tools.spyder_validation.run_chat_history_browser_restore_validation`
 - `python -m tools.spyder_validation.run_chat_use_console_smoke`
@@ -54,6 +56,8 @@ DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_persistence
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_persistence_verify
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_prompt_preset_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_prompt_preset_restore_validation
+DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_inference_controls_validation
+DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_inference_controls_restore_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_history_browser_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_history_browser_restore_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_use_console_smoke
@@ -104,6 +108,22 @@ it clears stale local build artifacts before rebuilding the sdist and wheel.
 - reopen Spyder against the same project after preset selection
 - confirm restored tabs keep their saved preset ids
 - confirm the shared toolbar combo follows the restored active tab
+
+### Inference-controls validation
+
+- open the real per-tab `Settings` dialog from the chat pane
+- apply temperature and max-token overrides to one tab
+- exercise reset-to-global-defaults on another tab
+- send real prompts and confirm different resolved request options per tab
+- verify saved session state contains the expected override fields
+- confirm the live validation log records the resolved options and saved overrides
+
+### Inference-controls restore validation
+
+- reopen Spyder against the same project after saving per-tab overrides
+- confirm restored tabs keep their saved override fields
+- confirm the `Settings` button and tooltip follow the restored active tab
+- confirm resolved request options after restart still match the saved state
 
 ### History browser validation
 
@@ -156,6 +176,8 @@ For example:
   and delete log lines
 - prompt-preset tests should show preset selection log lines and restored
   preset ids in the JSON artifact
+- inference-control tests should show per-tab resolved options, reset behavior,
+  and restored override state in both the log and JSON artifacts
 - restore tests should show the expected save and restore counts
 
 ## Release usage

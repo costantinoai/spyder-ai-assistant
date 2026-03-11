@@ -48,6 +48,29 @@ The shipped presets are:
 - `Explanation` for teaching and understanding code
 - `Documentation` for docstrings, usage notes, and polished written guidance
 
+## Per-tab inference settings
+
+The active chat tab also owns its own optional inference overrides.
+
+Controls:
+
+- `Settings` button in the chat pane
+- `Chat Settings...` action in the pane options menu
+
+Available overrides:
+
+- temperature
+- max tokens
+
+Behavior:
+
+- overrides apply only to the active chat session
+- unchecked values fall back to the global Preferences defaults
+- switching tabs updates the `Settings` button tooltip to match the active tab
+- tabs with active overrides show `Settings*`
+- reopening or duplicating a saved session preserves its saved overrides
+- resetting a tab back to global defaults clears the saved override fields
+
 ## Session persistence and history
 
 Chat sessions persist automatically.
@@ -64,6 +87,7 @@ The persisted payload keeps:
 - tab titles
 - visible user/assistant message history
 - the selected prompt preset per tab
+- per-tab temperature and max-token overrides
 - a broader history archive for saved sessions in the current scope
 
 Hidden runtime tool requests are not written into saved history.
@@ -134,6 +158,7 @@ Chat export now writes Markdown with:
 - timestamp
 - model
 - chat mode
+- resolved per-tab temperature and max-token settings
 - editor context label
 - runtime status metadata
 
@@ -149,6 +174,7 @@ Useful log lines include:
 - `Saved 2 chat session(s) to ...`
 - `Chat prompt preset set to Debugging for session ...`
 - `Chat prompt preset set to Documentation for session ...`
+- `Updated chat settings for session ...: temperature=0.2 (tab override), max_tokens=128 (tab override)`
 - `Building chat system prompt with preset debugging for session ...`
 - `Built chat history browser with 2 saved session(s)`
 - `History browser selected action 'open' for session ...`
@@ -163,6 +189,7 @@ Useful log lines include:
 - `Applied chat code at the current cursor position`
 - `Applied chat code by replacing the current editor selection`
 - `Regenerating the last assistant answer for the active chat tab`
+- `Dispatching chat request for session ... with options {'temperature': 0.2, 'num_predict': 128}`
 - `Exported chat session to ...`
 
 ## Manual validation checklist
@@ -176,6 +203,8 @@ Useful log lines include:
 7. Send a normal prompt, click `Regenerate`, and confirm the active tab still has one user message and one assistant answer for that turn.
 8. Use the code-block apply actions in an editor and confirm `Insert at cursor` and `Replace selection` behave differently.
 9. Set one tab to `Debugging`, open a second tab, set it to `Documentation`, then switch between tabs and confirm the toolbar selector follows the active tab.
-10. Click `History`, confirm the browser shows the current scope, reopen a saved session, duplicate another one, and delete a saved session.
-11. Close and reopen Spyder with the same project open, then confirm the chat tabs, active tab, and prompt presets restore from `.spyproject/ai-assistant/chat-sessions.json`.
-12. Export the conversation and confirm the Markdown contains model, chat mode, editor context, and runtime metadata.
+10. Open `Settings` on one tab, set a low temperature and low max-token override, then confirm the button changes to `Settings*` and its tooltip shows the overridden values.
+11. Open `Settings` on another tab, set custom values, then click `Use Global Defaults` and confirm the button returns to `Settings`.
+12. Click `History`, confirm the browser shows the current scope, reopen a saved session, duplicate another one, and delete a saved session.
+13. Close and reopen Spyder with the same project open, then confirm the chat tabs, active tab, prompt presets, and per-tab overrides restore from `.spyproject/ai-assistant/chat-sessions.json`.
+14. Export the conversation and confirm the Markdown contains model, chat mode, per-tab settings, editor context, and runtime metadata.

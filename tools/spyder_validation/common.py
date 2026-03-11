@@ -23,6 +23,7 @@ from spyder.app.mainwindow import MainWindow
 from spyder_ai_assistant.utils.prompt_library import (
     normalize_chat_prompt_preset,
 )
+from spyder_ai_assistant.widgets.chat_settings_dialog import ChatSettingsDialog
 
 
 ARTIFACT_ROOT = Path("/tmp/spyder-ai-assistant-validation")
@@ -50,6 +51,21 @@ def wait_for(predicate, timeout_ms=5000, step_ms=50):
         time.sleep(step_ms / 1000.0)
     app.processEvents()
     return predicate()
+
+
+def wait_for_dialog(dialog_type, timeout_ms=3000, step_ms=50):
+    """Return the first visible dialog of one type, if it appears."""
+    return wait_for(
+        lambda: next(
+            (
+                widget for widget in QApplication.topLevelWidgets()
+                if isinstance(widget, dialog_type) and widget.isVisible()
+            ),
+            None,
+        ),
+        timeout_ms=timeout_ms,
+        step_ms=step_ms,
+    )
 
 
 def _close_main_window(window):
@@ -175,6 +191,65 @@ def select_prompt_preset(widget, preset_id):
             QApplication.instance().processEvents()
             return normalized
     raise RuntimeError(f"Requested chat prompt preset not found: {normalized}")
+
+
+def apply_chat_settings(widget, temperature_override=None,
+                        max_tokens_override=None, use_defaults=False):
+    """Open the real chat settings dialog and apply one per-tab state."""
+    state = {"error": None}
+
+    def _configure_dialog(attempt=0):
+        dialog = next(
+            (
+                top_level for top_level in QApplication.topLevelWidgets()
+                if isinstance(top_level, ChatSettingsDialog)
+                and top_level.isVisible()
+            ),
+            None,
+        )
+        if dialog is None:
+            if attempt < 40:
+                QTimer.singleShot(50, lambda: _configure_dialog(attempt + 1))
+            else:
+                state["error"] = "Chat settings dialog did not open"
+            return
+
+        try:
+            if use_defaults:
+                dialog.reset_btn.click()
+            else:
+                dialog.temperature_checkbox.setChecked(
+                    temperature_override is not None
+                )
+                if temperature_override is not None:
+                    dialog.temperature_spin.setValue(float(temperature_override))
+
+                dialog.max_tokens_checkbox.setChecked(
+                    max_tokens_override is not None
+                )
+                if max_tokens_override is not None:
+                    dialog.max_tokens_spin.setValue(int(max_tokens_override))
+
+            QApplication.instance().processEvents()
+            dialog.accept()
+        except Exception as error:  # pragma: no cover - live harness guard
+            state["error"] = str(error)
+
+    QTimer.singleShot(50, _configure_dialog)
+    widget.chat_settings_btn.click()
+    closed = wait_for(
+        lambda: not any(
+            isinstance(top_level, ChatSettingsDialog) and top_level.isVisible()
+            for top_level in QApplication.topLevelWidgets()
+        ),
+        timeout_ms=5000,
+        step_ms=50,
+    )
+    if state["error"] is not None:
+        raise RuntimeError(state["error"])
+    if not closed:
+        raise RuntimeError("Chat settings dialog did not close")
+    QApplication.instance().processEvents()
 
 
 def set_input_text(widget, text):

@@ -30,6 +30,14 @@ from qtpy.QtWidgets import (
 from spyder.api.widgets.main_widget import PluginMainWidget
 
 from spyder_ai_assistant.backend.worker import OllamaWorker
+from spyder_ai_assistant.utils.chat_inference import (
+    describe_chat_inference_source,
+    format_chat_temperature,
+    make_chat_inference_record,
+    normalize_chat_max_tokens,
+    normalize_chat_temperature,
+    resolve_chat_inference_options,
+)
 from spyder_ai_assistant.utils.chat_persistence import (
     build_chat_session_history_rows,
     make_chat_session_record,
@@ -55,28 +63,11 @@ from spyder_ai_assistant.utils.chat_workflows import (
     build_export_markdown,
 )
 from spyder_ai_assistant.widgets.chat_input import ChatInput
+from spyder_ai_assistant.widgets.chat_settings_dialog import ChatSettingsDialog
 from spyder_ai_assistant.widgets.session_history_dialog import SessionHistoryDialog
 from spyder_ai_assistant.widgets.chat_display import ChatDisplay
 
 logger = logging.getLogger(__name__)
-
-
-def _normalize_chat_temperature(value):
-    """Normalize stored chat temperature values to Ollama's expected range.
-
-    The preferences UI historically exposed "temperature x10" values
-    (e.g. 5 meaning 0.5), while the runtime config used decimal floats.
-    Phase 1 keeps backward compatibility by accepting either format.
-    """
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return 0.5
-
-    if numeric > 2.0:
-        numeric = numeric / 10.0
-
-    return max(0.0, min(numeric, 2.0))
 
 
 class ChatSessionStore:
@@ -139,7 +130,8 @@ class ChatSession:
     _counter = 0
 
     def __init__(self, parent=None, title=None, messages=None, session_id=None,
-                 created_at=None, updated_at=None, prompt_preset_id=None):
+                 created_at=None, updated_at=None, prompt_preset_id=None,
+                 temperature_override=None, max_tokens_override=None):
         ChatSession._counter += 1
         default_title = title or f"Chat {ChatSession._counter}"
         record = make_chat_session_record(
@@ -149,6 +141,8 @@ class ChatSession:
             created_at=created_at,
             updated_at=updated_at,
             prompt_preset_id=prompt_preset_id,
+            temperature_override=temperature_override,
+            max_tokens_override=max_tokens_override,
         )
         self.display = ChatDisplay(parent)
         self.session_id = record["session_id"]
@@ -157,6 +151,8 @@ class ChatSession:
         self.created_at = record["created_at"]
         self.updated_at = record["updated_at"]
         self.prompt_preset_id = record["prompt_preset_id"]
+        self.temperature_override = record["temperature_override"]
+        self.max_tokens_override = record["max_tokens_override"]
 
     def touch(self):
         """Refresh the session updated timestamp after a state change."""
@@ -166,6 +162,8 @@ class ChatSession:
             session_id=self.session_id,
             created_at=self.created_at,
             prompt_preset_id=self.prompt_preset_id,
+            temperature_override=self.temperature_override,
+            max_tokens_override=self.max_tokens_override,
         )["updated_at"]
 
     def to_state(self):
@@ -177,6 +175,8 @@ class ChatSession:
             created_at=self.created_at,
             updated_at=self.updated_at,
             prompt_preset_id=self.prompt_preset_id,
+            temperature_override=self.temperature_override,
+            max_tokens_override=self.max_tokens_override,
         )
 
 
@@ -333,6 +333,11 @@ class ChatWidget(PluginMainWidget):
             text="Export Chat...",
             triggered=self._export_chat,
         )
+        chat_settings_action = self.create_action(
+            "ai_chat_tab_settings",
+            text="Chat Settings...",
+            triggered=self._open_chat_settings_dialog,
+        )
         history_action = self.create_action(
             "ai_chat_history",
             text="Chat History...",
@@ -341,6 +346,7 @@ class ChatWidget(PluginMainWidget):
         options_menu = self.get_options_menu()
         self.add_item_to_menu(refresh_action, menu=options_menu)
         self.add_item_to_menu(new_tab_action, menu=options_menu)
+        self.add_item_to_menu(chat_settings_action, menu=options_menu)
         self.add_item_to_menu(history_action, menu=options_menu)
         self.add_item_to_menu(export_action, menu=options_menu)
 
@@ -403,6 +409,10 @@ class ChatWidget(PluginMainWidget):
         button_layout = QHBoxLayout()
         self.new_btn = QPushButton("New")
         self.new_btn.setToolTip("Open a new chat tab")
+        self.chat_settings_btn = QPushButton("Settings")
+        self.chat_settings_btn.setToolTip(
+            "Adjust inference settings for the active chat tab"
+        )
         self.history_btn = QPushButton("History")
         self.history_btn.setToolTip("Browse saved chat sessions for the current scope")
         self.export_btn = QPushButton("Export")
@@ -411,6 +421,7 @@ class ChatWidget(PluginMainWidget):
         self.send_btn = QPushButton("Send")
         self.stop_btn.setEnabled(False)
         button_layout.addWidget(self.new_btn)
+        button_layout.addWidget(self.chat_settings_btn)
         button_layout.addWidget(self.history_btn)
         button_layout.addWidget(self.export_btn)
         button_layout.addStretch()
@@ -450,6 +461,7 @@ class ChatWidget(PluginMainWidget):
         self.send_btn.clicked.connect(self._send_message)
         self.stop_btn.clicked.connect(self._stop_generation)
         self.new_btn.clicked.connect(self._add_new_tab)
+        self.chat_settings_btn.clicked.connect(self._open_chat_settings_dialog)
         self.history_btn.clicked.connect(self._open_history_browser)
         self.export_btn.clicked.connect(self._export_chat)
         self.explain_error_btn.clicked.connect(
@@ -472,7 +484,7 @@ class ChatWidget(PluginMainWidget):
             self._on_prompt_preset_changed
         )
         self._tab_widget.currentChanged.connect(self._on_current_tab_changed)
-        self._sync_prompt_preset_combo()
+        self._sync_session_controls()
 
         # Start the worker thread and fetch available models
         self._thread.start()
@@ -530,10 +542,37 @@ class ChatWidget(PluginMainWidget):
         )
         self.prompt_preset_combo.blockSignals(False)
 
+    def _sync_chat_settings_button(self, session=None):
+        """Reflect the active session inference overrides in the settings button."""
+        if session is None:
+            session = self._active_session
+
+        if session is None:
+            self.chat_settings_btn.setText("Settings")
+            self.chat_settings_btn.setToolTip(
+                "Adjust inference settings for the active chat tab"
+            )
+            return
+
+        metadata = self._chat_option_metadata(session)
+        has_override = (
+            metadata["temperature_source"] == "override"
+            or metadata["num_predict_source"] == "override"
+        )
+        self.chat_settings_btn.setText("Settings*" if has_override else "Settings")
+        self.chat_settings_btn.setToolTip(
+            self._build_chat_settings_tooltip(metadata)
+        )
+
+    def _sync_session_controls(self, session=None):
+        """Refresh the shared per-tab controls from the active session."""
+        self._sync_prompt_preset_combo(session=session)
+        self._sync_chat_settings_button(session=session)
+
     def _on_current_tab_changed(self, index):
         """Update shared tab-scoped controls when the active tab changes."""
         del index
-        self._sync_prompt_preset_combo()
+        self._sync_session_controls()
 
     # --- Tab management ---
 
@@ -785,6 +824,7 @@ class ChatWidget(PluginMainWidget):
                         prompt_preset_label=get_chat_prompt_preset(
                             session.prompt_preset_id
                         )["label"],
+                        inference_metadata=self._chat_option_metadata(session),
                     )
                 )
             self.status_label.setText(
@@ -822,6 +862,104 @@ class ChatWidget(PluginMainWidget):
         )
         self._sync_prompt_preset_combo(session)
         self._notify_session_state_changed("prompt-preset")
+
+    def _chat_default_options(self):
+        """Return the normalized global chat defaults from preferences."""
+        return {
+            "temperature": normalize_chat_temperature(
+                self.get_conf("chat_temperature", default=0.5)
+            ),
+            "num_predict": normalize_chat_max_tokens(
+                self.get_conf("max_tokens", default=1024)
+            ),
+        }
+
+    def _chat_option_metadata(self, session=None):
+        """Return resolved request options plus source metadata for one tab."""
+        session = session or self._active_session
+        defaults = self._chat_default_options()
+        return resolve_chat_inference_options(
+            default_temperature=defaults["temperature"],
+            default_max_tokens=defaults["num_predict"],
+            temperature_override=getattr(session, "temperature_override", None),
+            max_tokens_override=getattr(session, "max_tokens_override", None),
+        )
+
+    def _build_chat_settings_tooltip(self, metadata):
+        """Return the active tab settings summary shown in the UI."""
+        return "\n".join(
+            [
+                "Adjust inference settings for the active chat tab.",
+                (
+                    "Temperature: "
+                    f"{format_chat_temperature(metadata['temperature'])} "
+                    f"({describe_chat_inference_source(metadata['temperature_source'])})"
+                ),
+                (
+                    "Max tokens: "
+                    f"{int(metadata['num_predict'])} "
+                    f"({describe_chat_inference_source(metadata['num_predict_source'])})"
+                ),
+            ]
+        )
+
+    def _create_chat_settings_dialog(self, session=None):
+        """Build the per-tab chat settings dialog for one session."""
+        session = session or self._active_session
+        overrides = make_chat_inference_record(
+            temperature_override=getattr(session, "temperature_override", None),
+            max_tokens_override=getattr(session, "max_tokens_override", None),
+        )
+        return ChatSettingsDialog(
+            session_title=getattr(session, "title", ""),
+            defaults=self._chat_default_options(),
+            overrides=overrides,
+            parent=self,
+        )
+
+    def _apply_chat_settings(self, session, overrides):
+        """Persist one set of per-tab inference overrides."""
+        normalized = make_chat_inference_record(
+            temperature_override=(overrides or {}).get("temperature_override"),
+            max_tokens_override=(overrides or {}).get("max_tokens_override"),
+        )
+        current = make_chat_inference_record(
+            temperature_override=getattr(session, "temperature_override", None),
+            max_tokens_override=getattr(session, "max_tokens_override", None),
+        )
+        if current == normalized:
+            self._sync_chat_settings_button(session)
+            return False
+
+        session.temperature_override = normalized["temperature_override"]
+        session.max_tokens_override = normalized["max_tokens_override"]
+        session.touch()
+        metadata = self._chat_option_metadata(session)
+        logger.info(
+            "Updated chat settings for session %s: temperature=%s (%s), "
+            "max_tokens=%d (%s)",
+            session.session_id,
+            format_chat_temperature(metadata["temperature"]),
+            describe_chat_inference_source(metadata["temperature_source"]),
+            int(metadata["num_predict"]),
+            describe_chat_inference_source(metadata["num_predict_source"]),
+        )
+        self._sync_chat_settings_button(session)
+        self._notify_session_state_changed("chat-settings")
+        return True
+
+    def _open_chat_settings_dialog(self):
+        """Open the per-tab chat settings dialog and save any accepted changes."""
+        session = self._active_session
+        if session is None:
+            return False
+
+        dialog = self._create_chat_settings_dialog(session)
+        if dialog.exec_() != dialog.Accepted:
+            self._sync_chat_settings_button(session)
+            return False
+
+        return self._apply_chat_settings(session, dialog.selected_overrides())
 
     # --- Public API (called by plugin) ---
 
@@ -929,6 +1067,8 @@ class ChatWidget(PluginMainWidget):
                 created_at=session_state.get("created_at"),
                 updated_at=session_state.get("updated_at"),
                 prompt_preset_id=session_state.get("prompt_preset_id"),
+                temperature_override=session_state.get("temperature_override"),
+                max_tokens_override=session_state.get("max_tokens_override"),
             )
             self._add_session(session, notify=False)
             session.display.rebuild_from_messages(session.messages)
@@ -1126,6 +1266,8 @@ class ChatWidget(PluginMainWidget):
             created_at=None if duplicate else session_state.get("created_at"),
             updated_at=None if duplicate else session_state.get("updated_at"),
             prompt_preset_id=session_state.get("prompt_preset_id"),
+            temperature_override=session_state.get("temperature_override"),
+            max_tokens_override=session_state.get("max_tokens_override"),
         )
         self._add_session(session, notify=True)
         session.display.rebuild_from_messages(session.messages)
@@ -1222,10 +1364,16 @@ class ChatWidget(PluginMainWidget):
         )
         session.display.start_assistant_message()
         self._set_generating(True)
+        options = self._chat_options(session)
+        logger.info(
+            "Dispatching chat request for session %s with options %s",
+            session.session_id,
+            options,
+        )
         self.sig_send_chat.emit(
             self._current_model,
             list(request_messages),
-            self._chat_options(),
+            options,
         )
         return True
 
@@ -1273,13 +1421,12 @@ class ChatWidget(PluginMainWidget):
 
         return system_prompt
 
-    def _chat_options(self):
-        """Return the current Ollama generation options for chat."""
+    def _chat_options(self, session=None):
+        """Return the resolved Ollama generation options for one chat tab."""
+        metadata = self._chat_option_metadata(session)
         return {
-            "temperature": _normalize_chat_temperature(
-                self.get_conf("chat_temperature", default=0.5)
-            ),
-            "num_predict": self.get_conf("max_tokens", default=1024),
+            "temperature": metadata["temperature"],
+            "num_predict": metadata["num_predict"],
         }
 
     def _regenerate_last_turn(self):

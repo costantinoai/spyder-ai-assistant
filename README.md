@@ -12,7 +12,7 @@ AI-powered code assistance for [Spyder IDE](https://www.spyder-ide.org/), runnin
 
 ## What it does
 
-**Chat panel** — A dockable pane where you talk to a local LLM about your code. It supports multi-tab sessions, per-tab chat modes, streams responses token by token, restores saved conversations, includes a history browser for reopening, duplicating, and deleting saved sessions, renders Markdown with syntax-highlighted code blocks, and gives you copy, insert-at-cursor, and replace-selection actions on every code snippet.
+**Chat panel** — A dockable pane where you talk to a local LLM about your code. It supports multi-tab sessions, per-tab chat modes, per-tab inference settings, streams responses token by token, restores saved conversations, includes a history browser for reopening, duplicating, and deleting saved sessions, renders Markdown with syntax-highlighted code blocks, and gives you copy, insert-at-cursor, and replace-selection actions on every code snippet.
 
 **Editor context awareness** — The AI automatically sees your current file, cursor position, selection, other open tabs, and your project's file tree. Right-click any selection in the editor to trigger actions like *Ask AI*, *Explain*, *Fix*, or *Add Docstring*.
 
@@ -88,9 +88,9 @@ Open via **View > Panes > AI Chat**. Type a message and press Enter.
 
 Each conversation lives in its own tab — click "+" to start a new one. Responses stream in real time, and code blocks come with syntax highlighting (Pygments, with automatic dark/light theme detection). You can copy any code block to your clipboard, insert it at the current caret, or replace the current editor selection directly from the chat.
 
-Models that support reasoning (those that emit `<think>` blocks) show their thinking process in a dimmed section above the response. You can switch models mid-conversation from the toolbar dropdown, choose a per-tab chat mode (`Coding`, `Debugging`, `Explanation`, or `Documentation`) from the toolbar preset selector, click Stop to cancel a response mid-stream, use `Regenerate` to rerun the last user turn on the active tab, and use Export to save any session as Markdown with model, chat mode, editor, and runtime metadata.
+Models that support reasoning (those that emit `<think>` blocks) show their thinking process in a dimmed section above the response. You can switch models mid-conversation from the toolbar dropdown, choose a per-tab chat mode (`Coding`, `Debugging`, `Explanation`, or `Documentation`) from the toolbar preset selector, open `Settings` to override temperature and max tokens for just the active tab, click Stop to cancel a response mid-stream, use `Regenerate` to rerun the last user turn on the active tab, and use Export to save any session as Markdown with model, chat mode, per-tab inference settings, editor, and runtime metadata.
 
-Chat sessions persist automatically. When a Spyder project is open, conversations are stored in `.spyproject/ai-assistant/chat-sessions.json` and restored when that project is reopened. When no project is active, the plugin falls back to a global session file in Spyder's config directory. The `History` button and `Chat History...` menu entry let you browse saved sessions in the current scope, reopen one into a tab, duplicate it into a new branch of the conversation, or delete it from the archive.
+Chat sessions persist automatically. When a Spyder project is open, conversations are stored in `.spyproject/ai-assistant/chat-sessions.json` and restored when that project is reopened. When no project is active, the plugin falls back to a global session file in Spyder's config directory. The `History` button and `Chat History...` menu entry let you browse saved sessions in the current scope, reopen one into a tab, duplicate it into a new branch of the conversation, or delete it from the archive. The selected chat mode plus any per-tab temperature or max-token override also persist with the session.
 
 When a question depends on your live session, the chat can inspect the active kernel in a read-only way. That includes:
 
@@ -108,6 +108,8 @@ The chat toolbar also exposes the active kernel state without attaching runtime 
 - `Use Variables` asks the model to inspect the current variable state only when needed.
 - `Use Console` asks the model to inspect recent visible console output.
 - `Regenerate` removes the last assistant answer on the active tab and reruns the last user turn.
+
+The `Settings` button applies only to the active tab. A debugging tab can run with a low temperature and short responses while a drafting tab keeps the global defaults or uses a higher-temperature override. Changing one tab does not mutate the plugin-wide preferences.
 
 ### Editor integration
 
@@ -136,7 +138,7 @@ The plugin uses Ollama's FIM (Fill-in-Middle) API for models that support it, wh
 
 All settings live in Spyder's **Preferences** dialog.
 
-**Preferences > AI Chat** covers the Ollama server URL, chat and completion model names, temperature, max tokens, keyboard shortcuts, the base system prompt, and the action prompt templates (which support `{filename}` and `{code}` placeholders). The active tab's chat mode is selected directly from the chat toolbar and persists with the session.
+**Preferences > AI Chat** covers the Ollama server URL, chat and completion model names, temperature, max tokens, keyboard shortcuts, the base system prompt, and the action prompt templates (which support `{filename}` and `{code}` placeholders). The active tab's chat mode and per-tab inference overrides are controlled directly from the chat pane and persist with the session without changing these global defaults.
 
 **Preferences > Completion and linting > AI Chat** has completion-specific settings: enable/disable toggle, model selection, temperature, max tokens, and debounce delay.
 
@@ -200,6 +202,7 @@ src/spyder_ai_assistant/
 │   └── worker.py             # OllamaWorker: QThread for streaming
 ├── utils/
 │   ├── context.py            # Editor/project context + prompt assembly
+│   ├── chat_inference.py     # Per-tab chat option normalization/resolution
 │   ├── chat_persistence.py   # Project/global chat session storage
 │   ├── prompt_library.py     # Built-in per-tab chat modes
 │   ├── runtime_bridge.py     # Read-only runtime inspection protocol
@@ -208,6 +211,7 @@ src/spyder_ai_assistant/
 │   ├── chat_widget.py        # Chat pane: tabs, toolbar, input
 │   ├── chat_display.py       # Message rendering: Markdown, highlighting
 │   ├── chat_input.py         # Auto-resizing input text area
+│   ├── chat_settings_dialog.py  # Per-tab chat settings UI
 │   ├── config_page.py        # Preferences page
 │   ├── ghost_text.py         # Ghost text overlay for completions
 │   ├── session_history_dialog.py  # Saved-session browser UI
@@ -262,7 +266,7 @@ Every tunable aspect of the plugin exposed through Spyder's Preferences: context
 
 ### UI and experience
 
-A redesigned chat panel with better typography and smoother streaming. Tables and LaTeX math rendering in responses. Full-text search across all chat sessions. A prompt templates library for common tasks. Token usage and cost display for cloud providers.
+A redesigned chat panel with better typography and smoother streaming. Tables and LaTeX math rendering in responses. Full-text search across all chat sessions. A custom prompt templates library beyond the built-in shipped chat modes. Token usage and cost display for cloud providers.
 
 ### Agent and workflow features
 

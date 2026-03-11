@@ -21,6 +21,9 @@ from uuid import uuid4
 
 from spyder.config.base import get_conf_path
 
+from spyder_ai_assistant.utils.chat_inference import (
+    make_chat_inference_record,
+)
 from spyder_ai_assistant.utils.prompt_library import (
     normalize_chat_prompt_preset,
 )
@@ -28,7 +31,7 @@ from spyder_ai_assistant.utils.prompt_library import (
 logger = logging.getLogger(__name__)
 
 
-CHAT_SESSION_STATE_VERSION = 3
+CHAT_SESSION_STATE_VERSION = 4
 GLOBAL_CHAT_STATE_FILENAME = "spyder-ai-assistant-chat-sessions.json"
 PROJECT_CHAT_STATE_RELATIVE_PATH = (
     ".spyproject/ai-assistant/chat-sessions.json"
@@ -44,7 +47,9 @@ def get_chat_session_storage_path(project_path=None):
 
 def make_chat_session_record(title="", messages=None, session_id=None,
                              created_at=None, updated_at=None,
-                             prompt_preset_id=None):
+                             prompt_preset_id=None,
+                             temperature_override=None,
+                             max_tokens_override=None):
     """Return one normalized persisted chat session record."""
     normalized_messages = _normalize_messages(messages or [])
     normalized_title = title if isinstance(title, str) else ""
@@ -59,6 +64,10 @@ def make_chat_session_record(title="", messages=None, session_id=None,
         "created_at": created,
         "updated_at": updated,
         "prompt_preset_id": normalize_chat_prompt_preset(prompt_preset_id),
+        **make_chat_inference_record(
+            temperature_override=temperature_override,
+            max_tokens_override=max_tokens_override,
+        ),
     }
 
 
@@ -208,6 +217,8 @@ def _normalize_sessions(sessions):
                 created_at=session.get("created_at"),
                 updated_at=session.get("updated_at"),
                 prompt_preset_id=session.get("prompt_preset_id"),
+                temperature_override=session.get("temperature_override"),
+                max_tokens_override=session.get("max_tokens_override"),
             )
         )
 

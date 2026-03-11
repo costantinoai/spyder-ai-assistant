@@ -61,6 +61,8 @@ def test_load_chat_session_state_normalizes_legacy_payload(tmp_path):
     assert session["created_at"]
     assert session["updated_at"]
     assert session["prompt_preset_id"] == DEFAULT_CHAT_PROMPT_PRESET
+    assert session["temperature_override"] is None
+    assert session["max_tokens_override"] is None
 
     assert state["history"][0]["session_id"] == session["session_id"]
 
@@ -76,6 +78,8 @@ def test_save_chat_session_state_writes_sessions_and_history(tmp_path):
                 "created_at": "2026-03-11T12:00:00Z",
                 "updated_at": "2026-03-11T12:05:00Z",
                 "prompt_preset_id": "debugging",
+                "temperature_override": 0.2,
+                "max_tokens_override": 512,
                 "messages": [
                     {"role": "user", "content": "hello"},
                     {"role": "assistant", "content": "world"},
@@ -90,6 +94,8 @@ def test_save_chat_session_state_writes_sessions_and_history(tmp_path):
                 "created_at": "2026-03-10T09:00:00Z",
                 "updated_at": "2026-03-10T09:30:00Z",
                 "prompt_preset_id": "documentation",
+                "temperature_override": None,
+                "max_tokens_override": 2048,
                 "messages": [
                     {"role": "user", "content": "alpha"},
                     {"role": "assistant", "content": "beta"},
@@ -111,7 +117,11 @@ def test_save_chat_session_state_writes_sessions_and_history(tmp_path):
         "archived-session",
     ]
     assert payload["sessions"][0]["prompt_preset_id"] == "debugging"
+    assert payload["sessions"][0]["temperature_override"] == 0.2
+    assert payload["sessions"][0]["max_tokens_override"] == 512
     assert payload["history"][1]["prompt_preset_id"] == "documentation"
+    assert payload["history"][1]["temperature_override"] is None
+    assert payload["history"][1]["max_tokens_override"] == 2048
 
 
 def test_merge_chat_session_history_preserves_closed_sessions():
@@ -123,6 +133,8 @@ def test_merge_chat_session_history_preserves_closed_sessions():
                 "created_at": "2026-03-11T12:00:00Z",
                 "updated_at": "2026-03-11T12:10:00Z",
                 "prompt_preset_id": "documentation",
+                "temperature_override": 0.3,
+                "max_tokens_override": 256,
                 "messages": [{"role": "user", "content": "open"}],
             }
         ],
@@ -133,6 +145,8 @@ def test_merge_chat_session_history_preserves_closed_sessions():
                 "created_at": "2026-03-10T08:00:00Z",
                 "updated_at": "2026-03-10T08:30:00Z",
                 "prompt_preset_id": "debugging",
+                "temperature_override": None,
+                "max_tokens_override": None,
                 "messages": [{"role": "user", "content": "closed"}],
             }
         ],
@@ -153,6 +167,8 @@ def test_merge_chat_session_history_updates_matching_open_session():
                 "created_at": "2026-03-11T12:00:00Z",
                 "updated_at": "2026-03-11T12:10:00Z",
                 "prompt_preset_id": "documentation",
+                "temperature_override": 0.4,
+                "max_tokens_override": 256,
                 "messages": [
                     {"role": "user", "content": "new question"},
                     {"role": "assistant", "content": "new answer"},
@@ -166,6 +182,8 @@ def test_merge_chat_session_history_updates_matching_open_session():
                 "created_at": "2026-03-11T12:00:00Z",
                 "updated_at": "2026-03-11T12:05:00Z",
                 "prompt_preset_id": "coding",
+                "temperature_override": None,
+                "max_tokens_override": 1024,
                 "messages": [{"role": "user", "content": "old question"}],
             }
         ],
@@ -175,6 +193,8 @@ def test_merge_chat_session_history_updates_matching_open_session():
     assert merged[0]["title"] == "Updated title"
     assert merged[0]["messages"][-1]["content"] == "new answer"
     assert merged[0]["prompt_preset_id"] == "documentation"
+    assert merged[0]["temperature_override"] == 0.4
+    assert merged[0]["max_tokens_override"] == 256
 
 
 def test_remove_chat_session_from_history_removes_matching_id():
