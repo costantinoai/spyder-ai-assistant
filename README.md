@@ -1,5 +1,6 @@
 # spyder-ai-assistant
 
+[![PyPI](https://img.shields.io/pypi/v/spyder-ai-assistant)](https://pypi.org/project/spyder-ai-assistant/)
 [![Alpha](https://img.shields.io/badge/status-alpha-orange)]()
 [![License: CC BY-NC 4.0](https://img.shields.io/badge/license-CC%20BY--NC%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/4.0/)
 [![Spyder 6+](https://img.shields.io/badge/spyder-%E2%89%A5%206.0-red)](https://www.spyder-ide.org/)
@@ -52,6 +53,12 @@ You'll want at least one model for chat. A separate smaller model for completion
 | 12 GB+ | Qwen3 Coder 30B (3B active) | `ollama pull qooba/qwen3-coder-30b-a3b-instruct:q3_k_m` |
 
 ### 3. Install the plugin
+
+```bash
+pip install spyder-ai-assistant
+```
+
+Or from source:
 
 ```bash
 pip install git+https://github.com/costantinoai/spyder-ai-assistant.git
