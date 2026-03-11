@@ -6,17 +6,17 @@
 [![Spyder 6+](https://img.shields.io/badge/spyder-%E2%89%A5%206.0-red)](https://www.spyder-ide.org/)
 [![Python 3.11+](https://img.shields.io/badge/python-%E2%89%A5%203.11-blue)](https://www.python.org/)
 
-AI-powered code assistance for [Spyder IDE](https://www.spyder-ide.org/), running entirely on your machine through [Ollama](https://ollama.com/). No cloud services, no API keys, no data leaves your computer.
+AI-powered code assistance for [Spyder IDE](https://www.spyder-ide.org/), built local-first around [Ollama](https://ollama.com/) and now able to talk to OpenAI-compatible chat endpoints when you want a remote or self-hosted alternative. Local workflows stay fully offline, and runtime inspection remains read-only inside Spyder.
 
 ![Chat panel with AI explaining a Python script](docs/screenshots/chat-panel.png)
 
 ## What it does
 
-**Chat panel** — A dockable pane where you talk to a local LLM about your code. It supports multi-tab sessions, per-tab chat modes, per-tab inference settings, per-exchange deletion, streams responses token by token, restores saved conversations, includes a history browser for reopening, duplicating, and deleting saved sessions, renders Markdown with syntax-highlighted code blocks, and gives you copy, insert-at-cursor, and replace-selection actions on every code snippet.
+**Chat panel** — A dockable pane where you talk to a model about your code. It supports provider-aware model selection, multi-tab sessions, per-tab chat modes, per-tab inference settings, per-exchange deletion, streams responses token by token, restores saved conversations, includes a history browser for reopening, duplicating, and deleting saved sessions, renders Markdown with syntax-highlighted code blocks, and gives you copy, insert-at-cursor, and replace-selection actions on every code snippet.
 
 **Editor context awareness** — The AI automatically sees your current file, cursor position, selection, other open tabs, and your project's file tree. Right-click any selection in the editor to trigger actions like *Ask AI*, *Explain*, *Fix*, or *Add Docstring*.
 
-**Inline code completions** — Copilot-style ghost text appears as you type. Press Tab to accept, `Alt+Right` to accept the next word-like segment, `Alt+Shift+Right` to accept the next line, or keep typing through a matching suggestion without losing the remaining tail. The completion provider now keeps a small local LRU cache, trims suffix overlap before display, filters obviously repetitive output, and suppresses Spyder's native completion popup when a ghost suggestion is already active. You can also trigger completions manually with `Ctrl+Shift+Space`.
+**Inline code completions** — Copilot-style ghost text appears as you type. Press Tab to accept, `Alt+Right` to accept the next word-like segment, `Alt+Shift+Right` to accept the next line, or keep typing through a matching suggestion without losing the remaining tail. The completion provider now keeps a small local LRU cache, trims suffix overlap before display, filters obviously repetitive output, suppresses Spyder's native completion popup when a ghost suggestion is already active, pulls small relevant snippets from other open files, and can cycle through alternative candidates for the same target when you request another suggestion.
 
 ![Ghost text inline completions](docs/screenshots/ghost-completions.png)
 
@@ -26,7 +26,7 @@ AI-powered code assistance for [Spyder IDE](https://www.spyder-ide.org/), runnin
 
 **Debugging workflows** — The chat toolbar shows the active kernel state, and the quick-action row gives you one-click paths for `Explain Error`, `Fix Traceback`, `Use Variables`, `Use Console`, and `Regenerate`.
 
-Everything runs locally on your GPU through Ollama. It works offline, air-gapped, and with no setup beyond installing the plugin and pulling a model.
+By default, everything runs locally on your GPU through Ollama. It still works offline and air-gapped with no setup beyond installing the plugin and pulling a model, but the chat pane can also target an OpenAI-compatible endpoint when you configure one in Preferences.
 
 ---
 
@@ -74,9 +74,9 @@ pip install git+https://github.com/costantinoai/spyder-ai-assistant.git
 
 ### 4. Restart Spyder
 
-The plugin registers itself automatically. After restart, open the chat panel from **View > Panes > AI Chat**. Your Ollama models appear in the toolbar dropdown. Completions start working as you type.
+The plugin registers itself automatically. After restart, open the chat panel from **View > Panes > AI Chat**. Your available chat models appear in the toolbar dropdown, grouped by provider. Completions stay Ollama-backed and start working as you type.
 
-No configuration files, no API keys, no setup wizards.
+Optional: if you want to use a compatible chat endpoint, set its base URL and API key under **Preferences > AI Chat**.
 
 ---
 
@@ -88,7 +88,7 @@ Open via **View > Panes > AI Chat**. Type a message and press Enter.
 
 Each conversation lives in its own tab — click "+" to start a new one. Responses stream in real time, and code blocks come with syntax highlighting (Pygments, with automatic dark/light theme detection). You can copy any code block to your clipboard, insert it at the current caret, or replace the current editor selection directly from the chat.
 
-Models that support reasoning (those that emit `<think>` blocks) show their thinking process in a dimmed section above the response. You can switch models mid-conversation from the toolbar dropdown, choose a per-tab chat mode (`Coding`, `Debugging`, `Explanation`, or `Documentation`) from the toolbar preset selector, open `Settings` to override temperature and max tokens for just the active tab, delete any saved exchange from the active conversation through `Delete Turn`, click Stop to cancel a response mid-stream, use `Regenerate` to rerun the last user turn on the active tab, and use Export to save any session as Markdown with model, chat mode, per-tab inference settings, editor, and runtime metadata.
+Models that support reasoning (those that emit `<think>` blocks) show their thinking process in a dimmed section above the response. You can switch models mid-conversation from the toolbar dropdown, and that selector now lists provider-aware entries such as `[Ollama] ...` and `[OpenAI-compatible] ...`. You can choose a per-tab chat mode (`Coding`, `Debugging`, `Explanation`, or `Documentation`) from the toolbar preset selector, open `Settings` to override temperature and max tokens for just the active tab, delete any saved exchange from the active conversation through `Delete Turn`, click Stop to cancel a response mid-stream, use `Regenerate` to rerun the last user turn on the active tab, and use Export to save any session as Markdown with model, chat mode, per-tab inference settings, editor, and runtime metadata.
 
 Chat sessions persist automatically. When a Spyder project is open, conversations are stored in `.spyproject/ai-assistant/chat-sessions.json` and restored when that project is reopened. When no project is active, the plugin falls back to a global session file in Spyder's config directory. The `History` button and `Chat History...` menu entry let you browse saved sessions in the current scope, reopen one into a tab, duplicate it into a new branch of the conversation, or delete it from the archive. The selected chat mode plus any per-tab temperature or max-token override also persist with the session.
 
@@ -111,6 +111,12 @@ The chat toolbar also exposes the active kernel state without attaching runtime 
 - `Delete Turn` opens a browser for removing one saved exchange from the active tab.
 
 The `Settings` button applies only to the active tab. A debugging tab can run with a low temperature and short responses while a drafting tab keeps the global defaults or uses a higher-temperature override. Changing one tab does not mutate the plugin-wide preferences.
+
+Chat provider behavior is intentionally split:
+
+- chat can target Ollama or an OpenAI-compatible endpoint
+- inline completions remain Ollama-backed for now
+- the unified chat model selector shows provider metadata in the dropdown and tooltip
 
 ### Editor integration
 
@@ -137,9 +143,9 @@ Completions trigger automatically as you type with a 100 ms debounce. Ghost text
 - `Escape` to dismiss the current suggestion
 - normal typing when the next characters already match the suggestion
 
-The completion provider now does more than just call Ollama. It keeps a small local LRU cache for repeated prompts, trims suffix overlap before display so closing brackets or delimiters are not duplicated, filters clearly repetitive low-value outputs, and blocks Spyder's native completion popup when an AI ghost suggestion is already active. The status bar at the bottom still shows the active model name, `offline` if Ollama is not reachable, or `generating` while a completion is in flight, and its tooltip now includes local completion lifecycle counters for debugging and tuning.
+The completion provider now does more than just call Ollama. It keeps a small local LRU cache for repeated prompts, trims suffix overlap before display so closing brackets or delimiters are not duplicated, filters clearly repetitive low-value outputs, blocks Spyder's native completion popup when an AI ghost suggestion is already active, pulls small relevant snippets from other tracked open files, and remembers alternative candidates for the same target so repeated requests can cycle locally instead of always waiting for another model round trip. The status bar at the bottom still shows the active model name, `offline` if Ollama is not reachable, or `generating` while a completion is in flight, and its tooltip now includes local completion lifecycle counters for debugging and tuning.
 
-The plugin uses Ollama's FIM (Fill-in-Middle) API for models that support it, which produces better completions because the model can see code both before and after the cursor. For models without FIM support, it falls back to prefix-only generation automatically. The provider also suppresses low-value requests in bad contexts, such as extremely short prefixes or mid-line positions where substantial code already exists to the right of the cursor.
+The plugin uses Ollama's FIM (Fill-in-Middle) API for models that support it, which produces better completions because the model can see code both before and after the cursor. For models without FIM support, it falls back to prefix-only generation automatically. The provider also suppresses low-value requests in bad contexts, such as extremely short prefixes or mid-line positions where substantial code already exists to the right of the cursor. For richer suggestions, it can reuse just enough relevant context from other open files instead of blindly copying the whole editor set into every completion request.
 
 ---
 
@@ -147,7 +153,7 @@ The plugin uses Ollama's FIM (Fill-in-Middle) API for models that support it, wh
 
 All settings live in Spyder's **Preferences** dialog.
 
-**Preferences > AI Chat** covers the Ollama server URL, chat and completion model names, temperature, max tokens, keyboard shortcuts, the base system prompt, and the action prompt templates (which support `{filename}` and `{code}` placeholders). The completion keyboard section now includes the manual trigger shortcut plus the partial-accept shortcuts for next word and next line. The active tab's chat mode and per-tab inference overrides are controlled directly from the chat pane and persist with the session without changing these global defaults.
+**Preferences > AI Chat** covers the default chat provider, the Ollama server URL, the optional OpenAI-compatible base URL and API key, chat and completion model names, temperature, max tokens, keyboard shortcuts, the base system prompt, and the action prompt templates (which support `{filename}` and `{code}` placeholders). The completion keyboard section now includes the manual trigger shortcut plus the partial-accept shortcuts for next word and next line. The active tab's chat mode and per-tab inference overrides are controlled directly from the chat pane and persist with the session without changing these global defaults.
 
 **Preferences > Completion and linting > AI Chat** has completion-specific settings: enable/disable toggle, model selection, temperature, max tokens, and debounce delay.
 
@@ -174,7 +180,7 @@ Without a GPU, Ollama falls back to CPU. Expect 1–3 tokens/sec on a 3B model �
 
 ## Troubleshooting
 
-**"No models found" in the dropdown** — Ollama isn't running or has no models. Run `curl http://localhost:11434/api/tags` to check, then `ollama pull qwen2.5:7b` to grab a model.
+**"No models found" in the dropdown** — if you're using Ollama, check `curl http://localhost:11434/api/tags` and pull a model such as `ollama pull qwen2.5:7b`. If you're using a compatible endpoint, confirm the configured base URL answers on `/v1/models` and the API key is valid.
 
 **Completions aren't appearing** — Check that they're enabled in Preferences > Completion and linting > AI Chat. The status bar should show "AI: model-name". If it says "AI: offline", Ollama isn't reachable. Check Spyder's Internal Console (View > Panes > Internal Console) for error messages.
 
@@ -200,7 +206,10 @@ spyder.completions →  AIChatCompletionProvider (SpyderCompletionProvider)
                       Inline code completions, status bar widget
 ```
 
-Both share the same `OllamaClient` backend but operate independently. You can use chat without completions and vice versa.
+The chat and completion paths now share some context and prompt utilities, but the transports are intentionally separate:
+
+- chat uses a provider registry with Ollama plus optional OpenAI-compatible backends
+- completions stay Ollama-only and optimize for low-latency inline behavior
 
 ```
 src/spyder_ai_assistant/
@@ -208,8 +217,10 @@ src/spyder_ai_assistant/
 ├── completion_provider.py    # Completion provider: FIM completions
 ├── backend/
 │   ├── client.py             # OllamaClient: Ollama API wrapper
-│   └── worker.py             # OllamaWorker: QThread for streaming
+│   ├── chat_providers.py     # Provider registry + OpenAI-compatible chat backend
+│   └── worker.py             # ChatWorker: QThread bridge for provider-aware chat
 ├── utils/
+│   ├── completion_context.py # Neighbor-file snippet selection + candidate scoring
 │   ├── context.py            # Editor/project context + prompt assembly
 │   ├── chat_inference.py     # Per-tab chat option normalization/resolution
 │   ├── chat_exchanges.py     # Exchange browsing and deletion helpers
@@ -243,7 +254,7 @@ This is an active project. Here's where it's headed, roughly in priority order.
 
 ### Deep terminal and kernel integration *(top priority)*
 
-The chat panel (not completions — those stay lightweight and code-only) will get deep access to your running IPython kernel. The AI will be able to inspect live variables (types, shapes, values), read tracebacks from the console and suggest fixes, execute commands in the kernel on your behalf (with confirmation), and bridge with Spyder's Variable Explorer. The goal is full situational awareness: the AI knows what's in your session, not just what's in your files.
+The shipped runtime bridge already gives the chat pane read-only access to the active IPython session on demand. The next step is deeper tooling around that bridge: richer variable renderers, stronger traceback-specific workflows, optional approved kernel actions, and tighter Variable Explorer integration. The goal remains full situational awareness: the AI knows what's in your session, not just what's in your files.
 
 ### Session history and persistence
 
@@ -257,7 +268,12 @@ The remaining work here is the deeper management layer:
 
 ### Multi-provider support
 
-Beyond Ollama, the plugin will support OpenAI and Anthropic APIs (bring your own key), as well as Claude Code and Codex for users who want cloud-grade models. A unified model selector will list local and cloud models together.
+OpenAI-compatible chat support is now shipped. The next provider work is broader transport coverage and better provider ergonomics:
+
+- named provider profiles instead of one compatible endpoint
+- richer error reporting and connectivity diagnostics
+- additional provider adapters beyond the current OpenAI-compatible path
+- keeping the completion path local and Ollama-backed unless a later phase proves a strong reason to change that
 
 ### Smart setup and model management
 
@@ -265,7 +281,11 @@ One-click Ollama installation from the preferences page, guided model downloads 
 
 ### Smarter completions
 
-Better context selection for the completion model: scope-aware truncation that prioritizes the current function, imports, and type hints. Rename-aware suggestions that detect when you've renamed a variable and offer to propagate the change. Multi-site edit proposals with inline accept/reject overlays.
+Neighbor-file snippets, candidate scoring, and same-target cycling are now shipped. The next completion work is:
+
+- better scope-aware truncation that prioritizes the current function, imports, and type hints
+- rename-aware suggestions that detect when you've renamed a variable and offer to propagate the change
+- multi-site edit proposals with inline accept/reject overlays
 
 ### Better edit UX
 
@@ -277,7 +297,7 @@ Every tunable aspect of the plugin exposed through Spyder's Preferences: context
 
 ### UI and experience
 
-A redesigned chat panel with better typography and smoother streaming. Tables and LaTeX math rendering in responses. Full-text search across all chat sessions. A custom prompt templates library beyond the built-in shipped chat modes. Token usage and cost display for cloud providers.
+A redesigned chat panel with better typography and smoother streaming. Tables and LaTeX math rendering in responses. Full-text search across all chat sessions. A user-editable prompt templates library beyond the built-in shipped chat modes. Token usage and cost display for cloud providers.
 
 ### Agent and workflow features
 

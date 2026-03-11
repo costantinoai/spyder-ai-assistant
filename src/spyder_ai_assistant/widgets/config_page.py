@@ -34,16 +34,48 @@ class AIChatConfigPage(PluginConfigPage):
         CONF_SECTION on OK/Apply.
         """
         # --- Connection settings ---
-        connection_group = QGroupBox("Ollama Connection")
+        connection_group = QGroupBox("Chat Providers")
+        chat_provider_combo = self.create_combobox(
+            "Default chat provider:",
+            [
+                ("Ollama", "ollama"),
+                ("OpenAI-compatible", "openai_compatible"),
+            ],
+            "chat_provider",
+            default="ollama",
+            tip="Default provider selected when the chat model list refreshes.",
+            alignment=Qt.Horizontal,
+        )
         host_edit = self.create_lineedit(
-            "Server URL:",
+            "Ollama server URL:",
             "ollama_host",
             default="http://localhost:11434",
             tip="Base URL for the local Ollama server",
             alignment=Qt.Horizontal,
         )
+        compatible_base_url_edit = self.create_lineedit(
+            "OpenAI-compatible base URL:",
+            "openai_compatible_base_url",
+            default="",
+            tip=(
+                "Optional OpenAI-compatible chat endpoint, for example "
+                "http://localhost:8000 or https://your-host.example.com"
+            ),
+            alignment=Qt.Horizontal,
+        )
+        compatible_api_key_edit = self.create_lineedit(
+            "OpenAI-compatible API key:",
+            "openai_compatible_api_key",
+            default="",
+            tip="Optional bearer token for the OpenAI-compatible endpoint.",
+            alignment=Qt.Horizontal,
+            password=True,
+        )
         connection_layout = QVBoxLayout()
+        connection_layout.addWidget(chat_provider_combo)
         connection_layout.addWidget(host_edit)
+        connection_layout.addWidget(compatible_base_url_edit)
+        connection_layout.addWidget(compatible_api_key_edit)
         connection_group.setLayout(connection_layout)
 
         # --- Model settings ---
@@ -52,7 +84,7 @@ class AIChatConfigPage(PluginConfigPage):
             "Chat model:",
             "chat_model",
             default="gpt-oss-20b-abliterated",
-            tip="Ollama model name for the chat panel",
+            tip="Default chat model name for the selected provider",
             alignment=Qt.Horizontal,
         )
         completion_model_edit = self.create_lineedit(

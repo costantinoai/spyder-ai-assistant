@@ -6,8 +6,8 @@ conversation history and display. All sessions share the same background
 worker, model selector, and input area.
 
 Architecture:
-    UI (main thread) ──signals──> OllamaWorker (background QThread)
-    OllamaWorker ──signals──> UI (main thread)
+    UI (main thread) ──signals──> ChatWorker (background QThread)
+    ChatWorker ──signals──> UI (main thread)
 
 Multi-tab design:
     - ChatSession: holds a ChatDisplay + messages list for one conversation
@@ -29,7 +29,7 @@ from qtpy.QtWidgets import (
 
 from spyder.api.widgets.main_widget import PluginMainWidget
 
-from spyder_ai_assistant.backend.worker import OllamaWorker
+from spyder_ai_assistant.backend.worker import ChatWorker
 from spyder_ai_assistant.utils.chat_exchanges import (
     build_chat_exchange_rows,
     delete_chat_exchange,
@@ -208,18 +208,18 @@ class ChatWidget(PluginMainWidget):
     - Stop/New/Export/Send controls
     - Status indicator showing generation state and speed
 
-    All Ollama communication happens on a background QThread to keep
+    All chat-provider communication happens on a background QThread to keep
     the UI responsive during LLM inference.
     """
 
     # Signal to dispatch a chat request to the background worker.
-    # Args: model name (str), messages list, options dict
-    sig_send_chat = Signal(str, list, dict)
+    # Args: provider id (str), model name (str), messages list, options dict
+    sig_send_chat = Signal(str, str, list, dict)
 
     # Signal to request model listing from the background worker
     sig_list_models = Signal()
-    # Signal to update the Ollama host on the worker thread
-    sig_update_host = Signal(str)
+    # Signal to update chat-provider settings on the worker thread
+    sig_update_provider_settings = Signal(dict)
 
     # Emitted when the user clicks "Insert at cursor" on a code block.
     # Bubbles up from ChatDisplay so the plugin can handle insertion.
@@ -236,7 +236,9 @@ class ChatWidget(PluginMainWidget):
         # Whether the LLM is currently generating a response
         self._generating = False
 
-        # Currently selected model identifier (from combo box data)
+        # Currently selected provider-aware model entry from the combo box.
+        self._current_provider = self.get_conf("chat_provider", default="ollama")
+        self._current_provider_label = ""
         self._current_model = ""
 
         # Callable that returns editor context dict (set by plugin).
@@ -453,17 +455,16 @@ class ChatWidget(PluginMainWidget):
         self.setLayout(content_layout)
 
         # --- Background worker thread ---
-        host = self.get_conf(
-            "ollama_host", default="http://localhost:11434"
-        )
         self._thread = QThread(None)
-        self._worker = OllamaWorker(host=host)
+        self._worker = ChatWorker(settings=self._chat_provider_settings())
         self._worker.moveToThread(self._thread)
 
         # Main thread → worker: dispatch work requests via signals
         self.sig_send_chat.connect(self._worker.send_chat)
         self.sig_list_models.connect(self._worker.list_models)
-        self.sig_update_host.connect(self._worker.update_host)
+        self.sig_update_provider_settings.connect(
+            self._worker.update_settings
+        )
 
         # Worker → main thread: receive results via signals
         self._worker.chunk_received.connect(self._on_chunk)
@@ -591,6 +592,70 @@ class ChatWidget(PluginMainWidget):
         del index
         self._sync_session_controls()
 
+    def _current_model_payload(self):
+        """Return the current provider-aware model selection."""
+        payload = self.model_combo.currentData()
+        if isinstance(payload, dict):
+            return dict(payload)
+        return {}
+
+    @staticmethod
+    def _model_matches(payload, provider_id, model_name):
+        """Return True when one combo payload matches provider and model."""
+        if not isinstance(payload, dict):
+            return False
+        return (
+            payload.get("provider_id") == provider_id
+            and payload.get("name") == model_name
+        )
+
+    @staticmethod
+    def _format_model_display(payload):
+        """Return the provider-aware combo-box label for one model."""
+        provider_label = payload.get("provider_label", "Provider")
+        name = payload.get("name", "")
+        parameter_size = payload.get("parameter_size", "")
+        size_gb = payload.get("size_gb", 0) or 0
+
+        details = []
+        if parameter_size:
+            details.append(str(parameter_size))
+        if size_gb:
+            details.append(f"{size_gb}GB")
+        if details:
+            return f"[{provider_label}] {name} ({', '.join(details)})"
+        return f"[{provider_label}] {name}"
+
+    @staticmethod
+    def _format_model_tooltip(payload):
+        """Return the detailed tooltip for one provider-aware model entry."""
+        return "\n".join(
+            [
+                f"Provider: {payload.get('provider_label', 'unknown')}",
+                f"Model: {payload.get('name', '')}",
+                f"Family: {payload.get('family', 'unknown') or 'unknown'}",
+                (
+                    "Parameters: "
+                    f"{payload.get('parameter_size', 'unknown') or 'unknown'}"
+                ),
+                (
+                    "Quantization: "
+                    f"{payload.get('quantization', 'unknown') or 'unknown'}"
+                ),
+                f"Size: {payload.get('size_gb', 0) or 0} GB",
+            ]
+        )
+
+    def _current_model_export_name(self):
+        """Return the provider-aware model label used in exports/logging."""
+        payload = self._current_model_payload()
+        if not payload:
+            return self._current_model
+        provider_label = payload.get("provider_label", "").strip()
+        if provider_label:
+            return f"{provider_label}: {payload.get('name', '')}"
+        return payload.get("name", self._current_model)
+
     # --- Tab management ---
 
     @property
@@ -680,8 +745,9 @@ class ChatWidget(PluginMainWidget):
 
         if session and not clean_text.strip():
             logger.warning(
-                "Chat model %s returned an empty response",
-                self._current_model or "<unknown>",
+                "Chat model %s/%s returned an empty response",
+                self._current_provider or "<provider>",
+                self._current_model or "<model>",
             )
             session.display.finish_assistant_message()
             session.display.append_error(
@@ -723,25 +789,19 @@ class ChatWidget(PluginMainWidget):
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
         for m in models:
-            # Show parameter count and VRAM size for quick reference
-            size_gb = m.get("size_gb", 0)
-            display = f"{m['name']} ({m['parameter_size']}, {size_gb}GB)"
-            self.model_combo.addItem(display, m["name"])
-
-            # Tooltip with full model details
+            payload = dict(m)
+            display = self._format_model_display(payload)
+            self.model_combo.addItem(display, payload)
             idx = self.model_combo.count() - 1
-            tooltip = (
-                f"Model: {m['name']}\n"
-                f"Family: {m.get('family', 'unknown')}\n"
-                f"Parameters: {m['parameter_size']}\n"
-                f"Quantization: {m.get('quantization', 'unknown')}\n"
-                f"Size: {size_gb} GB"
+            self.model_combo.setItemData(
+                idx,
+                self._format_model_tooltip(payload),
+                Qt.ToolTipRole,
             )
-            self.model_combo.setItemData(idx, tooltip, Qt.ToolTipRole)
         self._select_default_model(previous)
         self.model_combo.blockSignals(False)
 
-        self._current_model = self.model_combo.currentData() or ""
+        self._on_model_changed(self.model_combo.currentIndex())
 
         if models:
             self.status_label.setText("Ready")
@@ -804,7 +864,7 @@ class ChatWidget(PluginMainWidget):
         self.status_label.setText("Stopped")
 
     def _refresh_models(self):
-        """Re-fetch the model list from Ollama."""
+        """Re-fetch the model list from every configured chat provider."""
         self.sig_list_models.emit()
 
     def _export_chat(self):
@@ -816,6 +876,8 @@ class ChatWidget(PluginMainWidget):
             return
 
         model_short = self._current_model.split("/")[-1].split(":")[0]
+        if self._current_provider:
+            model_short = f"{self._current_provider}-{model_short}"
         default_name = (
             f"ai-chat-{model_short}-"
             f"{datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
@@ -835,7 +897,7 @@ class ChatWidget(PluginMainWidget):
                 f.write(
                     build_export_markdown(
                         session.messages,
-                        model_name=self._current_model,
+                        model_name=self._current_model_export_name(),
                         context_label=self.context_label.text(),
                         runtime_context=self._runtime_context_snapshot,
                         prompt_preset_label=get_chat_prompt_preset(
@@ -853,7 +915,16 @@ class ChatWidget(PluginMainWidget):
 
     def _on_model_changed(self, index):
         """Update the current model when the combo selection changes."""
-        self._current_model = self.model_combo.currentData() or ""
+        del index
+        payload = self._current_model_payload()
+        self._current_provider = payload.get(
+            "provider_id",
+            self.get_conf("chat_provider", default="ollama"),
+        )
+        self._current_provider_label = payload.get("provider_label", "")
+        self._current_model = payload.get("name", "")
+        if payload:
+            self.model_combo.setToolTip(self._format_model_tooltip(payload))
 
     def _on_prompt_preset_changed(self, index):
         """Persist the selected prompt preset on the active session."""
@@ -1023,10 +1094,33 @@ class ChatWidget(PluginMainWidget):
         )
         logger.debug("Updated runtime toolbar status: %s", label)
 
+    def _chat_provider_settings(self):
+        """Return one snapshot of provider settings for the worker."""
+        return {
+            "ollama_host": self.get_conf(
+                "ollama_host", default="http://localhost:11434"
+            ),
+            "openai_compatible_base_url": self.get_conf(
+                "openai_compatible_base_url",
+                default="",
+            ),
+            "openai_compatible_api_key": self.get_conf(
+                "openai_compatible_api_key",
+                default="",
+            ),
+        }
+
     def update_ollama_host(self, host):
-        """Update the chat worker host and refresh the model list."""
+        """Backward-compatible wrapper for chat-provider refreshes."""
+        del host
+        self.update_chat_provider_settings()
+
+    def update_chat_provider_settings(self, settings=None):
+        """Refresh the worker's provider settings and reload chat models."""
         self.status_label.setText("Connecting...")
-        self.sig_update_host.emit(host)
+        self.sig_update_provider_settings.emit(
+            dict(settings or self._chat_provider_settings())
+        )
         self.sig_list_models.emit()
 
     def send_with_prompt(self, prompt):
@@ -1399,8 +1493,8 @@ class ChatWidget(PluginMainWidget):
 
         if not self._current_model:
             session.display.append_error(
-                "No model selected. Is Ollama running? "
-                "Try 'Refresh Models' from the options menu."
+                "No chat model selected. Check the configured providers, then "
+                "use 'Refresh Models' from the options menu."
             )
             return False
 
@@ -1419,8 +1513,8 @@ class ChatWidget(PluginMainWidget):
         """Start one assistant turn for a session using prepared messages."""
         if not self._current_model:
             session.display.append_error(
-                "No model selected. Is Ollama running? "
-                "Try 'Refresh Models' from the options menu."
+                "No chat model selected. Check the configured providers, then "
+                "use 'Refresh Models' from the options menu."
             )
             return False
 
@@ -1434,11 +1528,14 @@ class ChatWidget(PluginMainWidget):
         self._set_generating(True)
         options = self._chat_options(session)
         logger.info(
-            "Dispatching chat request for session %s with options %s",
+            "Dispatching chat request for session %s via %s/%s with options %s",
             session.session_id,
+            self._current_provider or "<provider>",
+            self._current_model or "<model>",
             options,
         )
         self.sig_send_chat.emit(
+            self._current_provider,
             self._current_model,
             list(request_messages),
             options,
@@ -1490,7 +1587,7 @@ class ChatWidget(PluginMainWidget):
         return system_prompt
 
     def _chat_options(self, session=None):
-        """Return the resolved Ollama generation options for one chat tab."""
+        """Return the resolved chat generation options for one chat tab."""
         metadata = self._chat_option_metadata(session)
         return {
             "temperature": metadata["temperature"],
@@ -1589,17 +1686,27 @@ class ChatWidget(PluginMainWidget):
 
         Priority: previous selection > configured default > first available.
         """
-        if previous:
+        if isinstance(previous, dict):
             for i in range(self.model_combo.count()):
                 if self.model_combo.itemData(i) == previous:
                     self.model_combo.setCurrentIndex(i)
                     return
 
+        default_provider = self.get_conf("chat_provider", default="ollama")
         default = self.get_conf(
             "chat_model", default="gpt-oss-20b-abliterated"
         )
         for i in range(self.model_combo.count()):
-            if self.model_combo.itemData(i) == default:
+            if self._model_matches(
+                    self.model_combo.itemData(i),
+                    default_provider,
+                    default):
+                self.model_combo.setCurrentIndex(i)
+                return
+
+        for i in range(self.model_combo.count()):
+            payload = self.model_combo.itemData(i)
+            if isinstance(payload, dict) and payload.get("name") == default:
                 self.model_combo.setCurrentIndex(i)
                 return
 

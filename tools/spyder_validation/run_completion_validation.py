@@ -29,6 +29,7 @@ from tools.spyder_validation.common import (
 CONFIG_DIR = artifact_path("configs", "completion-validation")
 RESULT_PATH = artifact_path("results", "completion-validation.json")
 TEST_FILE = artifact_path("fixtures", "completion_validation_sample.py")
+HELPER_FILE = artifact_path("fixtures", "helpers_context.py")
 REAL_COMPLETION_MODEL = "huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q3_K_M"
 REAL_OLLAMA_HOST = "http://localhost:11434"
 INVALID_OLLAMA_HOST = "http://127.0.0.1:9"
@@ -49,6 +50,8 @@ def fake_generate_completion(self, model, prefix, suffix="", system=None,
         "suffix_head": normalized_suffix[:80],
         "single_line": bool(single_line),
         "has_path_marker": normalized_prefix.startswith("# Path: "),
+        "has_related_context": "related context" in normalized_prefix,
+        "has_avoid_block": "avoid repeating these exact completions" in normalized_prefix,
     }
     FAKE_CALLS.append(call)
     time.sleep(0.35)
@@ -65,6 +68,14 @@ def fake_generate_completion(self, model, prefix, suffix="", system=None,
         return "other_value"
     if normalized_prefix.endswith("cache_value = "):
         return "cached_item"
+    if normalized_prefix.endswith("combined = compute_"):
+        if "compute_total" in normalized_prefix and "helpers_context.py" in normalized_prefix:
+            return "total(values)"
+        return "fallback_total(values)"
+    if normalized_prefix.endswith("cycle_value = "):
+        if "avoid: primary_value" in normalized_prefix:
+            return "secondary_value"
+        return "primary_value"
     if normalized_prefix.endswith("values = [1, 2"):
         return ", 3]"
     if normalized_prefix.endswith("repeat_value = "):
@@ -149,7 +160,13 @@ def open_validation_file(window, results):
     """Open the tracked completion validation file inside Spyder."""
     editor_plugin = get_editor_plugin(window)
     ai_plugin = get_ai_plugin(window)
+    write_file(
+        HELPER_FILE,
+        "def compute_total(values):\n"
+        "    return sum(values)\n",
+    )
     write_file(TEST_FILE, "result = a + \n")
+    editor_plugin.load_edit(str(HELPER_FILE))
     editor_plugin.load_edit(str(TEST_FILE))
 
     editor = wait_for(lambda: editor_plugin.get_current_editor(), timeout_ms=4000)
@@ -158,6 +175,10 @@ def open_validation_file(window, results):
 
     wait_for(
         lambda: get_provider(window)._document_states.get(str(TEST_FILE)) is not None,
+        timeout_ms=4000,
+    )
+    wait_for(
+        lambda: get_provider(window)._document_states.get(str(HELPER_FILE)) is not None,
         timeout_ms=4000,
     )
     wait_for(lambda: ai_plugin._ghost_managers.get(id(editor)) is not None, timeout_ms=4000)
@@ -173,6 +194,7 @@ def open_validation_file(window, results):
 
     results["startup"] = {
         "validation_file": str(TEST_FILE),
+        "helper_file": str(HELPER_FILE),
         "editor_opened": editor is not None,
         "ghost_manager_installed": ai_plugin._ghost_managers.get(id(editor)) is not None,
         "manual_shortcut_installed": hasattr(editor, "_ai_chat_completion_shortcut"),
@@ -392,6 +414,50 @@ def run_fake_completion_checks(window, results):
     }
     ensure_clean_ghost(manager)
 
+    set_editor_text(editor, provider, str(TEST_FILE), "combined = compute_\n")
+    move_cursor_after(editor, "combined = compute_")
+    before = len(FAKE_CALLS)
+    editor.do_completion()
+    wait_for(lambda: manager.has_suggestion(), timeout_ms=2500)
+    related_call = FAKE_CALLS[-1] if len(FAKE_CALLS) >= before + 1 else {}
+    checks["neighbor_context"] = {
+        "ghost_visible": manager.has_suggestion(),
+        "ghost_text": manager._ghost_text,
+        "has_related_context": related_call.get("has_related_context"),
+        "prefix_tail": related_call.get("prefix_tail"),
+    }
+    ensure_clean_ghost(manager)
+
+    set_editor_text(editor, provider, str(TEST_FILE), "cycle_value = \n")
+    move_cursor_after(editor, "cycle_value = ")
+    before = len(FAKE_CALLS)
+    editor.do_completion()
+    wait_for(lambda: manager.has_suggestion(), timeout_ms=2500)
+    primary_text = manager._ghost_text
+    first_cycle_calls = len(FAKE_CALLS)
+
+    editor.do_completion()
+    wait_for(
+        lambda: manager.has_suggestion() and manager._ghost_text != primary_text,
+        timeout_ms=3000,
+    )
+    secondary_text = manager._ghost_text
+    second_cycle_calls = len(FAKE_CALLS)
+
+    editor.do_completion()
+    wait_for(
+        lambda: manager.has_suggestion() and manager._ghost_text == primary_text,
+        timeout_ms=1500,
+    )
+    checks["candidate_cycling"] = {
+        "primary_text": primary_text,
+        "secondary_text": secondary_text,
+        "cycled_back_text": manager._ghost_text,
+        "second_request_hit_worker": second_cycle_calls > first_cycle_calls,
+        "third_request_hit_worker": len(FAKE_CALLS) > second_cycle_calls,
+    }
+    ensure_clean_ghost(manager)
+
     popup_widget = getattr(editor, "completion_widget", None)
     popup_suppression = {}
     if popup_widget is not None:
@@ -501,12 +567,17 @@ def run_validation(window):
     }
 
     try:
+        print("[validation] acquiring completion provider", flush=True)
         provider = get_provider(window)
         results["plugin_loaded"] = get_ai_plugin(window) is not None
         results["provider_started"] = provider._started
+        print("[validation] opening editor fixtures", flush=True)
         open_validation_file(window, results)
+        print("[validation] running deterministic completion checks", flush=True)
         run_fake_completion_checks(window, results)
+        print("[validation] running real completion smoke", flush=True)
         run_actual_model_smoke(window, results)
+        print("[validation] running offline recovery", flush=True)
         run_offline_recovery(window, results)
     except Exception as exc:
         results["errors"].append({
@@ -515,6 +586,7 @@ def run_validation(window):
             "traceback": traceback.format_exc(),
         })
     finally:
+        print("[validation] finalizing", flush=True)
         record_validation_result(window, RESULT_PATH, results)
         finalize(window)
 

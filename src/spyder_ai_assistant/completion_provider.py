@@ -32,6 +32,11 @@ from spyder.plugins.completion.api import (
 )
 
 from spyder_ai_assistant.backend.client import OllamaClient
+from spyder_ai_assistant.utils.completion_context import (
+    build_related_completion_snippets,
+    extract_completion_terms,
+    score_completion_candidate,
+)
 from spyder_ai_assistant.widgets.status import AIChatCompletionStatus
 
 logger = logging.getLogger(__name__)
@@ -124,11 +129,25 @@ class _QueuedCompletionRequest:
     req: dict
     req_id: int
     target: "_CompletionTarget"
+    alternative: bool = False
 
 
 @dataclass(frozen=True)
 class _CompletionCacheKey:
     """One normalized key for the LRU completion cache."""
+
+    host: str
+    model: str
+    temperature: float
+    num_predict: int
+    single_line: bool
+    prompt_prefix: str
+    suffix: str
+
+
+@dataclass(frozen=True)
+class _CompletionCycleKey:
+    """One normalized key used to group alternative candidates."""
 
     host: str
     model: str
@@ -160,6 +179,46 @@ class _CompletionTarget:
             "offset": self.offset,
             "current_word": self.current_word,
         }
+
+
+class _CompletionCandidateStore:
+    """Remember alternative candidates for one completion target."""
+
+    def __init__(self):
+        self._entries = {}
+
+    def remember(self, key, text, score):
+        """Store one unique candidate text for a cycle key."""
+        if key is None or not text:
+            return
+
+        candidates = list(self._entries.get(key, []))
+        if any(candidate["text"] == text for candidate in candidates):
+            return
+
+        candidates.append({"text": text, "score": int(score)})
+        candidates.sort(key=lambda item: (-item["score"], len(item["text"])))
+        self._entries[key] = candidates[:4]
+
+    def texts(self, key):
+        """Return the currently known candidate texts for one key."""
+        return [item["text"] for item in self._entries.get(key, [])]
+
+    def next_after(self, key, current_text):
+        """Return the next remembered candidate after the current one."""
+        candidates = self.texts(key)
+        if len(candidates) < 2:
+            return ""
+
+        try:
+            index = candidates.index(current_text)
+        except ValueError:
+            return candidates[0]
+        return candidates[(index + 1) % len(candidates)]
+
+    def clear(self):
+        """Drop every remembered candidate."""
+        self._entries.clear()
 
 
 class _LatestOnlyCompletionQueue:
@@ -400,12 +459,61 @@ def _build_completion_path_marker(filename):
     return f"{marker} Path: {basename}"
 
 
-def _build_prompt_prefix(filename, prefix):
-    """Prepend a lightweight path marker to the completion prompt."""
+def _render_related_snippet_block(filename, excerpt, matched_terms=()):
+    """Render one small related-file snippet as prompt-safe comments."""
     marker = _build_completion_path_marker(filename)
-    if not prefix:
-        return f"{marker}\n"
-    return f"{marker}\n{prefix}"
+    extension = os.path.splitext(filename or "")[1].lower()
+    comment = _COMMENT_MARKERS_BY_EXTENSION.get(extension, "#")
+    lines = [f"{marker} related context"]
+    if matched_terms:
+        lines.append(f"{comment} matched terms: {', '.join(matched_terms)}")
+    for line in str(excerpt or "").splitlines():
+        if comment == "<!--":
+            lines.append(f"<!-- {line} -->")
+        elif comment == "/*":
+            lines.append(f"/* {line} */")
+        else:
+            lines.append(f"{comment} {line}")
+    return "\n".join(lines)
+
+
+def _render_avoid_texts_block(filename, avoid_texts):
+    """Render a short commented list of candidates to avoid repeating."""
+    if not avoid_texts:
+        return ""
+
+    marker = _build_completion_path_marker(filename)
+    extension = os.path.splitext(filename or "")[1].lower()
+    comment = _COMMENT_MARKERS_BY_EXTENSION.get(extension, "#")
+    lines = [f"{marker} avoid repeating these exact completions"]
+    for item in avoid_texts[:3]:
+        for line in str(item or "").splitlines():
+            if comment == "<!--":
+                lines.append(f"<!-- avoid: {line} -->")
+            elif comment == "/*":
+                lines.append(f"/* avoid: {line} */")
+            else:
+                lines.append(f"{comment} avoid: {line}")
+    return "\n".join(lines)
+
+
+def _build_prompt_prefix(filename, prefix, related_snippets=None, avoid_texts=None):
+    """Prepend lightweight path and neighbor-context markers to the prompt."""
+    marker = _build_completion_path_marker(filename)
+    blocks = [marker]
+    for snippet in related_snippets or ():
+        blocks.append(
+            _render_related_snippet_block(
+                snippet.filename,
+                snippet.excerpt,
+                matched_terms=snippet.matched_terms,
+            )
+        )
+    avoid_block = _render_avoid_texts_block(filename, avoid_texts or ())
+    if avoid_block:
+        blocks.append(avoid_block)
+    blocks.append(prefix or "")
+    return "\n".join(blocks).rstrip("\n") + "\n" * (0 if prefix else 1)
 
 
 def _looks_like_valid_middle_of_line_suffix(suffix):
@@ -706,7 +814,11 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         # the current editor state before ghost text is shown.
         self._req_targets = {}
         self._req_cache_keys = {}
+        self._req_cycle_keys = {}
+        self._req_related_terms = {}
         self._completion_cache = _CompletionCache()
+        self._candidate_store = _CompletionCandidateStore()
+        self._shown_candidates = {}
         self._metrics = {
             "requests_received": 0,
             "skipped": 0,
@@ -721,11 +833,14 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             "accepted_word": 0,
             "accepted_line": 0,
             "typed_advances": 0,
+            "cycled": 0,
+            "alternatives_requested": 0,
             "dismissed_escape": 0,
             "dismissed_typing": 0,
             "dismissed_cursor_move": 0,
             "dismissed_popup_visible": 0,
             "suppressed_popup_visible": 0,
+            "neighbor_context_hits": 0,
             "stale_discarded": 0,
             "filtered_duplicate": 0,
             "filtered_repetition": 0,
@@ -795,7 +910,11 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._latest_target_by_filename.clear()
         self._req_targets.clear()
         self._req_cache_keys.clear()
+        self._req_cycle_keys.clear()
+        self._req_related_terms.clear()
         self._completion_cache.clear()
+        self._candidate_store.clear()
+        self._shown_candidates.clear()
         logger.info("AI completion provider shut down")
 
     def send_request(self, language, req_type, req, req_id):
@@ -851,6 +970,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             if filename:
                 self._document_states.pop(filename, None)
                 self._latest_target_by_filename.pop(filename, None)
+                self._shown_candidates.pop(filename, None)
 
         elif req_type == CompletionRequestTypes.DOCUMENT_COMPLETION:
             # Completion request — debounce to avoid spamming the model
@@ -886,9 +1006,21 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             self._emit_empty_response(req_id)
             return
 
+        if self._try_cycle_visible_candidate(target, req_id):
+            return
+
+        alternative = self._should_request_alternative(target)
+        if alternative:
+            self._increment_metric("alternatives_requested")
+
         # Replace any previous debounced request and answer it immediately.
         dropped = self._request_queue.replace_debounced(
-            _QueuedCompletionRequest(req=req, req_id=req_id, target=target)
+            _QueuedCompletionRequest(
+                req=req,
+                req_id=req_id,
+                target=target,
+                alternative=alternative,
+            )
         )
         if dropped is not None:
             self._increment_metric("debounced_dropped")
@@ -897,6 +1029,42 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         # Restart the debounce timer
         debounce_ms = self.get_conf("debounce_ms")
         self._debounce_timer.start(debounce_ms)
+
+    def _should_request_alternative(self, target):
+        """Return True when the user is asking for another visible suggestion."""
+        shown = self._shown_candidates.get(target.filename) or {}
+        return shown.get("target") == target
+
+    def _try_cycle_visible_candidate(self, target, req_id):
+        """Cycle to the next remembered candidate for the same visible target."""
+        shown = self._shown_candidates.get(target.filename) or {}
+        if shown.get("target") != target:
+            return False
+
+        next_text = self._candidate_store.next_after(
+            shown.get("cycle_key"),
+            shown.get("text", ""),
+        )
+        if not next_text:
+            return False
+
+        self._increment_metric("cycled")
+        self._emit_empty_response(req_id)
+        self.sig_ghost_text_ready.emit(
+            target.filename,
+            next_text,
+            target.to_payload(),
+        )
+        self._shown_candidates[target.filename] = {
+            "target": target,
+            "text": next_text,
+            "cycle_key": shown.get("cycle_key"),
+        }
+        logger.debug(
+            "Cycled cached completion candidate for %s",
+            target.filename,
+        )
+        return True
 
     def _debounce_fire(self):
         """Called when the debounce timer expires.
@@ -969,7 +1137,19 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             self._set_ready_status()
             return
 
-        prompt_prefix = _build_prompt_prefix(filename, prefix)
+        related_snippets = build_related_completion_snippets(
+            filename,
+            prefix,
+            target.current_word,
+            self._document_states,
+        )
+        if related_snippets:
+            self._increment_metric("neighbor_context_hits", len(related_snippets))
+        base_prompt_prefix = _build_prompt_prefix(
+            filename,
+            prefix,
+            related_snippets=related_snippets,
+        )
         allow_multiline = _should_allow_multiline_completion(prefix)
 
         # Build model options from config
@@ -979,6 +1159,24 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             "num_predict": self.get_conf("completion_max_tokens"),
             "_single_line": not allow_multiline,
         }
+        cycle_key = _CompletionCycleKey(
+            host=self.get_conf("ollama_host"),
+            model=model,
+            temperature=float(options["temperature"]),
+            num_predict=int(options["num_predict"]),
+            single_line=bool(options["_single_line"]),
+            prompt_prefix=base_prompt_prefix,
+            suffix=suffix,
+        )
+        avoid_texts = ()
+        if request.alternative:
+            avoid_texts = tuple(self._candidate_store.texts(cycle_key))
+        prompt_prefix = _build_prompt_prefix(
+            filename,
+            prefix,
+            related_snippets=related_snippets,
+            avoid_texts=avoid_texts,
+        )
         cache_key = _CompletionCacheKey(
             host=self.get_conf("ollama_host"),
             model=model,
@@ -992,6 +1190,10 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         # Track which request target this response belongs to.
         self._req_targets[req_id] = target
         self._req_cache_keys[req_id] = cache_key
+        self._req_cycle_keys[req_id] = cycle_key
+        self._req_related_terms[req_id] = tuple(
+            extract_completion_terms(prefix, current_word=target.current_word)
+        )
 
         cached_completion = self._completion_cache.get(cache_key)
         if cached_completion is not _CompletionCache._MISSING:
@@ -1018,7 +1220,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._update_status("AI: generating")
 
         logger.debug(
-            "Dispatching completion req_id=%d, model=%s, version=%d, line=%d, column=%d, single_line=%s, prefix=%d chars, suffix=%d chars",
+            "Dispatching completion req_id=%d, model=%s, version=%d, line=%d, column=%d, single_line=%s, prefix=%d chars, suffix=%d chars, related_snippets=%d, alternative=%s",
             req_id,
             model,
             target.version,
@@ -1027,6 +1229,8 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             not allow_multiline,
             len(prompt_prefix),
             len(suffix),
+            len(related_snippets),
+            request.alternative,
         )
 
         # Dispatch to the worker thread via signal
@@ -1073,6 +1277,8 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             self._set_ready_status()
         self._req_targets.pop(req_id, None)
         self._req_cache_keys.pop(req_id, None)
+        self._req_cycle_keys.pop(req_id, None)
+        self._req_related_terms.pop(req_id, None)
         self._finish_request(req_id, restore_ready=restore_ready)
 
     # --- Status bar helper ---
@@ -1142,6 +1348,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         """Update the worker's Ollama server URL when config changes."""
         self._worker.update_host(value)
         self._completion_cache.clear()
+        self._candidate_store.clear()
         if self.get_conf("completions_enabled"):
             self._set_ready_status()
 
@@ -1149,6 +1356,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
     def on_completion_model_changed(self, _value):
         """Refresh steady-state status and clear stale cached completions."""
         self._completion_cache.clear()
+        self._candidate_store.clear()
         if self.get_conf("completions_enabled"):
             self._set_ready_status()
 
@@ -1156,11 +1364,13 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
     def on_completion_temperature_changed(self, _value):
         """Drop cached completions when the generation temperature changes."""
         self._completion_cache.clear()
+        self._candidate_store.clear()
 
     @on_conf_change(option="completion_max_tokens")
     def on_completion_max_tokens_changed(self, _value):
         """Drop cached completions when the completion budget changes."""
         self._completion_cache.clear()
+        self._candidate_store.clear()
 
     @on_conf_change(option="completions_enabled")
     def on_enabled_changed(self, value):
@@ -1175,6 +1385,8 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             self._debounce_timer.stop()
             for req_id in self._request_queue.clear_pending():
                 self._emit_empty_response(req_id)
+            self._candidate_store.clear()
+            self._shown_candidates.clear()
             self._update_status("AI: disabled")
             logger.info("AI completions disabled")
 
@@ -1226,6 +1438,8 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         payload = payload or {}
         reason = str(payload.get("reason", "") or "")
         method = str(payload.get("method", "") or "")
+        target = payload.get("target") or {}
+        filename = str(target.get("filename", "") or "")
 
         if event_name == "shown":
             self._increment_metric("shown")
@@ -1254,6 +1468,9 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         ):
             self._increment_metric("suppressed_popup_visible")
 
+        if event_name in {"dismissed", "accepted"} and filename:
+            self._shown_candidates.pop(filename, None)
+
         logger.debug(
             "Ghost lifecycle event: event=%s method=%s reason=%s payload=%s",
             event_name,
@@ -1267,6 +1484,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         """Return one serializable snapshot of local completion metrics."""
         snapshot = dict(self._metrics)
         snapshot["cache_entries"] = len(self._completion_cache)
+        snapshot["active_candidate_targets"] = len(self._shown_candidates)
         snapshot["current_status"] = self._current_status_text
         return snapshot
 
@@ -1277,6 +1495,8 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
         target = self._req_targets.pop(req_id, None)
         cache_key = self._req_cache_keys.pop(req_id, None)
+        cycle_key = self._req_cycle_keys.pop(req_id, None)
+        related_terms = self._req_related_terms.pop(req_id, ())
         if target is None:
             self._finish_request(req_id)
             return
@@ -1318,6 +1538,18 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             )
 
         if final_text and filename and self.get_conf("completions_enabled"):
+            candidate_score = score_completion_candidate(
+                final_text,
+                current_word=target.current_word,
+                single_line=bool(getattr(cache_key, "single_line", False)),
+                related_terms=related_terms,
+            )
+            self._candidate_store.remember(cycle_key, final_text, candidate_score)
+            self._shown_candidates[filename] = {
+                "target": target,
+                "text": final_text,
+                "cycle_key": cycle_key,
+            }
             self.sig_ghost_text_ready.emit(
                 filename,
                 final_text,
@@ -1373,6 +1605,12 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
                 f"full={metrics['accepted_full']}, "
                 f"word={metrics['accepted_word']}, "
                 f"line={metrics['accepted_line']}"
+            ),
+            (
+                "Cycling / neighbor context: "
+                f"{metrics['cycled']} cycled, "
+                f"{metrics['alternatives_requested']} alternative requests, "
+                f"{metrics['neighbor_context_hits']} related snippets"
             ),
             (
                 "Cache: "

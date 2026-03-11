@@ -1,173 +1,193 @@
-"""Background QThread worker for async Ollama API calls.
+"""Background QThread worker for provider-aware chat API calls.
 
-This module provides the OllamaWorker QObject which handles all Ollama
-communication on a dedicated background thread, ensuring the Qt main
-thread (UI) is never blocked during LLM inference.
-
-All communication with the main thread is via Qt signals. The worker
-is created on the main thread, then moved to a QThread via moveToThread().
-
-Signal flow:
-    Main thread → Worker: sig_send_chat, sig_list_models (via connected signals)
-    Worker → Main thread: chunk_received, response_ready, error_occurred, etc.
+The chat pane still uses one dedicated Qt worker thread so streaming model
+responses never block Spyder's UI. The transport itself is now provider-
+agnostic: the worker delegates model listing and chat streaming to a small
+provider registry built from the current plugin settings snapshot.
 """
+
+from __future__ import annotations
 
 import logging
 
-from qtpy.QtCore import QObject, Signal, QMutex, QMutexLocker
+import httpx
+from ollama import ResponseError
+from qtpy.QtCore import QObject, QMutex, QMutexLocker, Signal
 
-from spyder_ai_assistant.backend.client import OllamaClient
+from spyder_ai_assistant.backend.chat_providers import ChatProviderRegistry
 
 logger = logging.getLogger(__name__)
 
 
-class OllamaWorker(QObject):
-    """Worker that executes Ollama API calls on a background QThread.
+class ChatWorker(QObject):
+    """Worker that executes chat-provider requests on a background thread."""
 
-    All public methods are invoked via connected signals from the main
-    thread. Results are emitted back to the main thread via signals.
-    Thread-safe abort is managed via a QMutex-protected flag.
-    """
-
-    # --- Signals emitted from worker thread, received on main thread ---
-
-    # Each streaming token as it arrives from the LLM
     chunk_received = Signal(str)
-
-    # Complete response text and performance metrics dict.
-    # Emitted when streaming finishes successfully.
     response_ready = Signal(str, dict)
-
-    # List of model info dicts from Ollama's model listing
     models_listed = Signal(list)
-
-    # Human-readable error message for display in the chat
     error_occurred = Signal(str)
-
-    # Worker status change: "generating", "loading_models".
-    # Final states (ready, error) are handled by the widget based
-    # on response_ready / error_occurred signals.
     status_changed = Signal(str)
 
-    def __init__(self, host="http://localhost:11434"):
+    def __init__(self, settings=None):
         super().__init__()
-        self._host = host
-        self._client = None
+        self._settings = dict(settings or {})
+        self._registry = None
         self._abort = False
         self._mutex = QMutex()
 
-    def update_host(self, host):
-        """Recreate the Ollama client with a new server URL.
+    def update_settings(self, settings):
+        """Replace the provider settings snapshot on the worker thread."""
+        self._settings = dict(settings or {})
+        self._registry = ChatProviderRegistry(self._settings)
+        logger.info(
+            "Chat worker provider settings updated: ollama=%s, openai_compatible=%s",
+            self._settings.get("ollama_host", ""),
+            self._settings.get("openai_compatible_base_url", ""),
+        )
 
-        Called when the user changes the Ollama host in preferences.
-        """
-        self._host = host
-        self._client = OllamaClient(host=host)
-
-    # --- Slots invoked via signals from main thread ---
-
-    def send_chat(self, model, messages, options):
-        """Send a streaming chat request to Ollama.
-
-        Iterates over the streaming response, emitting chunk_received
-        for each token. On completion, emits response_ready with the
-        full response text and performance metrics. Checks the abort
-        flag between chunks for responsive mid-stream cancellation.
-
-        Args:
-            model: Ollama model name.
-            messages: Conversation history (list of role/content dicts).
-            options: Model parameters (temperature, num_predict, etc.).
-        """
-        # Reset abort flag at the start of each new request
+    def send_chat(self, provider_id, model, messages, options):
+        """Send a streaming chat request through the selected provider."""
         with QMutexLocker(self._mutex):
             self._abort = False
 
         self.status_changed.emit("generating")
 
         try:
-            self._ensure_client()
+            self._ensure_registry()
             chunks = []
-            for chunk_data in self._client.chat_stream(
-                model, messages, options
-            ):
-                # Check abort flag between chunks so the user can
-                # cancel mid-stream without waiting for completion
+            for chunk_data in self._registry.chat_stream(
+                    provider_id,
+                    model,
+                    messages,
+                    options):
                 with QMutexLocker(self._mutex):
                     if self._abort:
+                        logger.info(
+                            "Chat worker aborted streaming response from %s/%s",
+                            provider_id,
+                            model,
+                        )
                         return
 
-                content = chunk_data["content"]
+                content = chunk_data.get("content", "") or ""
                 if content:
                     chunks.append(content)
                     self.chunk_received.emit(content)
 
-                # The final chunk carries performance metrics
-                if chunk_data["done"]:
+                if chunk_data.get("done"):
                     full_response = "".join(chunks)
                     metrics = {
-                        "eval_count": chunk_data.get("eval_count", 0),
-                        "eval_duration": chunk_data.get(
-                            "eval_duration", 0
+                        "eval_count": int(chunk_data.get("eval_count", 0) or 0),
+                        "eval_duration": int(
+                            chunk_data.get("eval_duration", 0) or 0
                         ),
-                        "prompt_eval_count": chunk_data.get(
-                            "prompt_eval_count", 0
+                        "prompt_eval_count": int(
+                            chunk_data.get("prompt_eval_count", 0) or 0
                         ),
                     }
+                    logger.info(
+                        "Chat worker completed response from %s/%s (%d chars)",
+                        provider_id,
+                        model,
+                        len(full_response),
+                    )
                     self.response_ready.emit(full_response, metrics)
-        except Exception as e:
-            self.error_occurred.emit(self._format_error(e))
+                    return
+
+            full_response = "".join(chunks)
+            logger.info(
+                "Chat worker ended stream without explicit done marker from %s/%s",
+                provider_id,
+                model,
+            )
+            self.response_ready.emit(
+                full_response,
+                {
+                    "eval_count": 0,
+                    "eval_duration": 0,
+                    "prompt_eval_count": 0,
+                },
+            )
+        except Exception as error:  # pragma: no cover - threaded guard
+            logger.warning(
+                "Chat worker request failed for %s/%s: %s",
+                provider_id,
+                model,
+                error,
+            )
+            self.error_occurred.emit(self._format_error(error, provider_id))
 
     def list_models(self):
-        """Fetch available models from Ollama.
-
-        Emits models_listed with a list of model info dicts on success,
-        or error_occurred if the server is unreachable.
-        """
+        """Fetch models from every configured chat provider."""
         self.status_changed.emit("loading_models")
         try:
-            self._ensure_client()
-            models = self._client.list_models()
+            self._ensure_registry()
+            models = self._registry.list_models()
+            logger.info("Chat worker discovered %d chat model(s)", len(models))
             self.models_listed.emit(models)
-        except Exception as e:
-            self.error_occurred.emit(self._format_error(e))
+        except Exception as error:  # pragma: no cover - threaded guard
+            logger.warning("Chat worker failed to list models: %s", error)
+            self.error_occurred.emit(self._format_error(error))
 
     def abort(self):
-        """Request cancellation of the current streaming operation.
-
-        Thread-safe: can be called from any thread. Sets a flag that
-        the streaming loop checks between each chunk.
-        """
+        """Request cancellation of the current streaming operation."""
         with QMutexLocker(self._mutex):
             self._abort = True
 
-    # --- Private helpers ---
+    def _ensure_registry(self):
+        """Create the provider registry lazily on the worker thread."""
+        if self._registry is None:
+            self._registry = ChatProviderRegistry(self._settings)
 
-    def _format_error(self, error):
-        """Convert an exception to a user-friendly error message.
-
-        Recognizes common Ollama error types and produces clear
-        messages that help the user diagnose the problem.
-        """
-        from ollama import ResponseError
-
+    def _format_error(self, error, provider_id=""):
+        """Convert provider errors to concise user-facing messages."""
         if isinstance(error, ResponseError):
             if error.status_code == 404:
                 return f"Model not found: {error.error}"
             return f"Ollama error: {error.error}"
 
-        # Check for connection-related errors by inspecting the message,
-        # since the exact exception type varies by httpx version
-        error_str = str(error)
-        if "Connect" in error_str or "refused" in error_str:
+        if isinstance(error, httpx.HTTPStatusError):
+            provider_label = self._provider_label(provider_id)
+            status_code = error.response.status_code
             return (
-                f"Cannot connect to Ollama at {self._host}. "
-                "Is the Ollama service running?"
+                f"{provider_label} request failed with HTTP {status_code}. "
+                "Check the configured endpoint and model."
             )
 
+        if isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout)):
+            provider_label = self._provider_label(provider_id)
+            endpoint = self._provider_endpoint(provider_id)
+            return (
+                f"Cannot connect to {provider_label} at {endpoint}. "
+                "Check that the service is reachable."
+            )
+
+        error_str = str(error)
+        if "Connect" in error_str or "refused" in error_str:
+            provider_label = self._provider_label(provider_id)
+            endpoint = self._provider_endpoint(provider_id)
+            return (
+                f"Cannot connect to {provider_label} at {endpoint}. "
+                "Check that the service is reachable."
+            )
+
+        provider_label = self._provider_label(provider_id)
+        if provider_id:
+            return f"{provider_label} error: {error}"
         return f"Unexpected error: {error}"
 
-    def _ensure_client(self):
-        """Create the Ollama client on the worker thread when needed."""
-        if self._client is None:
-            self._client = OllamaClient(host=self._host)
+    def _provider_label(self, provider_id):
+        """Return one user-facing provider label for errors."""
+        if provider_id == "openai_compatible":
+            return "OpenAI-compatible provider"
+        return "Ollama"
+
+    def _provider_endpoint(self, provider_id):
+        """Return the configured endpoint for one provider."""
+        if provider_id == "openai_compatible":
+            return self._settings.get("openai_compatible_base_url", "<unset>")
+        return self._settings.get("ollama_host", "http://localhost:11434")
+
+
+# Backward-compatible alias kept for older imports and docs.
+OllamaWorker = ChatWorker

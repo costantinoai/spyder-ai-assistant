@@ -5,6 +5,8 @@ from __future__ import annotations
 from spyder_ai_assistant.completion_provider import (
     _CompletionCache,
     _CompletionCacheKey,
+    _CompletionCandidateStore,
+    _CompletionCycleKey,
     _LatestOnlyCompletionQueue,
     _QueuedCompletionRequest,
     _TrackedDocumentState,
@@ -108,6 +110,30 @@ def test_prompt_prefix_includes_path_marker_even_without_prefix():
     )
 
 
+def test_prompt_prefix_includes_related_snippets_and_avoid_texts():
+    snippet = type(
+        "Snippet",
+        (),
+        {
+            "filename": "helpers.py",
+            "excerpt": "def compute_total(values):\n    return sum(values)",
+            "matched_terms": ("compute_total", "values"),
+        },
+    )()
+
+    prompt = _build_prompt_prefix(
+        "/tmp/current.py",
+        "result = ",
+        related_snippets=[snippet],
+        avoid_texts=("compute_total(items)",),
+    )
+
+    assert "# Path: current.py" in prompt
+    assert "# Path: helpers.py related context" in prompt
+    assert "matched terms: compute_total, values" in prompt
+    assert "avoid: compute_total(items)" in prompt
+
+
 def test_middle_of_line_suffix_allows_only_light_punctuation():
     assert _looks_like_valid_middle_of_line_suffix(")\n")
     assert _looks_like_valid_middle_of_line_suffix("   ) :")
@@ -193,3 +219,24 @@ def test_completion_cache_is_lru_and_supports_empty_entries():
     assert cache.get(first) == {"text": "", "filter_reason": "duplicate"}
     assert cache.get(second) is _CompletionCache._MISSING
     assert cache.get(third) == {"text": "other", "filter_reason": None}
+
+
+def test_completion_candidate_store_cycles_scored_alternatives():
+    store = _CompletionCandidateStore()
+    key = _CompletionCycleKey(
+        host="http://localhost:11434",
+        model="model-a",
+        temperature=0.1,
+        num_predict=64,
+        single_line=True,
+        prompt_prefix="# Path: test.py\nvalue = ",
+        suffix="",
+    )
+
+    store.remember(key, "other_value", score=100)
+    store.remember(key, "backup_value", score=90)
+    store.remember(key, "other_value", score=80)
+
+    assert store.texts(key) == ["other_value", "backup_value"]
+    assert store.next_after(key, "other_value") == "backup_value"
+    assert store.next_after(key, "backup_value") == "other_value"

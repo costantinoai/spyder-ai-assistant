@@ -33,6 +33,7 @@ tools/spyder_validation/
 
 The main entry points are:
 
+- `python -m tools.spyder_validation.run_chat_provider_validation`
 - `python -m tools.spyder_validation.run_completion_validation`
 - `python -m tools.spyder_validation.run_chat_workflow_validation`
 - `python -m tools.spyder_validation.run_chat_persistence_setup`
@@ -53,6 +54,7 @@ The main entry points are:
 PYTHONPATH=src pytest
 python -m tools.release.build_dist
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_completion_validation
+DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_provider_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_workflow_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_persistence_setup
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_persistence_verify
@@ -85,9 +87,19 @@ it clears stale local build artifacts before rebuilding the sdist and wheel.
 - single-line and multiline ghost text
 - Tab accept and Escape dismiss
 - typed-through ghost continuation
+- neighbor-file snippet injection from other open documents
+- alternative-candidate generation and local cycling on repeated requests
 - local completion metrics snapshot
 - real-model completion smoke
 - offline host recovery
+
+### Chat provider validation
+
+- provider-aware model discovery in the shared chat selector
+- OpenAI-compatible `/v1/models` discovery against a local fake endpoint
+- OpenAI-compatible streaming `/v1/chat/completions` validation with API-key handling
+- switch back to a real Ollama model in the same Spyder session
+- confirm both providers can answer from the same chat pane
 
 ### Chat workflow validation
 
@@ -197,8 +209,12 @@ For example:
   `runtime.list_variables`, or `runtime.get_console_tail`
 - persistence tests should show save and restore log lines
 - completion tests should show provider startup and clean shutdown
-- completion tests should show cache-hit, overlap, repetition, and popup-block
-  behavior in the JSON artifact and terminal log
+- completion tests should show cache-hit, overlap, repetition, popup-block,
+  neighbor-context, and candidate-cycling behavior in the JSON artifact
+  and terminal log
+- provider validation should show compatible-provider configuration, provider
+  model discovery, one compatible response, and one Ollama response in both
+  the JSON artifact and terminal log
 - history-browser tests should show dialog creation plus reopen, duplicate,
   and delete log lines
 - prompt-preset tests should show preset selection log lines and restored

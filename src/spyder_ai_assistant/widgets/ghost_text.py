@@ -631,6 +631,9 @@ class GhostTextManager:
         if self._lifecycle_callback is None:
             return
 
+        if "target" not in payload and self._target is not None:
+            payload["target"] = dict(self._target)
+
         try:
             self._lifecycle_callback(event_name, payload)
         except Exception as error:  # pragma: no cover - defensive UI guard

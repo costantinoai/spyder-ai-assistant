@@ -170,17 +170,40 @@ def get_current_shell(window):
     return shell
 
 
-def select_model(widget, model_name):
+def select_model(widget, model_name, provider_id=None):
     """Select one chat model from the widget dropdown."""
     if not wait_for(lambda: widget.model_combo.count() > 0, timeout_ms=20000):
         raise RuntimeError("Chat model list did not load")
 
     for index in range(widget.model_combo.count()):
-        if widget.model_combo.itemData(index) == model_name:
+        payload = widget.model_combo.itemData(index)
+        if isinstance(payload, dict):
+            if payload.get("name") != model_name:
+                continue
+            if provider_id and payload.get("provider_id") != provider_id:
+                continue
+            widget.model_combo.setCurrentIndex(index)
+            QApplication.instance().processEvents()
+            return True
+        elif payload == model_name:
             widget.model_combo.setCurrentIndex(index)
             QApplication.instance().processEvents()
             return True
     raise RuntimeError(f"Requested chat model not found: {model_name}")
+
+
+def select_first_provider_model(widget, provider_id):
+    """Select the first available model for one provider id."""
+    if not wait_for(lambda: widget.model_combo.count() > 0, timeout_ms=20000):
+        raise RuntimeError("Chat model list did not load")
+
+    for index in range(widget.model_combo.count()):
+        payload = widget.model_combo.itemData(index)
+        if isinstance(payload, dict) and payload.get("provider_id") == provider_id:
+            widget.model_combo.setCurrentIndex(index)
+            QApplication.instance().processEvents()
+            return dict(payload)
+    raise RuntimeError(f"No chat models available for provider: {provider_id}")
 
 
 def select_prompt_preset(widget, preset_id):

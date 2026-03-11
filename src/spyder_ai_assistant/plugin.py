@@ -86,7 +86,10 @@ class AIChatPlugin(SpyderDockablePlugin):
     CONF_DEFAULTS = [
         ("ai_chat", {
             "ollama_host": "http://localhost:11434",
+            "chat_provider": "ollama",
             "chat_model": "gpt-oss-20b-abliterated",
+            "openai_compatible_base_url": "",
+            "openai_compatible_api_key": "",
             "completion_model":
                 "qooba/qwen3-coder-30b-a3b-instruct:q3_k_m",
             # Stored as "temperature x10" for the current preferences UI.
@@ -205,6 +208,28 @@ class AIChatPlugin(SpyderDockablePlugin):
             self._flush_chat_session_state
         )
         QTimer.singleShot(0, self._restore_initial_chat_session_state)
+
+    def _build_chat_provider_settings(self):
+        """Return the current chat-provider settings snapshot."""
+        return {
+            "ollama_host": self.get_conf(
+                "ollama_host", default="http://localhost:11434"
+            ),
+            "openai_compatible_base_url": self.get_conf(
+                "openai_compatible_base_url",
+                default="",
+            ),
+            "openai_compatible_api_key": self.get_conf(
+                "openai_compatible_api_key",
+                default="",
+            ),
+        }
+
+    def _refresh_chat_provider_settings(self):
+        """Push provider settings to the widget and refresh model listing."""
+        self.get_widget().update_chat_provider_settings(
+            self._build_chat_provider_settings()
+        )
 
     def on_close(self, cancellable=True):
         """Called during Spyder shutdown.
@@ -835,8 +860,33 @@ class AIChatPlugin(SpyderDockablePlugin):
 
     @on_conf_change(option="ollama_host")
     def on_host_changed(self, value):
-        """Propagate Ollama host changes to the chat widget worker."""
-        self.get_widget().update_ollama_host(value)
+        """Propagate Ollama host changes to the provider-aware chat worker."""
+        del value
+        self._refresh_chat_provider_settings()
+
+    @on_conf_change(option="openai_compatible_base_url")
+    def on_openai_compatible_base_url_changed(self, value):
+        """Refresh chat providers after the compatible base URL changes."""
+        del value
+        self._refresh_chat_provider_settings()
+
+    @on_conf_change(option="openai_compatible_api_key")
+    def on_openai_compatible_api_key_changed(self, value):
+        """Refresh chat providers after the compatible API key changes."""
+        del value
+        self._refresh_chat_provider_settings()
+
+    @on_conf_change(option="chat_provider")
+    def on_chat_provider_changed(self, value):
+        """Refresh model selection after the default provider changes."""
+        del value
+        self._refresh_chat_provider_settings()
+
+    @on_conf_change(option="chat_model")
+    def on_chat_model_changed(self, value):
+        """Refresh model selection after the default chat model changes."""
+        del value
+        self._refresh_chat_provider_settings()
 
     @on_plugin_teardown(plugin=Plugins.Preferences)
     def on_preferences_teardown(self):

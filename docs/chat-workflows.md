@@ -29,6 +29,14 @@ its own working mode:
 The selector is shared in the toolbar, but the chosen mode is stored on the
 active chat session rather than globally.
 
+The model selector is provider-aware. The same dropdown can list:
+
+- local Ollama chat models
+- models discovered from one configured OpenAI-compatible endpoint
+
+Each entry keeps provider metadata in the tooltip so it is clear where the
+next request will go before you send it.
+
 ## Prompt presets
 
 Prompt presets are built-in system-prompt overlays for the active chat tab.
@@ -70,6 +78,17 @@ Behavior:
 - tabs with active overrides show `Settings*`
 - reopening or duplicating a saved session preserves its saved overrides
 - resetting a tab back to global defaults clears the saved override fields
+
+## Provider-aware chat transport
+
+Chat transport is intentionally broader than the completion transport.
+
+Behavior:
+
+- chat can target Ollama or an OpenAI-compatible endpoint
+- the provider switch happens in the same dock widget with no restart required
+- provider-specific connection failures identify the failing endpoint
+- completions remain Ollama-backed in the current shipped design
 
 ## Session persistence and history
 
@@ -128,6 +147,19 @@ The chat pane exposes one-click actions for the highest-frequency debugging flow
 The first four actions reuse the runtime bridge described in [runtime-inspection.md](runtime-inspection.md). They do not inject console or variable dumps directly. Instead, they steer the model to request live runtime data only when needed.
 
 If the input box already contains text, that text is folded into the quick action prompt instead of being discarded.
+
+## Completion intelligence
+
+Inline completions remain separate from the chat worker, but the shipped
+completion workflow is now richer than plain prefix/suffix prompting.
+
+Behavior:
+
+- small relevant snippets from other tracked open files can be attached when
+  the current completion target clearly relates to them
+- repeated requests on the same visible target can ask for and cycle through
+  alternative candidates locally
+- the completion status tooltip reports neighbor-context and cycling counters
 
 ## Code apply actions
 
@@ -191,6 +223,8 @@ Useful log lines include:
 - `Chat prompt preset set to Debugging for session ...`
 - `Chat prompt preset set to Documentation for session ...`
 - `Updated chat settings for session ...: temperature=0.2 (tab override), max_tokens=128 (tab override)`
+- `Chat worker provider settings updated: ollama=..., openai_compatible=...`
+- `Chat worker discovered 4 chat model(s)`
 - `Building chat system prompt with preset debugging for session ...`
 - `Built chat history browser with 2 saved session(s)`
 - `Built exchange delete browser with 3 exchange(s) for session ...`
@@ -208,7 +242,7 @@ Useful log lines include:
 - `Applied chat code at the current cursor position`
 - `Applied chat code by replacing the current editor selection`
 - `Regenerating the last assistant answer for the active chat tab`
-- `Dispatching chat request for session ... with options {'temperature': 0.2, 'num_predict': 128}`
+- `Dispatching chat request for session ... via ollama/... with options {'temperature': 0.2, 'num_predict': 128}`
 - `Exported chat session to ...`
 
 ## Manual validation checklist
@@ -229,3 +263,4 @@ Useful log lines include:
 14. Click `Regenerate` after deleting a middle exchange and confirm the remaining last user turn still reruns correctly.
 15. Close and reopen Spyder with the same project open, then confirm the chat tabs, active tab, prompt presets, per-tab overrides, and deleted exchange state restore from `.spyproject/ai-assistant/chat-sessions.json`.
 16. Export the conversation and confirm the Markdown contains model, chat mode, per-tab settings, editor context, and runtime metadata without the deleted exchange.
+17. Configure an OpenAI-compatible base URL in Preferences, refresh models, select the compatible entry from the toolbar, and confirm the next chat answer comes from that endpoint.
