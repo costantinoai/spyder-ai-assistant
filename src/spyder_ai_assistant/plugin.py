@@ -471,7 +471,7 @@ class AIChatPlugin(SpyderDockablePlugin):
 
     # --- Ghost text routing ---
 
-    def _on_ghost_text_ready(self, filename, text):
+    def _on_ghost_text_ready(self, filename, text, target):
         """Route ghost text from the completion provider to the right editor.
 
         Called when the AI completion provider has a suggestion ready.
@@ -481,6 +481,7 @@ class AIChatPlugin(SpyderDockablePlugin):
         Args:
             filename: The file the completion is for.
             text: The completion text to show as ghost text.
+            target: Cursor target metadata for stale-display checks.
         """
         editor = self._filename_to_editor.get(filename)
         if editor is None:
@@ -492,7 +493,12 @@ class AIChatPlugin(SpyderDockablePlugin):
             logger.debug("No ghost manager for editor %d", id(editor))
             return
 
-        manager.show_suggestion(text)
+        shown = manager.show_suggestion(text, target=target)
+        if not shown:
+            logger.debug(
+                "Ghost text suppressed for %s because the editor target no longer matched",
+                filename,
+            )
 
     # --- Completions plugin wiring ---
 

@@ -16,7 +16,7 @@ AI-powered code assistance for [Spyder IDE](https://www.spyder-ide.org/), runnin
 
 **Editor context awareness** — The AI automatically sees your current file, cursor position, selection, other open tabs, and your project's file tree. Right-click any selection in the editor to trigger actions like *Ask AI*, *Explain*, *Fix*, or *Add Docstring*.
 
-**Inline code completions** — Copilot-style ghost text appears as you type. Press Tab to accept. The completions use Ollama's Fill-in-Middle API when the model supports it, with automatic fallback to prefix-only generation. You can also trigger completions manually with `Ctrl+Shift+Space`.
+**Inline code completions** — Copilot-style ghost text appears as you type. Press Tab to accept, or keep typing through a matching suggestion without losing the remaining tail. The completions use Ollama's Fill-in-Middle API when the model supports it, with automatic fallback to prefix-only generation. You can also trigger completions manually with `Ctrl+Shift+Space`.
 
 ![Ghost text inline completions](docs/screenshots/ghost-completions.png)
 
@@ -112,9 +112,9 @@ Behind the scenes, the AI always has access to the full content of your current 
 
 ### Inline completions
 
-Completions trigger automatically as you type (with a 300ms debounce). Ghost text appears dimmed at your cursor — press Tab to accept it. The status bar at the bottom shows the current state: the active model name, "offline" if Ollama isn't reachable, or "generating" while a completion is in flight.
+Completions trigger automatically as you type with a 100 ms debounce. Ghost text appears dimmed at your cursor — press Tab to accept it, Escape to dismiss it, or keep typing when the next characters already match the suggestion. The status bar at the bottom shows the current state: the active model name, "offline" if Ollama isn't reachable, or "generating" while a completion is in flight.
 
-The plugin uses Ollama's FIM (Fill-in-Middle) API for models that support it, which produces better completions because the model can see code both before and after the cursor. For models without FIM support, it falls back to prefix-only generation automatically.
+The plugin uses Ollama's FIM (Fill-in-Middle) API for models that support it, which produces better completions because the model can see code both before and after the cursor. For models without FIM support, it falls back to prefix-only generation automatically. The provider also suppresses low-value requests in bad contexts, such as extremely short prefixes or mid-line positions where substantial code already exists to the right of the cursor.
 
 ---
 

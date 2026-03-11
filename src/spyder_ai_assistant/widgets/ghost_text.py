@@ -62,6 +62,12 @@ class _GhostEventFilter(QObject):
             return False
 
         key = event.key()
+        logger.debug(
+            "Ghost keypress intercepted: key=%r text=%r target=%s",
+            key,
+            event.text(),
+            obj.__class__.__name__,
+        )
 
         if key == Qt.Key_Tab and not (event.modifiers() & Qt.ControlModifier):
             # Tab pressed with ghost text visible → accept the suggestion.
@@ -75,6 +81,9 @@ class _GhostEventFilter(QObject):
             return True  # Consume the event
 
         else:
+            if self._manager.try_accept_typed_text(event):
+                return True
+
             # Any other key → clear ghost text first, then let the editor
             # process the key normally. The user is typing new code, so
             # the suggestion is stale.
@@ -132,6 +141,7 @@ class GhostTextManager:
         self._editor = editor
         self._ghost_active = False
         self._ghost_text = ""
+        self._target = None
         # Document positions of the inserted ghost text, used for
         # applying extra selections (gray overlay) on the range.
         self._ghost_start = -1
@@ -141,6 +151,13 @@ class GhostTextManager:
         # Must be a proper QObject subclass for installEventFilter.
         self._event_filter = _GhostEventFilter(self, editor)
         editor.installEventFilter(self._event_filter)
+        self._event_targets = [editor]
+        viewport = getattr(editor, "viewport", None)
+        if callable(viewport):
+            viewport = viewport()
+        if viewport is not None and viewport is not editor:
+            viewport.installEventFilter(self._event_filter)
+            self._event_targets.append(viewport)
 
         # Event filter on the completion popup to block it while ghost
         # text is active. This prevents the LSP dropdown from appearing
@@ -157,7 +174,7 @@ class GhostTextManager:
         # because we block editor signals during those operations.
         editor.cursorPositionChanged.connect(self._on_cursor_moved)
 
-    def show_suggestion(self, text):
+    def show_suggestion(self, text, target=None):
         """Display a ghost text suggestion at the current cursor position.
 
         Inserts the text into the document, then applies a gray extra
@@ -172,15 +189,22 @@ class GhostTextManager:
 
         Args:
             text: The completion text to show. Can be multi-line.
+            target: Optional target metadata dict containing the cursor
+                position the suggestion was generated for.
         """
         # Clear any previous ghost text first
         if self._ghost_active:
             self.clear()
 
         if not text:
-            return
+            return False
+
+        if not self._matches_target(target):
+            logger.debug("Ghost text skipped because the editor target moved")
+            return False
 
         self._ghost_text = text
+        self._target = target or {}
         cursor = self._editor.textCursor()
         original_pos = cursor.position()
 
@@ -223,6 +247,7 @@ class GhostTextManager:
         self._hide_completion_popup()
 
         logger.debug("Ghost text shown: %d chars", len(text))
+        return True
 
     def clear(self):
         """Remove the ghost text from the document.
@@ -247,8 +272,10 @@ class GhostTextManager:
 
         self._ghost_active = False
         self._ghost_text = ""
+        self._target = None
         self._ghost_start = -1
         self._ghost_end = -1
+        logger.debug("Ghost text cleared")
 
         # Remove our ghost extra selection. After undo the text is gone,
         # so the selection is invalid. Rebuild without it.
@@ -277,6 +304,53 @@ class GhostTextManager:
         # the undo stack and triggers textChanged/dirty indicators.
         self._editor.insert_text(text)
         logger.debug("Ghost text accepted: %d chars", len(text))
+
+    def try_accept_typed_text(self, event):
+        """Consume a keypress that matches the next ghost-text prefix.
+
+        This lets the user keep typing through a suggestion without making
+        the rest of the ghost text disappear immediately.
+        """
+        if not self._ghost_active:
+            return False
+
+        text = event.text() or ""
+        modifiers = event.modifiers()
+        if (
+            not text
+            or not text.isprintable()
+            or modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)
+        ):
+            return False
+
+        if not self._ghost_text.startswith(text):
+            return False
+
+        full_text = self._ghost_text
+        remainder = full_text[len(text):]
+
+        self.clear()
+        self._editor.insert_text(text)
+
+        if remainder:
+            cursor = self._editor.textCursor()
+            self.show_suggestion(
+                remainder,
+                target={
+                    "offset": cursor.position(),
+                    "line": cursor.blockNumber(),
+                    "column": cursor.columnNumber(),
+                },
+            )
+            logger.debug(
+                "Ghost text advanced by typed prefix: %r (%d chars remain)",
+                text,
+                len(remainder),
+            )
+        else:
+            logger.debug("Ghost text fully accepted by typing: %r", text)
+
+        return True
 
     def request_completion(self):
         """Manually trigger a completion request.
@@ -369,6 +443,21 @@ class GhostTextManager:
         if self._ghost_active:
             self.clear()
 
+    def _matches_target(self, target):
+        """Return True if the editor is still at the target cursor position."""
+        if not target:
+            return True
+
+        try:
+            cursor = self._editor.textCursor()
+            return (
+                cursor.position() == int(target.get("offset", -1))
+                and cursor.blockNumber() == int(target.get("line", -1))
+                and cursor.columnNumber() == int(target.get("column", -1))
+            )
+        except Exception:
+            return False
+
     def cleanup(self):
         """Remove ghost text, event filters, and disconnect signals.
 
@@ -386,10 +475,11 @@ class GhostTextManager:
         except (RuntimeError, TypeError):
             pass  # Already disconnected or editor destroyed
 
-        try:
-            self._editor.removeEventFilter(self._event_filter)
-        except (RuntimeError, TypeError):
-            pass
+        for target in self._event_targets:
+            try:
+                target.removeEventFilter(self._event_filter)
+            except (RuntimeError, TypeError):
+                pass
 
         # Remove the completion popup blocker
         if self._popup_blocker is not None:

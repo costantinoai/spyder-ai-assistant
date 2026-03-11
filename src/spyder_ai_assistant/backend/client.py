@@ -139,7 +139,7 @@ class OllamaClient:
             yield result
 
     def generate_completion(self, model, prefix, suffix="",
-                            system=None, options=None):
+                            system=None, options=None, single_line=False):
         """Generate a FIM (Fill-in-Middle) code completion.
 
         Calls Ollama's /api/generate endpoint with prefix and suffix
@@ -159,6 +159,8 @@ class OllamaClient:
             suffix: Code text after the cursor (provides right-side context).
             system: System prompt override. Defaults to a minimal code-only prompt.
             options: Model parameters dict (temperature, num_predict, etc.).
+            single_line: If True, stop at the first newline. Used for the
+                common "finish this line" case so completions stay concise.
 
         Returns:
             The generated completion text (str).
@@ -184,18 +186,21 @@ class OllamaClient:
             "7) Write complete, well-structured code. Include docstrings, "
             "comments, and full function bodies when appropriate."
         )
-        merged_options = options or {}
+        merged_options = dict(options or {})
 
         # Add stop sequences to prevent the model from generating too much.
         # Stop on patterns that indicate a new top-level definition or
         # excessive blank lines (signals the function/block is complete).
         if "stop" not in merged_options:
-            merged_options["stop"] = [
-                "\n\n\n",         # Triple newline = end of logical block
-                "\nclass ",       # New class definition
-                "\ndef ",         # New top-level function
-                "\n# %%",        # Spyder cell separator
-            ]
+            if single_line:
+                merged_options["stop"] = ["\n"]
+            else:
+                merged_options["stop"] = [
+                    "\n\n\n",      # Triple newline = end of logical block
+                    "\nclass ",    # New class definition
+                    "\ndef ",      # New top-level function
+                    "\n# %%",      # Spyder cell separator
+                ]
 
         # Try FIM (with suffix) first, unless we already know this model
         # doesn't support it. Fall back to prefix-only on "does not support

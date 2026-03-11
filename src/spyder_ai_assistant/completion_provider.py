@@ -11,13 +11,15 @@ Architecture:
   custom signal (sig_ghost_text_ready) that the plugin wires to editors
 
 Signal flow:
-  Editor types → Spyder → send_request(DOCUMENT_COMPLETION) → debounce(300ms)
+  Editor types → Spyder → send_request(DOCUMENT_COMPLETION) → debounce(100ms)
   → CompletionWorker.perform_completion() [QThread]
   → OllamaClient.generate_completion() → sig_completion_ready
   → sig_ghost_text_ready → plugin → GhostTextManager → inline overlay
 """
 
 import logging
+import os
+import re
 from dataclasses import dataclass
 
 from qtpy.QtCore import QObject, QThread, QTimer, Signal, Slot
@@ -46,6 +48,63 @@ COMPLETION_PROVIDER_NAME = "ai_chat"
 #   generates code that duplicates what's already there.
 MAX_PREFIX_CHARS = 3000
 MAX_SUFFIX_CHARS = 3000
+MIN_PROMPT_CHARS = 10
+DEFAULT_DEBOUNCE_MS = 100
+
+MIDDLE_OF_LINE_ALLOWED_SUFFIX_RE = re.compile(
+    r"^\s*[\)\}\]\"'`]*\s*[:{;,]?\s*$"
+)
+PYTHON_BLOCK_START_RE = re.compile(
+    r"^\s*(?:async\s+def|def|class|if|elif|else|for|while|with|try|except|finally|match|case)\b.*:\s*$"
+)
+
+_COMMENT_MARKERS_BY_EXTENSION = {
+    ".py": "#",
+    ".pyw": "#",
+    ".sh": "#",
+    ".bash": "#",
+    ".zsh": "#",
+    ".yml": "#",
+    ".yaml": "#",
+    ".toml": "#",
+    ".ini": "#",
+    ".cfg": "#",
+    ".r": "#",
+    ".rb": "#",
+    ".js": "//",
+    ".jsx": "//",
+    ".ts": "//",
+    ".tsx": "//",
+    ".java": "//",
+    ".c": "//",
+    ".cc": "//",
+    ".cpp": "//",
+    ".cxx": "//",
+    ".h": "//",
+    ".hpp": "//",
+    ".go": "//",
+    ".rs": "//",
+    ".php": "//",
+    ".swift": "//",
+    ".kt": "//",
+    ".kts": "//",
+    ".scala": "//",
+    ".sql": "--",
+    ".html": "<!--",
+    ".htm": "<!--",
+    ".xml": "<!--",
+    ".css": "/*",
+    ".scss": "/*",
+    ".sass": "/*",
+}
+
+
+@dataclass
+class _TrackedDocumentState:
+    """Latest known text plus a local monotonic version for one file."""
+
+    text: str
+    version: int = 1
 
 
 @dataclass
@@ -62,6 +121,30 @@ class _QueuedCompletionRequest:
 
     req: dict
     req_id: int
+    target: "_CompletionTarget"
+
+
+@dataclass(frozen=True)
+class _CompletionTarget:
+    """Exact editor state a completion request was created for."""
+
+    filename: str
+    version: int
+    line: int
+    column: int
+    offset: int
+    current_word: str = ""
+
+    def to_payload(self):
+        """Serialize a target for ghost-text routing."""
+        return {
+            "filename": self.filename,
+            "version": self.version,
+            "line": self.line,
+            "column": self.column,
+            "offset": self.offset,
+            "current_word": self.current_word,
+        }
 
 
 class _LatestOnlyCompletionQueue:
@@ -151,8 +234,6 @@ def _clean_completion(raw_text, prefix, suffix=""):
     Returns:
         Clean completion text ready for ghost text display, or "".
     """
-    import re
-
     if not raw_text:
         return ""
 
@@ -246,7 +327,69 @@ def _clean_completion(raw_text, prefix, suffix=""):
     while lines and not lines[-1].strip():
         lines.pop()
 
-    return "\n".join(lines)
+    # Remove trailing whitespace from each line. This almost never helps
+    # a ghost suggestion and often creates ugly visual padding.
+    lines = [line.rstrip() for line in lines]
+
+    cleaned = "\n".join(lines).rstrip()
+    if suffix and cleaned and suffix.startswith(cleaned):
+        return ""
+    return cleaned
+
+
+def _build_completion_path_marker(filename):
+    """Return a small path marker that improves completion prompt quality."""
+    basename = os.path.basename(filename or "") or "untitled"
+    extension = os.path.splitext(basename)[1].lower()
+    marker = _COMMENT_MARKERS_BY_EXTENSION.get(extension, "#")
+
+    if marker == "<!--":
+        return f"<!-- Path: {basename} -->"
+    if marker == "/*":
+        return f"/* Path: {basename} */"
+    return f"{marker} Path: {basename}"
+
+
+def _build_prompt_prefix(filename, prefix):
+    """Prepend a lightweight path marker to the completion prompt."""
+    marker = _build_completion_path_marker(filename)
+    if not prefix:
+        return f"{marker}\n"
+    return f"{marker}\n{prefix}"
+
+
+def _looks_like_valid_middle_of_line_suffix(suffix):
+    """Return True when the rest of the current line is light punctuation."""
+    current_line_suffix = (suffix or "").split("\n", 1)[0]
+    if not current_line_suffix.strip():
+        return True
+    return bool(MIDDLE_OF_LINE_ALLOWED_SUFFIX_RE.fullmatch(current_line_suffix))
+
+
+def _should_allow_multiline_completion(prefix):
+    """Allow multiline completions only in block-like contexts."""
+    lines = prefix.splitlines()
+    for line in reversed(lines):
+        stripped = line.rstrip()
+        if stripped.strip():
+            if PYTHON_BLOCK_START_RE.match(stripped):
+                return True
+            if stripped.endswith(("(", "[", "{", "\\")):
+                return True
+            return False
+    return False
+
+
+def _completion_already_in_document(completion_text, suffix):
+    """Return True when the generated text already exists after the cursor."""
+    if not completion_text:
+        return False
+
+    normalized_completion = completion_text.rstrip()
+    if not normalized_completion:
+        return False
+
+    return (suffix or "").startswith(normalized_completion)
 
 
 # ---------------------------------------------------------------------------
@@ -335,12 +478,16 @@ class CompletionWorker(QObject):
             return
 
         try:
+            client_options = dict(options or {})
+            single_line = bool(client_options.pop("_single_line", False))
+
             # Call the Ollama FIM API (blocking, but we're on a worker thread)
             raw_text = self._client.generate_completion(
                 model=model,
                 prefix=prefix,
                 suffix=suffix,
-                options=options,
+                options=client_options,
+                single_line=single_line,
             )
 
             # Clean the response: strip prefix echo, suffix echo, markdown
@@ -393,7 +540,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
     Key features:
     - Ghost text display (Cursor/VS Code Copilot style, Tab to accept)
-    - Debounced requests (300ms) to avoid overwhelming the model
+    - Debounced requests (100ms by default) to avoid overwhelming the model
     - Stale request detection (only latest request is delivered)
     - Separate from the chat plugin (independent worker, config, lifecycle)
     - Configurable model, temperature, and token limits
@@ -401,14 +548,15 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
     Entry point: spyder.completions → ai_chat
 
     Signals:
-        sig_ghost_text_ready(str, str): (filename, completion_text)
+        sig_ghost_text_ready(str, str, dict): (filename, completion_text, target)
             Emitted when a completion is ready for ghost text display.
             The plugin connects this to the active editor's GhostTextManager.
     """
 
     # Custom signal for ghost text — emitted instead of sending to dropdown.
-    # (filename, completion_text) — the plugin routes this to the right editor.
-    sig_ghost_text_ready = Signal(str, str)
+    # (filename, completion_text, target_dict) — the plugin routes this to
+    # the right editor and validates the cursor target before display.
+    sig_ghost_text_ready = Signal(str, str, dict)
 
     # --- Provider identity ---
     COMPLETION_PROVIDER_NAME = COMPLETION_PROVIDER_NAME
@@ -430,7 +578,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         ("completion_temperature", 0.15),
         ("completion_max_tokens", 512),
         ("completions_enabled", True),
-        ("debounce_ms", 300),
+        ("debounce_ms", DEFAULT_DEBOUNCE_MS),
     ]
 
     def __init__(self, parent, config):
@@ -440,7 +588,9 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         # Mirrors the document text for each open file. Updated via
         # DID_OPEN / DID_CHANGE events so we always have the latest
         # content for prefix/suffix extraction.
-        self._file_contents = {}
+        self._document_states = {}
+        # Latest completion target requested for each filename.
+        self._latest_target_by_filename = {}
 
         # --- Debouncing ---
         # QTimer single-shot to coalesce rapid keystrokes into one request.
@@ -453,12 +603,9 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         # Keep only the freshest requests instead of letting stale work
         # pile up behind the worker thread.
         self._request_queue = _LatestOnlyCompletionQueue()
-        # Monotonically increasing request ID for staleness detection.
-        # Only the response matching _latest_req_id is delivered.
-        self._latest_req_id = 0
-        # Track which filename each request belongs to, so we can route
-        # the ghost text response to the correct editor
-        self._req_filename = {}  # {req_id: filename}
+        # Track exact request targets so responses can be matched against
+        # the current editor state before ghost text is shown.
+        self._req_targets = {}
 
         # --- Background worker ---
         host = self.get_conf("ollama_host")
@@ -516,7 +663,9 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._debounce_timer.stop()
         self._worker.stop()
         self._started = False
-        self._file_contents.clear()
+        self._document_states.clear()
+        self._latest_target_by_filename.clear()
+        self._req_targets.clear()
         logger.info("AI completion provider shut down")
 
     def send_request(self, language, req_type, req, req_id):
@@ -538,20 +687,40 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             filename = req.get("file", "")
             text = req.get("text", "")
             if filename:
-                self._file_contents[filename] = text
-                logger.debug("DID_OPEN: tracked %s (%d chars)", filename, len(text))
+                self._document_states[filename] = _TrackedDocumentState(
+                    text=text,
+                    version=1,
+                )
+                logger.debug(
+                    "DID_OPEN: tracked %s (version=%d, %d chars)",
+                    filename,
+                    1,
+                    len(text),
+                )
 
         elif req_type == CompletionRequestTypes.DOCUMENT_DID_CHANGE:
             # Update the stored file content with the latest version
             filename = req.get("file", "")
             text = req.get("text", "")
             if filename:
-                self._file_contents[filename] = text
+                previous = self._document_states.get(filename)
+                version = 1 if previous is None else previous.version + 1
+                self._document_states[filename] = _TrackedDocumentState(
+                    text=text,
+                    version=version,
+                )
+                logger.debug(
+                    "DID_CHANGE: tracked %s (version=%d, %d chars)",
+                    filename,
+                    version,
+                    len(text),
+                )
 
         elif req_type == CompletionRequestTypes.DOCUMENT_DID_CLOSE:
             filename = req.get("file", "")
             if filename:
-                self._file_contents.pop(filename, None)
+                self._document_states.pop(filename, None)
+                self._latest_target_by_filename.pop(filename, None)
 
         elif req_type == CompletionRequestTypes.DOCUMENT_COMPLETION:
             # Completion request — debounce to avoid spamming the model
@@ -574,6 +743,13 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             req: DOCUMENT_COMPLETION request dict.
             req_id: Unique request ID.
         """
+        target = self._build_completion_target(req)
+        if target is None:
+            self._emit_empty_response(req_id)
+            return
+
+        self._latest_target_by_filename[target.filename] = target
+
         # Check if completions are enabled
         if not self.get_conf("completions_enabled"):
             self._emit_empty_response(req_id)
@@ -581,12 +757,10 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
         # Replace any previous debounced request and answer it immediately.
         dropped = self._request_queue.replace_debounced(
-            _QueuedCompletionRequest(req=req, req_id=req_id)
+            _QueuedCompletionRequest(req=req, req_id=req_id, target=target)
         )
         if dropped is not None:
             self._emit_empty_response(dropped.req_id)
-
-        self._latest_req_id = req_id
 
         # Restart the debounce timer
         debounce_ms = self.get_conf("debounce_ms")
@@ -616,16 +790,28 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         """Dispatch a request to the worker thread if it is still valid."""
         req = request.req
         req_id = request.req_id
+        target = request.target
 
         # Extract file content and cursor position
-        filename = req.get("file", "")
-        offset = req.get("offset", 0)
-        text = self._file_contents.get(filename, "")
+        filename = target.filename
+        state = self._document_states.get(filename)
+        text = state.text if state is not None else ""
 
         if not text:
             logger.debug("No file content for %s, skipping completion", filename)
             self._emit_empty_response(req_id)
             return
+
+        if state is None or state.version != target.version:
+            logger.debug(
+                "Skipping completion req_id=%d for %s because the document version changed",
+                req_id,
+                filename,
+            )
+            self._emit_empty_response(req_id)
+            return
+
+        offset = max(0, min(target.offset, len(text)))
 
         # Split file content at cursor position into prefix (before cursor)
         # and suffix (after cursor) for the FIM model
@@ -637,26 +823,49 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         prefix = prefix[-MAX_PREFIX_CHARS:]
         suffix = suffix[:MAX_SUFFIX_CHARS]
 
+        skip_reason = self._should_skip_completion(req, prefix, suffix)
+        if skip_reason:
+            logger.debug(
+                "Skipping completion req_id=%d for %s: %s",
+                req_id,
+                filename,
+                skip_reason,
+            )
+            self._emit_empty_response(req_id)
+            self._set_ready_status()
+            return
+
+        prompt_prefix = _build_prompt_prefix(filename, prefix)
+        allow_multiline = _should_allow_multiline_completion(prefix)
+
         # Build model options from config
         model = self.get_conf("completion_model")
         options = {
             "temperature": self.get_conf("completion_temperature"),
             "num_predict": self.get_conf("completion_max_tokens"),
+            "_single_line": not allow_multiline,
         }
 
-        # Track which file this request is for (to route ghost text later)
-        self._req_filename[req_id] = filename
+        # Track which request target this response belongs to.
+        self._req_targets[req_id] = target
         self._request_queue.start_active(req_id)
         self._update_status("AI: generating")
 
         logger.debug(
-            "Dispatching completion req_id=%d, model=%s, prefix=%d chars, suffix=%d chars",
-            req_id, model, len(prefix), len(suffix),
+            "Dispatching completion req_id=%d, model=%s, version=%d, line=%d, column=%d, single_line=%s, prefix=%d chars, suffix=%d chars",
+            req_id,
+            model,
+            target.version,
+            target.line,
+            target.column,
+            not allow_multiline,
+            len(prompt_prefix),
+            len(suffix),
         )
 
         # Dispatch to the worker thread via signal
         self._worker.sig_perform_completion.emit(
-            req_id, model, prefix, suffix, options
+            req_id, model, prompt_prefix, suffix, options
         )
 
     # --- Worker response handlers ---
@@ -683,19 +892,50 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             {"params": []},
         )
 
-        # Look up the filename for this request
-        filename = self._req_filename.pop(req_id, "")
+        target = self._req_targets.pop(req_id, None)
+        if target is None:
+            self._finish_request(req_id)
+            return
+
+        filename = target.filename
+        state = self._document_states.get(filename)
+
+        if not self._is_target_current(target):
+            logger.debug(
+                "Discarded stale completion req_id=%d for %s",
+                req_id,
+                filename,
+            )
+            self._finish_request(req_id)
+            return
+
+        current_suffix = ""
+        if state is not None and 0 <= target.offset <= len(state.text):
+            current_suffix = state.text[target.offset:]
 
         if (completion_text
                 and filename
-                and req_id == self._latest_req_id
-                and self.get_conf("completions_enabled")):
+                and self.get_conf("completions_enabled")
+                and not _completion_already_in_document(
+                    completion_text, current_suffix
+                )):
             # Emit ghost text signal — the plugin will route this to the
             # appropriate editor's GhostTextManager
-            self.sig_ghost_text_ready.emit(filename, completion_text)
+            self.sig_ghost_text_ready.emit(
+                filename,
+                completion_text,
+                target.to_payload(),
+            )
             logger.debug(
                 "Ghost text ready for %s: %d chars",
                 filename, len(completion_text),
+            )
+        elif completion_text and _completion_already_in_document(
+                completion_text, current_suffix):
+            logger.debug(
+                "Filtered completion req_id=%d for %s because it is already present in the document",
+                req_id,
+                filename,
             )
 
         self._finish_request(req_id)
@@ -717,7 +957,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             restore_ready = False
         else:
             self._set_ready_status()
-        self._req_filename.pop(req_id, None)
+        self._req_targets.pop(req_id, None)
         self._finish_request(req_id, restore_ready=restore_ready)
 
     # --- Status bar helper ---
@@ -731,6 +971,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         Args:
             text: Short status string (e.g., "AI: model-name").
         """
+        logger.debug("Completion status updated: %s", text)
         self.sig_call_statusbar.emit(
             AIChatCompletionStatus.ID,
             "set_value",
@@ -802,3 +1043,46 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
                 self._emit_empty_response(req_id)
             self._update_status("AI: disabled")
             logger.info("AI completions disabled")
+
+    # --- Request metadata helpers ---
+
+    def _build_completion_target(self, req):
+        """Build a staleness target from a Spyder DOCUMENT_COMPLETION request."""
+        filename = req.get("file", "")
+        if not filename:
+            return None
+
+        state = self._document_states.get(filename)
+        version = state.version if state is not None else 0
+
+        return _CompletionTarget(
+            filename=filename,
+            version=version,
+            line=int(req.get("line", 0)),
+            column=int(req.get("column", 0)),
+            offset=int(req.get("offset", 0)),
+            current_word=str(req.get("current_word", "") or ""),
+        )
+
+    def _is_target_current(self, target):
+        """Return True when the target still matches the latest editor state."""
+        state = self._document_states.get(target.filename)
+        if state is None or state.version != target.version:
+            return False
+
+        latest_target = self._latest_target_by_filename.get(target.filename)
+        return latest_target == target
+
+    @staticmethod
+    def _should_skip_completion(req, prefix, suffix):
+        """Return a human-readable skip reason for a low-value completion."""
+        if req.get("selection_start") != req.get("selection_end"):
+            return "selection is active"
+
+        if len(prefix.strip()) < MIN_PROMPT_CHARS:
+            return "not enough prefix context"
+
+        if not _looks_like_valid_middle_of_line_suffix(suffix):
+            return "substantial code already exists to the right of the cursor"
+
+        return None
