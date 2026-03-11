@@ -1,10 +1,12 @@
-# Publish to PyPI when a GitHub Release is created.
+# Publish to PyPI when a version tag is pushed.
 #
 # Workflow:
-#   1. Create a git tag:  git tag v0.1.0
-#   2. Push it:           git push origin v0.1.0
-#   3. Create a GitHub Release from the tag (via UI or gh cli)
-#   4. This workflow builds and uploads to PyPI automatically
+#   1. Create a git tag:  git tag -a v0.1.1 -m "v0.1.1: description"
+#   2. Push it:           git push origin v0.1.1
+#   3. This workflow automatically:
+#      a. Builds the sdist and wheel
+#      b. Publishes to PyPI via trusted publishing (OIDC)
+#      c. Creates a GitHub Release from the tag
 #
 # Uses PyPI Trusted Publisher (OIDC) — no API tokens needed.
 # Configure once at: https://pypi.org/manage/project/spyder-ai-assistant/settings/publishing/
@@ -12,8 +14,9 @@
 name: Publish to PyPI
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
 
 jobs:
   build:
@@ -56,3 +59,21 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  release:
+    name: Create GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # required to create releases
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$TAG_NAME" \
+            --title "$TAG_NAME" \
+            --generate-notes
