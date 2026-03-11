@@ -7,7 +7,7 @@ name = "spyder-ai-chat"
 version = "0.1.0"
 description = "AI chat and code completion plugin for Spyder IDE using local Ollama models"
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "CC-BY-NC-4.0"}
 requires-python = ">=3.11"
 dependencies = [
     "spyder>=6.0.0",
