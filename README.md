@@ -22,6 +22,8 @@ AI-powered code assistance for [Spyder IDE](https://www.spyder-ide.org/), runnin
 
 **Thinking/reasoning display** — If you use a model that emits `<think>` blocks (like QwQ or DeepSeek-R1), the plugin renders the reasoning process in a dimmed section above the actual response.
 
+**Live runtime inspection** — The chat panel can inspect the active Spyder IPython session on demand. It does not dump your console, variables, or kernel state into every prompt. Instead, the system prompt teaches the chat model a small read-only inspection protocol so it can ask for the latest traceback, recent console output, or specific live variables only when the question actually depends on runtime state.
+
 Everything runs locally on your GPU through Ollama. It works offline, air-gapped, and with no setup beyond installing the plugin and pulling a model.
 
 ---
@@ -86,6 +88,15 @@ Each conversation lives in its own tab — click "+" to start a new one. Respons
 
 Models that support reasoning (those that emit `<think>` blocks) show their thinking process in a dimmed, collapsible section above the response. You can switch models mid-conversation from the toolbar dropdown, which shows each model's size and VRAM usage. Click Stop to cancel a response mid-stream, and use Export to save any session as Markdown.
 
+When a question depends on your live session, the chat can inspect the active kernel in a read-only way. That includes:
+
+- the latest traceback or error block
+- recent visible console output
+- the current variable list
+- targeted inspection of named variables
+
+This runtime inspection is on demand, not automatic. Ordinary code questions stay file-focused and lean by default. Runtime inspection never executes code on your behalf in Phase 2; it only reads state that Spyder already exposes through the current IPython console and Variable Explorer integration.
+
 ### Editor integration
 
 Select code in the editor and right-click for AI actions:
@@ -148,6 +159,8 @@ Without a GPU, Ollama falls back to CPU. Expect 1–3 tokens/sec on a 3B model �
 
 **Too much VRAM usage** — Run `ollama ps` to see loaded models and `ollama stop <model-name>` to unload them.
 
+**Live runtime questions get a generic answer instead of inspecting the kernel** — Switch to a stronger instruction-following chat model. The runtime bridge depends on the model being willing to emit a small structured request block when it needs console or variable data. In local validation, Qwen-based chat models handled this reliably; weaker or less compliant models may ignore the protocol.
+
 ---
 
 ## Architecture
@@ -171,6 +184,10 @@ src/spyder_ai_assistant/
 ├── backend/
 │   ├── client.py             # OllamaClient: Ollama API wrapper
 │   └── worker.py             # OllamaWorker: QThread for streaming
+├── utils/
+│   ├── context.py            # Editor/project context + prompt assembly
+│   ├── runtime_bridge.py     # Read-only runtime inspection protocol
+│   └── runtime_context.py    # Live shell snapshot service
 ├── widgets/
 │   ├── chat_widget.py        # Chat pane: tabs, toolbar, input
 │   ├── chat_display.py       # Message rendering: Markdown, highlighting
@@ -178,8 +195,6 @@ src/spyder_ai_assistant/
 │   ├── config_page.py        # Preferences page
 │   ├── ghost_text.py         # Ghost text overlay for completions
 │   └── status.py             # Status bar widget
-└── utils/
-    └── context.py            # Editor context extraction
 ```
 
 ---

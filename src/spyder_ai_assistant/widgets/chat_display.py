@@ -262,6 +262,16 @@ class ChatDisplay(QTextEdit):
         self._is_streaming = False
         self._scroll_to_bottom()
 
+    def discard_assistant_message(self):
+        """Drop the current streaming assistant message without saving it."""
+        if not self._is_streaming:
+            return
+
+        self._streaming_buffer = ""
+        self._is_streaming = False
+        self.setHtml(self._html_content)
+        self._scroll_to_bottom()
+
     def append_error(self, message):
         """Display an error message in the chat.
 

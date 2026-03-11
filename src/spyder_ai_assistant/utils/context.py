@@ -1,28 +1,14 @@
-"""Context extraction utilities for the AI Chat plugin.
+"""Context extraction utilities for editor and project state.
 
-Provides pure functions to extract editor state (file content, selection,
-cursor position), IPython console state (output, variables), and build
-context blocks for LLM system prompts. Supports multiple context sources:
-- Active editor file (full content, cursor, selection)
-- Other open editor files (summaries)
-- Project structure (file tree)
-- IPython console output (recent lines)
-- Namespace variables (names, types, values from Variable Explorer)
-
-Context budget management:
-- Active file: included in full (up to MAX_FILE_CHARS)
-- Other open files: included as summaries (first N lines + signature)
-- Project structure: file tree of the project root (limited depth)
-- Console output: last N lines (up to MAX_CONSOLE_CHARS)
-- Variables: up to MAX_VARIABLES with truncated value previews
-
-Used by:
-- plugin.py: to provide context to the chat widget
-- chat_widget.py: to enrich the system prompt with file context
+Runtime kernel context is now collected by the dedicated runtime-context
+service in ``utils.runtime_context``. This module keeps the pure editor and
+project helpers plus the final system-prompt assembly logic.
 """
 
 import os
 import logging
+
+from spyder_ai_assistant.utils.runtime_context import build_runtime_context_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -52,23 +38,6 @@ MAX_TREE_DEPTH = 3
 
 # Maximum entries in the project file tree.
 MAX_TREE_ENTRIES = 50
-
-# Maximum lines of recent console output to include.
-# 50 lines is enough to capture a traceback + surrounding output.
-MAX_CONSOLE_LINES = 50
-
-# Maximum total characters for console output.
-# Prevents very long output lines from bloating the context.
-MAX_CONSOLE_CHARS = 5_000
-
-# Maximum number of namespace variables to include.
-# Beyond this, the variable list becomes noise rather than signal.
-MAX_VARIABLES = 30
-
-# Maximum characters for a single variable's value preview.
-# Large arrays/dataframes are truncated to avoid context explosion.
-MAX_VAR_VALUE_CHARS = 200
-
 
 # File extension → language name mapping for common languages.
 # Used to label file context blocks in the system prompt.
@@ -384,100 +353,6 @@ def _build_file_tree(root_path, max_depth=MAX_TREE_DEPTH,
 
 
 # ---------------------------------------------------------------------------
-# Console context — IPython console output and namespace variables
-# ---------------------------------------------------------------------------
-
-def get_console_context(ipython_console_plugin):
-    """Get the IPython console's recent output and namespace variables.
-
-    Extracts two types of runtime context:
-    1. Console output — the last N lines of text from the active console,
-       including print output, tracebacks, and command results.
-    2. Namespace variables — names, types, and value previews from the
-       active kernel's namespace (what Variable Explorer shows).
-
-    The console output is read synchronously from the console's text widget.
-    Variables are fetched via a blocking kernel call with a short timeout
-    to avoid freezing the UI. If the kernel is busy or unresponsive,
-    variables are silently skipped.
-
-    Args:
-        ipython_console_plugin: The Spyder IPythonConsole plugin instance
-            (may be None).
-
-    Returns:
-        Dict with optional keys:
-            - console_output (str): Recent lines from the console.
-            - variables (list[str]): Variable summaries like
-              "x (int): 42", "df (DataFrame): (100, 5)".
-        Returns empty dict if the plugin is unavailable or no console
-        is active.
-    """
-    if ipython_console_plugin is None:
-        return {}
-
-    try:
-        shellwidget = ipython_console_plugin.get_current_shellwidget()
-    except Exception:
-        return {}
-
-    if shellwidget is None:
-        return {}
-
-    result = {}
-
-    # --- Console output (last N lines) ---
-    # Read directly from the console's QPlainTextEdit control.
-    # This contains everything the user sees: print output, tracebacks,
-    # In/Out prompts, and system messages.
-    try:
-        control = shellwidget._control
-        if control is not None:
-            full_text = control.toPlainText() or ""
-            lines = full_text.split("\n")
-            # Take only the last N lines to keep context focused
-            recent_lines = lines[-MAX_CONSOLE_LINES:]
-            console_text = "\n".join(recent_lines)
-            # Truncate if individual lines are very long
-            if len(console_text) > MAX_CONSOLE_CHARS:
-                console_text = console_text[-MAX_CONSOLE_CHARS:]
-            if console_text.strip():
-                result["console_output"] = console_text
-    except Exception as e:
-        logger.debug("Failed to get console output: %s", e)
-
-    # --- Namespace variables ---
-    # Use a blocking kernel call with a short timeout. This is called
-    # when the user clicks Send, so a brief delay is acceptable.
-    # If the kernel is busy (e.g., running code), the call times out
-    # and we skip variables rather than blocking the UI.
-    try:
-        if hasattr(shellwidget, "spyder_kernel_ready") and \
-                shellwidget.spyder_kernel_ready:
-            namespace_view = shellwidget.call_kernel(
-                blocking=True, timeout=2
-            ).get_namespace_view()
-
-            if namespace_view:
-                var_summaries = []
-                for name, info in list(namespace_view.items())[:MAX_VARIABLES]:
-                    var_type = info.get("type", "?")
-                    var_view = info.get("view", "")
-                    # Truncate long value previews (large arrays, dataframes)
-                    if len(var_view) > MAX_VAR_VALUE_CHARS:
-                        var_view = var_view[:MAX_VAR_VALUE_CHARS] + "..."
-                    var_summaries.append(f"{name} ({var_type}): {var_view}")
-                if var_summaries:
-                    result["variables"] = var_summaries
-    except Exception as e:
-        # TimeoutError, ConnectionError, or kernel not responding.
-        # Silently skip variables — they're nice-to-have, not critical.
-        logger.debug("Failed to get namespace variables: %s", e)
-
-    return result
-
-
-# ---------------------------------------------------------------------------
 # System prompt context builders
 # ---------------------------------------------------------------------------
 
@@ -485,12 +360,11 @@ def build_system_context_block(context, open_files=None, project=None,
                                console=None):
     """Build the full context block for the chat system prompt.
 
-    Assembles context from up to five sources:
+    Assembles context from editor, project, and cached runtime sources:
     1. Project structure — file tree and project root
     2. Active file — full content with cursor position and selection
-    3. Other open files — summaries (first ~30 lines each)
-    4. IPython console output — recent lines (tracebacks, print output)
-    5. Namespace variables — names, types, and value previews
+    3. Cached runtime context — status, latest error, variables, console output
+    4. Other open files — summaries (first ~30 lines each)
 
     Each section is clearly delimited so the LLM can identify and
     reference specific parts of the context.
@@ -499,8 +373,8 @@ def build_system_context_block(context, open_files=None, project=None,
         context: Dict from get_editor_context() (active file).
         open_files: List of dicts from get_open_files_context() (optional).
         project: Dict from get_project_context() (optional).
-        console: Dict from get_console_context() (optional).
-            Keys: "console_output" (str), "variables" (list[str]).
+        console: Dict from RuntimeContextService.get_current_context()
+            (optional).
 
     Returns:
         A multi-line string for the system prompt, or "" if no context.
@@ -556,7 +430,13 @@ def build_system_context_block(context, open_files=None, project=None,
                 f"--- end selected text ---"
             )
 
-    # --- Section 3: Other open files (summaries) ---
+    # --- Section 3: Cached runtime context ---
+    # Runtime context is built by the runtime-context service and already
+    # reflects the active shellwidget's freshness and kernel state.
+    if console:
+        parts.extend(build_runtime_context_blocks(console))
+
+    # --- Section 4: Other open files (summaries) ---
     # Include summaries of non-active files so the LLM knows about
     # related code the user has open. Budget-limited to avoid bloat.
     if open_files:
@@ -581,34 +461,6 @@ def build_system_context_block(context, open_files=None, project=None,
                 "--- other open files ---\n"
                 + "\n\n".join(file_summaries)
                 + "\n--- end other open files ---"
-            )
-
-    # --- Section 4: IPython console output (recent lines) ---
-    # Shows the user's recent console activity: print output, tracebacks,
-    # command results. Especially useful for debugging (the LLM can see
-    # the error message and traceback).
-    if console:
-        console_output = console.get("console_output", "")
-        if console_output:
-            parts.append(
-                "[IPython Console — recent output]\n"
-                "--- console output ---\n"
-                f"{console_output}\n"
-                "--- end console output ---"
-            )
-
-        # --- Section 5: Namespace variables ---
-        # Shows what variables exist in the user's kernel: their types
-        # and current values. Helps the LLM write code that uses existing
-        # variables and understand the data the user is working with.
-        variables = console.get("variables", [])
-        if variables:
-            var_text = "\n".join(variables)
-            parts.append(
-                "[Namespace Variables]\n"
-                "--- variables ---\n"
-                f"{var_text}\n"
-                "--- end variables ---"
             )
 
     return "\n\n".join(parts)
