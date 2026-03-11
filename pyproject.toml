@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
+requires = ["setuptools>=64", "setuptools-scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "spyder-ai-chat"
-version = "0.1.0"
+dynamic = ["version"]
 description = "AI chat and code completion plugin for Spyder IDE using local Ollama models"
 readme = "README.md"
 license = {text = "CC-BY-NC-4.0"}
@@ -63,6 +63,12 @@ ai_chat = "spyder_ai_chat.plugin:AIChatPlugin"
 # via Ollama's FIM API and shows up in Completion and Linting preferences.
 [project.entry-points."spyder.completions"]
 ai_chat = "spyder_ai_chat.completion_provider:AIChatCompletionProvider"
+
+# Version is derived from git tags automatically.
+# Tag a release as v0.1.0, v0.2.0, etc. and setuptools-scm picks it up.
+[tool.setuptools_scm]
+version_scheme = "guess-next-dev"
+local_scheme = "no-local-version"
 
 [tool.setuptools.packages.find]
 where = ["src"]

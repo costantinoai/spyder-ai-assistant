@@ -1,0 +1,58 @@
+# Publish to PyPI when a GitHub Release is created.
+#
+# Workflow:
+#   1. Create a git tag:  git tag v0.1.0
+#   2. Push it:           git push origin v0.1.0
+#   3. Create a GitHub Release from the tag (via UI or gh cli)
+#   4. This workflow builds and uploads to PyPI automatically
+#
+# Uses PyPI Trusted Publisher (OIDC) — no API tokens needed.
+# Configure once at: https://pypi.org/manage/project/spyder-ai-chat/settings/publishing/
+
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # setuptools-scm needs full history for version
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # required for trusted publishing
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
