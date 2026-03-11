@@ -20,6 +20,7 @@ Signal flow:
 import logging
 import os
 import re
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from qtpy.QtCore import QObject, QThread, QTimer, Signal, Slot
@@ -50,6 +51,7 @@ MAX_PREFIX_CHARS = 3000
 MAX_SUFFIX_CHARS = 3000
 MIN_PROMPT_CHARS = 10
 DEFAULT_DEBOUNCE_MS = 100
+DEFAULT_CACHE_SIZE = 64
 
 MIDDLE_OF_LINE_ALLOWED_SUFFIX_RE = re.compile(
     r"^\s*[\)\}\]\"'`]*\s*[:{;,]?\s*$"
@@ -122,6 +124,19 @@ class _QueuedCompletionRequest:
     req: dict
     req_id: int
     target: "_CompletionTarget"
+
+
+@dataclass(frozen=True)
+class _CompletionCacheKey:
+    """One normalized key for the LRU completion cache."""
+
+    host: str
+    model: str
+    temperature: float
+    num_predict: int
+    single_line: bool
+    prompt_prefix: str
+    suffix: str
 
 
 @dataclass(frozen=True)
@@ -211,6 +226,41 @@ class _LatestOnlyCompletionQueue:
         self._debounced = None
         self._queued = None
         return dropped_ids
+
+
+class _CompletionCache:
+    """Small LRU cache for recently-used completion results."""
+
+    _MISSING = object()
+
+    def __init__(self, max_entries=DEFAULT_CACHE_SIZE):
+        self._max_entries = max(1, int(max_entries))
+        self._entries = OrderedDict()
+
+    def get(self, key):
+        """Return one cached completion or ``_MISSING``."""
+        if key not in self._entries:
+            return self._MISSING
+
+        value = self._entries.pop(key)
+        self._entries[key] = value
+        return value
+
+    def put(self, key, value):
+        """Store one completion result and refresh LRU order."""
+        if key in self._entries:
+            self._entries.pop(key)
+
+        self._entries[key] = value
+        while len(self._entries) > self._max_entries:
+            self._entries.popitem(last=False)
+
+    def clear(self):
+        """Drop every cached completion."""
+        self._entries.clear()
+
+    def __len__(self):
+        return len(self._entries)
 
 
 def _clean_completion(raw_text, prefix, suffix=""):
@@ -390,6 +440,55 @@ def _completion_already_in_document(completion_text, suffix):
         return False
 
     return (suffix or "").startswith(normalized_completion)
+
+
+def _trim_suffix_overlap(completion_text, suffix):
+    """Trim one trailing overlap between the completion and document suffix."""
+    if not completion_text or not suffix:
+        return completion_text
+
+    max_overlap = min(len(completion_text), len(suffix))
+    for overlap_size in range(max_overlap, 0, -1):
+        if completion_text[-overlap_size:] == suffix[:overlap_size]:
+            trimmed = completion_text[:-overlap_size]
+            return trimmed.rstrip()
+
+    return completion_text
+
+
+def _looks_repetitive_completion(completion_text):
+    """Return True when a completion is mostly repetition noise."""
+    if not completion_text:
+        return False
+
+    stripped = completion_text.strip()
+    if not stripped:
+        return False
+
+    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+    if len(lines) >= 3 and len(set(lines)) == 1:
+        return True
+
+    tokens = re.findall(r"\S+", stripped)
+    if len(tokens) >= 4 and len(set(tokens)) == 1:
+        return True
+
+    return False
+
+
+def _finalize_completion_text(completion_text, suffix):
+    """Apply final overlap and repetition filters before ghost display."""
+    if _completion_already_in_document(completion_text, suffix):
+        return "", "duplicate"
+
+    trimmed = _trim_suffix_overlap(completion_text, suffix)
+    if not trimmed:
+        return "", "overlap"
+
+    if _looks_repetitive_completion(trimmed):
+        return "", "repetition"
+
+    return trimmed, None
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +705,35 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         # Track exact request targets so responses can be matched against
         # the current editor state before ghost text is shown.
         self._req_targets = {}
+        self._req_cache_keys = {}
+        self._completion_cache = _CompletionCache()
+        self._metrics = {
+            "requests_received": 0,
+            "skipped": 0,
+            "debounced_dropped": 0,
+            "queued_dropped": 0,
+            "dispatched": 0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "shown": 0,
+            "accepted": 0,
+            "accepted_full": 0,
+            "accepted_word": 0,
+            "accepted_line": 0,
+            "typed_advances": 0,
+            "dismissed_escape": 0,
+            "dismissed_typing": 0,
+            "dismissed_cursor_move": 0,
+            "dismissed_popup_visible": 0,
+            "suppressed_popup_visible": 0,
+            "stale_discarded": 0,
+            "filtered_duplicate": 0,
+            "filtered_repetition": 0,
+            "filtered_overlap": 0,
+            "errors": 0,
+            "offline_errors": 0,
+        }
+        self._current_status_text = "AI: idle"
 
         # --- Background worker ---
         host = self.get_conf("ollama_host")
@@ -666,6 +794,8 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._document_states.clear()
         self._latest_target_by_filename.clear()
         self._req_targets.clear()
+        self._req_cache_keys.clear()
+        self._completion_cache.clear()
         logger.info("AI completion provider shut down")
 
     def send_request(self, language, req_type, req, req_id):
@@ -743,6 +873,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             req: DOCUMENT_COMPLETION request dict.
             req_id: Unique request ID.
         """
+        self._increment_metric("requests_received")
         target = self._build_completion_target(req)
         if target is None:
             self._emit_empty_response(req_id)
@@ -760,6 +891,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             _QueuedCompletionRequest(req=req, req_id=req_id, target=target)
         )
         if dropped is not None:
+            self._increment_metric("debounced_dropped")
             self._emit_empty_response(dropped.req_id)
 
         # Restart the debounce timer
@@ -781,6 +913,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         if self._request_queue.active_req_id is not None:
             dropped = self._request_queue.replace_queued(request)
             if dropped is not None:
+                self._increment_metric("queued_dropped")
                 self._emit_empty_response(dropped.req_id)
             return
 
@@ -825,6 +958,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
         skip_reason = self._should_skip_completion(req, prefix, suffix)
         if skip_reason:
+            self._increment_metric("skipped")
             logger.debug(
                 "Skipping completion req_id=%d for %s: %s",
                 req_id,
@@ -845,10 +979,42 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             "num_predict": self.get_conf("completion_max_tokens"),
             "_single_line": not allow_multiline,
         }
+        cache_key = _CompletionCacheKey(
+            host=self.get_conf("ollama_host"),
+            model=model,
+            temperature=float(options["temperature"]),
+            num_predict=int(options["num_predict"]),
+            single_line=bool(options["_single_line"]),
+            prompt_prefix=prompt_prefix,
+            suffix=suffix,
+        )
 
         # Track which request target this response belongs to.
         self._req_targets[req_id] = target
+        self._req_cache_keys[req_id] = cache_key
+
+        cached_completion = self._completion_cache.get(cache_key)
+        if cached_completion is not _CompletionCache._MISSING:
+            self._increment_metric("cache_hits")
+            logger.debug(
+                "Cache hit for completion req_id=%d on %s",
+                req_id,
+                filename,
+            )
+            self._deliver_completion_result(
+                req_id,
+                str((cached_completion or {}).get("text", "")),
+                suffix,
+                source="cache",
+                cached_filter_reason=(cached_completion or {}).get(
+                    "filter_reason"
+                ),
+            )
+            return
+
+        self._increment_metric("cache_misses")
         self._request_queue.start_active(req_id)
+        self._increment_metric("dispatched")
         self._update_status("AI: generating")
 
         logger.debug(
@@ -884,61 +1050,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             completion_text: The cleaned completion text (str).
             suffix: The code after the cursor (for reference).
         """
-        # Always emit empty response to Spyder's completion system so it
-        # doesn't block. We handle display via ghost text, not the dropdown.
-        self.sig_response_ready.emit(
-            self.COMPLETION_PROVIDER_NAME,
-            req_id,
-            {"params": []},
-        )
-
-        target = self._req_targets.pop(req_id, None)
-        if target is None:
-            self._finish_request(req_id)
-            return
-
-        filename = target.filename
-        state = self._document_states.get(filename)
-
-        if not self._is_target_current(target):
-            logger.debug(
-                "Discarded stale completion req_id=%d for %s",
-                req_id,
-                filename,
-            )
-            self._finish_request(req_id)
-            return
-
-        current_suffix = ""
-        if state is not None and 0 <= target.offset <= len(state.text):
-            current_suffix = state.text[target.offset:]
-
-        if (completion_text
-                and filename
-                and self.get_conf("completions_enabled")
-                and not _completion_already_in_document(
-                    completion_text, current_suffix
-                )):
-            # Emit ghost text signal — the plugin will route this to the
-            # appropriate editor's GhostTextManager
-            self.sig_ghost_text_ready.emit(
-                filename,
-                completion_text,
-                target.to_payload(),
-            )
-            logger.debug(
-                "Ghost text ready for %s: %d chars",
-                filename, len(completion_text),
-            )
-        elif completion_text and _completion_already_in_document(
-                completion_text, current_suffix):
-            logger.debug(
-                "Filtered completion req_id=%d for %s because it is already present in the document",
-                req_id,
-                filename,
-            )
-
-        self._finish_request(req_id)
+        self._deliver_completion_result(req_id, completion_text, suffix, source="worker")
 
     def _on_completion_error(self, req_id, error_msg):
         """Handle an error from the worker thread.
@@ -950,14 +1062,17 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             error_msg: Human-readable error description.
         """
         logger.warning("AI completion error: %s", error_msg)
+        self._increment_metric("errors")
         self._emit_empty_response(req_id)
         restore_ready = True
         if self._looks_offline(error_msg):
+            self._increment_metric("offline_errors")
             self._update_status("AI: offline")
             restore_ready = False
         else:
             self._set_ready_status()
         self._req_targets.pop(req_id, None)
+        self._req_cache_keys.pop(req_id, None)
         self._finish_request(req_id, restore_ready=restore_ready)
 
     # --- Status bar helper ---
@@ -971,11 +1086,12 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         Args:
             text: Short status string (e.g., "AI: model-name").
         """
+        self._current_status_text = text
         logger.debug("Completion status updated: %s", text)
         self.sig_call_statusbar.emit(
             AIChatCompletionStatus.ID,
             "set_value",
-            (text,),
+            (self._build_status_payload(text),),
             {},
         )
 
@@ -1025,8 +1141,26 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
     def on_host_changed(self, value):
         """Update the worker's Ollama server URL when config changes."""
         self._worker.update_host(value)
+        self._completion_cache.clear()
         if self.get_conf("completions_enabled"):
             self._set_ready_status()
+
+    @on_conf_change(option="completion_model")
+    def on_completion_model_changed(self, _value):
+        """Refresh steady-state status and clear stale cached completions."""
+        self._completion_cache.clear()
+        if self.get_conf("completions_enabled"):
+            self._set_ready_status()
+
+    @on_conf_change(option="completion_temperature")
+    def on_completion_temperature_changed(self, _value):
+        """Drop cached completions when the generation temperature changes."""
+        self._completion_cache.clear()
+
+    @on_conf_change(option="completion_max_tokens")
+    def on_completion_max_tokens_changed(self, _value):
+        """Drop cached completions when the completion budget changes."""
+        self._completion_cache.clear()
 
     @on_conf_change(option="completions_enabled")
     def on_enabled_changed(self, value):
@@ -1086,3 +1220,186 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             return "substantial code already exists to the right of the cursor"
 
         return None
+
+    def record_ghost_event(self, event_name, payload=None):
+        """Record one ghost-text lifecycle event from the editor layer."""
+        payload = payload or {}
+        reason = str(payload.get("reason", "") or "")
+        method = str(payload.get("method", "") or "")
+
+        if event_name == "shown":
+            self._increment_metric("shown")
+        elif event_name == "accepted":
+            self._increment_metric("accepted")
+            if method == "word":
+                self._increment_metric("accepted_word")
+            elif method == "line":
+                self._increment_metric("accepted_line")
+            else:
+                self._increment_metric("accepted_full")
+        elif event_name == "advanced" and method == "typed":
+            self._increment_metric("typed_advances")
+        elif event_name == "dismissed":
+            metric_name = {
+                "escape": "dismissed_escape",
+                "typing": "dismissed_typing",
+                "cursor_move": "dismissed_cursor_move",
+                "popup_visible": "dismissed_popup_visible",
+            }.get(reason)
+            if metric_name:
+                self._increment_metric(metric_name)
+        elif event_name == "suppressed" and reason in (
+            "popup_visible",
+            "native_popup",
+        ):
+            self._increment_metric("suppressed_popup_visible")
+
+        logger.debug(
+            "Ghost lifecycle event: event=%s method=%s reason=%s payload=%s",
+            event_name,
+            method or "-",
+            reason or "-",
+            payload,
+        )
+        self._refresh_status_tooltip()
+
+    def get_metrics_snapshot(self):
+        """Return one serializable snapshot of local completion metrics."""
+        snapshot = dict(self._metrics)
+        snapshot["cache_entries"] = len(self._completion_cache)
+        snapshot["current_status"] = self._current_status_text
+        return snapshot
+
+    def _deliver_completion_result(self, req_id, completion_text, suffix,
+                                   source="worker", cached_filter_reason=None):
+        """Deliver one completion result from the worker or local cache."""
+        self._emit_empty_response(req_id)
+
+        target = self._req_targets.pop(req_id, None)
+        cache_key = self._req_cache_keys.pop(req_id, None)
+        if target is None:
+            self._finish_request(req_id)
+            return
+
+        filename = target.filename
+        state = self._document_states.get(filename)
+
+        if not self._is_target_current(target):
+            self._increment_metric("stale_discarded")
+            logger.debug(
+                "Discarded stale completion req_id=%d for %s from %s",
+                req_id,
+                filename,
+                source,
+            )
+            self._finish_request(req_id)
+            return
+
+        current_suffix = ""
+        if state is not None and 0 <= target.offset <= len(state.text):
+            current_suffix = state.text[target.offset:]
+
+        if source == "cache":
+            final_text = completion_text or ""
+            filter_reason = cached_filter_reason
+        else:
+            final_text, filter_reason = _finalize_completion_text(
+                completion_text,
+                current_suffix,
+            )
+
+        if cache_key is not None:
+            self._completion_cache.put(
+                cache_key,
+                {
+                    "text": final_text,
+                    "filter_reason": filter_reason,
+                },
+            )
+
+        if final_text and filename and self.get_conf("completions_enabled"):
+            self.sig_ghost_text_ready.emit(
+                filename,
+                final_text,
+                target.to_payload(),
+            )
+            logger.debug(
+                "Ghost text ready for %s from %s: %d chars",
+                filename,
+                source,
+                len(final_text),
+            )
+        elif filter_reason:
+            metric_name = {
+                "duplicate": "filtered_duplicate",
+                "repetition": "filtered_repetition",
+                "overlap": "filtered_overlap",
+            }.get(filter_reason)
+            if metric_name:
+                self._increment_metric(metric_name)
+            logger.debug(
+                "Filtered completion req_id=%d for %s from %s: %s",
+                req_id,
+                filename,
+                source,
+                filter_reason,
+            )
+
+        self._finish_request(req_id)
+
+    def _increment_metric(self, key, amount=1):
+        """Increment one local completion metric counter."""
+        self._metrics[key] = int(self._metrics.get(key, 0)) + int(amount)
+
+    def _refresh_status_tooltip(self):
+        """Re-emit the current status value so the tooltip stays current."""
+        if not self._started:
+            return
+        self._update_status(self._current_status_text)
+
+    def _build_status_payload(self, short_text):
+        """Build the status-bar payload with a metrics-rich tooltip."""
+        metrics = self.get_metrics_snapshot()
+        tooltip_lines = [
+            "AI Code Completion status (Ollama)",
+            "",
+            f"Requests: {metrics['requests_received']}",
+            (
+                "Shown / accepted: "
+                f"{metrics['shown']} / {metrics['accepted']}"
+            ),
+            (
+                "Accepted modes: "
+                f"full={metrics['accepted_full']}, "
+                f"word={metrics['accepted_word']}, "
+                f"line={metrics['accepted_line']}"
+            ),
+            (
+                "Cache: "
+                f"{metrics['cache_hits']} hits, "
+                f"{metrics['cache_misses']} misses, "
+                f"{metrics['cache_entries']} entries"
+            ),
+            (
+                "Filtered: "
+                f"duplicate={metrics['filtered_duplicate']}, "
+                f"repetition={metrics['filtered_repetition']}, "
+                f"overlap={metrics['filtered_overlap']}, "
+                f"stale={metrics['stale_discarded']}"
+            ),
+            (
+                "Dismissed: "
+                f"escape={metrics['dismissed_escape']}, "
+                f"typing={metrics['dismissed_typing']}, "
+                f"cursor={metrics['dismissed_cursor_move']}, "
+                f"popup={metrics['dismissed_popup_visible']}"
+            ),
+            (
+                "Popup suppression / errors: "
+                f"{metrics['suppressed_popup_visible']} / {metrics['errors']}"
+            ),
+        ]
+        return {
+            "short": short_text,
+            "long": "\n".join(tooltip_lines),
+        }

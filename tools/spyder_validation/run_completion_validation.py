@@ -61,12 +61,20 @@ def fake_generate_completion(self, model, prefix, suffix="", system=None,
         return ")"
     if normalized_prefix.endswith("result = a + "):
         return "b"
+    if normalized_prefix.endswith("result = value + "):
+        return "other_value"
+    if normalized_prefix.endswith("cache_value = "):
+        return "cached_item"
+    if normalized_prefix.endswith("values = [1, 2"):
+        return ", 3]"
+    if normalized_prefix.endswith("repeat_value = "):
+        return "value value value value"
     if normalized_prefix.endswith("if value > 10:\n    "):
-        return "return value * 2\n"
+        return "return value * 2\n    log_value(value)\n"
     return ""
 
 
-def send_key(editor, key, text=""):
+def send_key(editor, key, text="", modifiers=Qt.NoModifier):
     """Send one synthetic key press and release to the editor."""
     target = editor
     viewport = getattr(editor, "viewport", None)
@@ -77,18 +85,18 @@ def send_key(editor, key, text=""):
 
     QApplication.sendEvent(
         target,
-        QKeyEvent(QEvent.KeyPress, key, Qt.NoModifier, text),
+        QKeyEvent(QEvent.KeyPress, key, modifiers, text),
     )
     QApplication.sendEvent(
         target,
-        QKeyEvent(QEvent.KeyRelease, key, Qt.NoModifier, text),
+        QKeyEvent(QEvent.KeyRelease, key, modifiers, text),
     )
     QApplication.instance().processEvents()
 
 
-def build_key_event(key, text=""):
+def build_key_event(key, text="", modifiers=Qt.NoModifier):
     """Build a synthetic key-press event for event-filter checks."""
-    return QKeyEvent(QEvent.KeyPress, key, Qt.NoModifier, text)
+    return QKeyEvent(QEvent.KeyPress, key, modifiers, text)
 
 
 def move_cursor_after(editor, marker):
@@ -154,12 +162,26 @@ def open_validation_file(window, results):
     )
     wait_for(lambda: ai_plugin._ghost_managers.get(id(editor)) is not None, timeout_ms=4000)
     wait_for(lambda: hasattr(editor, "_ai_chat_completion_shortcut"), timeout_ms=4000)
+    wait_for(
+        lambda: hasattr(editor, "_ai_chat_completion_accept_word_shortcut"),
+        timeout_ms=4000,
+    )
+    wait_for(
+        lambda: hasattr(editor, "_ai_chat_completion_accept_line_shortcut"),
+        timeout_ms=4000,
+    )
 
     results["startup"] = {
         "validation_file": str(TEST_FILE),
         "editor_opened": editor is not None,
         "ghost_manager_installed": ai_plugin._ghost_managers.get(id(editor)) is not None,
         "manual_shortcut_installed": hasattr(editor, "_ai_chat_completion_shortcut"),
+        "accept_word_shortcut_installed": hasattr(
+            editor, "_ai_chat_completion_accept_word_shortcut"
+        ),
+        "accept_line_shortcut_installed": hasattr(
+            editor, "_ai_chat_completion_accept_line_shortcut"
+        ),
     }
     return editor
 
@@ -249,6 +271,27 @@ def run_fake_completion_checks(window, results):
         "ghost_visible_after_accept": manager.has_suggestion(),
     }
 
+    set_editor_text(editor, provider, str(TEST_FILE), "result = value + \n")
+    move_cursor_after(editor, "result = value + ")
+    editor.do_completion()
+    wait_for(lambda: manager.has_suggestion(), timeout_ms=2500)
+    accept_word_consumed = manager._event_filter.eventFilter(
+        editor,
+        build_key_event(Qt.Key_Right, modifiers=Qt.AltModifier),
+    )
+    QApplication.instance().processEvents()
+    checks["partial_accept_word"] = {
+        "event_consumed": accept_word_consumed,
+        "text_after_accept_word": editor.toPlainText(),
+        "ghost_visible_after_accept_word": manager.has_suggestion(),
+        "remaining_ghost_text": manager._ghost_text,
+    }
+    send_key(editor, Qt.Key_Tab)
+    checks["partial_accept_word_finish"] = {
+        "final_text": editor.toPlainText(),
+        "ghost_visible_after_finish": manager.has_suggestion(),
+    }
+
     set_editor_text(editor, provider, str(TEST_FILE), "if value > 10:\n    ")
     move_cursor_after(editor, "if value > 10:\n    ")
     before = len(FAKE_CALLS)
@@ -259,6 +302,20 @@ def run_fake_completion_checks(window, results):
         "ghost_visible": manager.has_suggestion(),
         "ghost_text": manager._ghost_text,
         "single_line": call.get("single_line"),
+    }
+    accept_line_consumed = manager._event_filter.eventFilter(
+        editor,
+        build_key_event(
+            Qt.Key_Right,
+            modifiers=Qt.AltModifier | Qt.ShiftModifier,
+        ),
+    )
+    QApplication.instance().processEvents()
+    checks["partial_accept_line"] = {
+        "event_consumed": accept_line_consumed,
+        "text_after_accept_line": editor.toPlainText(),
+        "ghost_visible_after_accept_line": manager.has_suggestion(),
+        "remaining_ghost_text": manager._ghost_text,
     }
     escape_consumed = manager._event_filter.eventFilter(
         editor,
@@ -290,6 +347,76 @@ def run_fake_completion_checks(window, results):
         "final_text": editor.toPlainText(),
         "ghost_visible_after_tab": manager.has_suggestion(),
     }
+
+    set_editor_text(editor, provider, str(TEST_FILE), "values = [1, 2]\n")
+    move_cursor_after(editor, "values = [1, 2")
+    before = len(FAKE_CALLS)
+    editor.do_completion()
+    wait_for(lambda: manager.has_suggestion(), timeout_ms=2500)
+    checks["suffix_overlap_trim"] = {
+        "worker_called": len(FAKE_CALLS) >= before + 1,
+        "ghost_text": manager._ghost_text,
+        "text_with_ghost": editor.toPlainText(),
+    }
+    ensure_clean_ghost(manager)
+
+    set_editor_text(editor, provider, str(TEST_FILE), "repeat_value = \n")
+    move_cursor_after(editor, "repeat_value = ")
+    before = len(FAKE_CALLS)
+    editor.do_completion()
+    wait_for(lambda: len(FAKE_CALLS) >= before + 1, timeout_ms=2500)
+    wait_for(lambda: provider._request_queue.active_req_id is None, timeout_ms=2500)
+    checks["repetition_filter"] = {
+        "worker_called": len(FAKE_CALLS) >= before + 1,
+        "ghost_visible": manager.has_suggestion(),
+    }
+    ensure_clean_ghost(manager)
+
+    set_editor_text(editor, provider, str(TEST_FILE), "cache_value = \n")
+    move_cursor_after(editor, "cache_value = ")
+    before = len(FAKE_CALLS)
+    editor.do_completion()
+    wait_for(lambda: manager.has_suggestion(), timeout_ms=2500)
+    checks["cache_warm"] = {
+        "worker_called": len(FAKE_CALLS) >= before + 1,
+        "ghost_text": manager._ghost_text,
+    }
+    ensure_clean_ghost(manager)
+    first_calls = len(FAKE_CALLS)
+    editor.do_completion()
+    cached = bool(wait_for(lambda: manager.has_suggestion(), timeout_ms=1000))
+    checks["cache_hit"] = {
+        "ghost_visible": cached,
+        "worker_called_again": len(FAKE_CALLS) > first_calls,
+        "ghost_text": manager._ghost_text if cached else "",
+    }
+    ensure_clean_ghost(manager)
+
+    popup_widget = getattr(editor, "completion_widget", None)
+    popup_suppression = {}
+    if popup_widget is not None:
+        set_editor_text(editor, provider, str(TEST_FILE), "result = a + \n")
+        move_cursor_after(editor, "result = a + ")
+        editor.do_completion()
+        wait_for(lambda: manager.has_suggestion(), timeout_ms=2500)
+        if hasattr(popup_widget, "clear"):
+            popup_widget.clear()
+            popup_widget.addItem("native-popup-item")
+        blocked = manager._popup_watcher.eventFilter(
+            popup_widget,
+            QEvent(QEvent.Show),
+        )
+        popup_suppression = {
+            "popup_blocked": bool(blocked),
+            "ghost_visible_after_popup_show": manager.has_suggestion(),
+        }
+        if hasattr(popup_widget, "clear"):
+            popup_widget.clear()
+        QApplication.instance().processEvents()
+        ensure_clean_ghost(manager)
+    checks["popup_suppression"] = popup_suppression
+
+    results["completion_metrics"] = provider.get_metrics_snapshot()
 
     results["fake_completion_checks"] = checks
     results["fake_calls"] = list(FAKE_CALLS)

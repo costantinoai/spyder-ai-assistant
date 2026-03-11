@@ -16,7 +16,7 @@ AI-powered code assistance for [Spyder IDE](https://www.spyder-ide.org/), runnin
 
 **Editor context awareness** — The AI automatically sees your current file, cursor position, selection, other open tabs, and your project's file tree. Right-click any selection in the editor to trigger actions like *Ask AI*, *Explain*, *Fix*, or *Add Docstring*.
 
-**Inline code completions** — Copilot-style ghost text appears as you type. Press Tab to accept, or keep typing through a matching suggestion without losing the remaining tail. The completions use Ollama's Fill-in-Middle API when the model supports it, with automatic fallback to prefix-only generation. You can also trigger completions manually with `Ctrl+Shift+Space`.
+**Inline code completions** — Copilot-style ghost text appears as you type. Press Tab to accept, `Alt+Right` to accept the next word-like segment, `Alt+Shift+Right` to accept the next line, or keep typing through a matching suggestion without losing the remaining tail. The completion provider now keeps a small local LRU cache, trims suffix overlap before display, filters obviously repetitive output, and suppresses Spyder's native completion popup when a ghost suggestion is already active. You can also trigger completions manually with `Ctrl+Shift+Space`.
 
 ![Ghost text inline completions](docs/screenshots/ghost-completions.png)
 
@@ -129,7 +129,15 @@ When the chat produces code, the code-block actions let you either insert it at 
 
 ### Inline completions
 
-Completions trigger automatically as you type with a 100 ms debounce. Ghost text appears dimmed at your cursor — press Tab to accept it, Escape to dismiss it, or keep typing when the next characters already match the suggestion. The status bar at the bottom shows the current state: the active model name, "offline" if Ollama isn't reachable, or "generating" while a completion is in flight.
+Completions trigger automatically as you type with a 100 ms debounce. Ghost text appears dimmed at your cursor. The main controls are:
+
+- `Tab` to accept the full suggestion
+- `Alt+Right` to accept the next word-like segment
+- `Alt+Shift+Right` to accept the next line
+- `Escape` to dismiss the current suggestion
+- normal typing when the next characters already match the suggestion
+
+The completion provider now does more than just call Ollama. It keeps a small local LRU cache for repeated prompts, trims suffix overlap before display so closing brackets or delimiters are not duplicated, filters clearly repetitive low-value outputs, and blocks Spyder's native completion popup when an AI ghost suggestion is already active. The status bar at the bottom still shows the active model name, `offline` if Ollama is not reachable, or `generating` while a completion is in flight, and its tooltip now includes local completion lifecycle counters for debugging and tuning.
 
 The plugin uses Ollama's FIM (Fill-in-Middle) API for models that support it, which produces better completions because the model can see code both before and after the cursor. For models without FIM support, it falls back to prefix-only generation automatically. The provider also suppresses low-value requests in bad contexts, such as extremely short prefixes or mid-line positions where substantial code already exists to the right of the cursor.
 
@@ -139,7 +147,7 @@ The plugin uses Ollama's FIM (Fill-in-Middle) API for models that support it, wh
 
 All settings live in Spyder's **Preferences** dialog.
 
-**Preferences > AI Chat** covers the Ollama server URL, chat and completion model names, temperature, max tokens, keyboard shortcuts, the base system prompt, and the action prompt templates (which support `{filename}` and `{code}` placeholders). The active tab's chat mode and per-tab inference overrides are controlled directly from the chat pane and persist with the session without changing these global defaults.
+**Preferences > AI Chat** covers the Ollama server URL, chat and completion model names, temperature, max tokens, keyboard shortcuts, the base system prompt, and the action prompt templates (which support `{filename}` and `{code}` placeholders). The completion keyboard section now includes the manual trigger shortcut plus the partial-accept shortcuts for next word and next line. The active tab's chat mode and per-tab inference overrides are controlled directly from the chat pane and persist with the session without changing these global defaults.
 
 **Preferences > Completion and linting > AI Chat** has completion-specific settings: enable/disable toggle, model selection, temperature, max tokens, and debounce delay.
 

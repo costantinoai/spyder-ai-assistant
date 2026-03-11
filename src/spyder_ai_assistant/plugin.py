@@ -101,6 +101,8 @@ class AIChatPlugin(SpyderDockablePlugin):
             # Ctrl+Shift+Space mirrors the common IDE convention (Ctrl+Space
             # is Spyder's LSP completion, Shift variant for AI).
             "completion_shortcut": "Ctrl+Shift+Space",
+            "completion_accept_word_shortcut": "Alt+Right",
+            "completion_accept_line_shortcut": "Alt+Shift+Right",
             "chat_system_prompt":
                 "You are a helpful AI coding assistant working inside "
                 "the Spyder IDE. Be concise and provide code examples "
@@ -183,6 +185,7 @@ class AIChatPlugin(SpyderDockablePlugin):
         self._filename_to_editor = {}
         # Cached runtime context service keyed by active shellwidget.
         self._runtime_context = RuntimeContextService(self)
+        self._completion_provider_instance = None
         widget.set_runtime_request_executor(self._runtime_context.execute_request)
         self._runtime_context.sig_current_context_changed.connect(
             widget.update_runtime_context
@@ -298,7 +301,10 @@ class AIChatPlugin(SpyderDockablePlugin):
         # Install ghost text manager for this editor
         editor_id = id(codeeditor)
         if editor_id not in self._ghost_managers:
-            manager = GhostTextManager(codeeditor)
+            manager = GhostTextManager(
+                codeeditor,
+                lifecycle_callback=self._on_ghost_lifecycle_event,
+            )
             self._ghost_managers[editor_id] = manager
             logger.debug("Ghost text manager installed on editor %d", editor_id)
 
@@ -312,6 +318,26 @@ class AIChatPlugin(SpyderDockablePlugin):
             shortcut = QShortcut(QKeySequence(key_combo), codeeditor)
             shortcut.activated.connect(manager.request_completion)
             codeeditor._ai_chat_completion_shortcut = shortcut
+
+            accept_word_combo = self.get_conf("completion_accept_word_shortcut")
+            accept_word_shortcut = QShortcut(
+                QKeySequence(accept_word_combo),
+                codeeditor,
+            )
+            accept_word_shortcut.activated.connect(manager.accept_next_word)
+            codeeditor._ai_chat_completion_accept_word_shortcut = (
+                accept_word_shortcut
+            )
+
+            accept_line_combo = self.get_conf("completion_accept_line_shortcut")
+            accept_line_shortcut = QShortcut(
+                QKeySequence(accept_line_combo),
+                codeeditor,
+            )
+            accept_line_shortcut.activated.connect(manager.accept_next_line)
+            codeeditor._ai_chat_completion_accept_line_shortcut = (
+                accept_line_shortcut
+            )
 
         # Import here to avoid import errors if editor plugin is not available
         from spyder.plugins.editor.widgets.codeeditor.codeeditor import (
@@ -711,6 +737,24 @@ class AIChatPlugin(SpyderDockablePlugin):
                 filename,
             )
 
+    def _on_ghost_lifecycle_event(self, event_name, payload):
+        """Forward one editor-side ghost lifecycle event to the provider."""
+        provider = self._completion_provider_instance
+        if provider is None:
+            try:
+                completions_plugin = self.get_plugin(Plugins.Completions)
+                provider = completions_plugin.get_provider("ai_chat")
+            except Exception:
+                provider = None
+
+        if provider is None or not hasattr(provider, "record_ghost_event"):
+            return
+
+        try:
+            provider.record_ghost_event(event_name, payload)
+        except Exception as error:
+            logger.debug("Failed to record ghost lifecycle event: %s", error)
+
     # --- Completions plugin wiring ---
 
     @on_plugin_available(plugin=Plugins.Completions)
@@ -738,6 +782,7 @@ class AIChatPlugin(SpyderDockablePlugin):
             if provider_info and isinstance(provider_info, dict):
                 provider_instance = provider_info.get("instance")
                 if provider_instance is not None:
+                    self._completion_provider_instance = provider_instance
                     provider_instance.sig_ghost_text_ready.connect(
                         self._on_ghost_text_ready
                     )
@@ -772,6 +817,7 @@ class AIChatPlugin(SpyderDockablePlugin):
                     provider_instance.sig_ghost_text_ready.disconnect(
                         self._on_ghost_text_ready
                     )
+                    self._completion_provider_instance = None
         except Exception:
             pass  # Provider may already be destroyed
 

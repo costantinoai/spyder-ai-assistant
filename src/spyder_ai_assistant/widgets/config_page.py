@@ -77,8 +77,26 @@ class AIChatConfigPage(PluginConfigPage):
                 "Requires Spyder restart to take effect.",
             alignment=Qt.Horizontal,
         )
+        accept_word_edit = self.create_lineedit(
+            "Accept next word:",
+            "completion_accept_word_shortcut",
+            default="Alt+Right",
+            tip="Key combination to accept only the next word-like segment "
+                "from one ghost completion. Requires Spyder restart to take effect.",
+            alignment=Qt.Horizontal,
+        )
+        accept_line_edit = self.create_lineedit(
+            "Accept next line:",
+            "completion_accept_line_shortcut",
+            default="Alt+Shift+Right",
+            tip="Key combination to accept only the next line from one ghost "
+                "completion. Requires Spyder restart to take effect.",
+            alignment=Qt.Horizontal,
+        )
         shortcuts_layout = QVBoxLayout()
         shortcuts_layout.addWidget(shortcut_edit)
+        shortcuts_layout.addWidget(accept_word_edit)
+        shortcuts_layout.addWidget(accept_line_edit)
         shortcuts_group.setLayout(shortcuts_layout)
 
         # --- Generation settings ---

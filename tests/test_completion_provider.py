@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from spyder_ai_assistant.completion_provider import (
+    _CompletionCache,
+    _CompletionCacheKey,
     _LatestOnlyCompletionQueue,
     _QueuedCompletionRequest,
     _TrackedDocumentState,
@@ -10,8 +12,11 @@ from spyder_ai_assistant.completion_provider import (
     _build_prompt_prefix,
     _clean_completion,
     _completion_already_in_document,
+    _finalize_completion_text,
     _looks_like_valid_middle_of_line_suffix,
+    _looks_repetitive_completion,
     _should_allow_multiline_completion,
+    _trim_suffix_overlap,
 )
 
 
@@ -125,3 +130,66 @@ def test_tracked_document_state_defaults_to_version_one():
     state = _TrackedDocumentState(text="print('ok')")
 
     assert state.version == 1
+
+
+def test_trim_suffix_overlap_removes_only_the_shared_tail():
+    assert _trim_suffix_overlap(", 3]", "]\n") == ", 3"
+    assert _trim_suffix_overlap("value", ")\n") == "value"
+
+
+def test_repetition_filter_detects_repeated_lines_and_tokens():
+    assert _looks_repetitive_completion("print(value)\nprint(value)\nprint(value)")
+    assert _looks_repetitive_completion("value value value value")
+    assert not _looks_repetitive_completion("value + other_value")
+
+
+def test_finalize_completion_text_reports_overlap_and_repetition():
+    assert _finalize_completion_text(", 3]", "]\n") == (", 3", None)
+    assert _finalize_completion_text("value value value value", "") == (
+        "",
+        "repetition",
+    )
+    assert _finalize_completion_text("helper()", "helper()\nprint('x')") == (
+        "",
+        "duplicate",
+    )
+
+
+def test_completion_cache_is_lru_and_supports_empty_entries():
+    cache = _CompletionCache(max_entries=2)
+    first = _CompletionCacheKey(
+        host="http://localhost:11434",
+        model="model-a",
+        temperature=0.1,
+        num_predict=64,
+        single_line=True,
+        prompt_prefix="alpha",
+        suffix="",
+    )
+    second = _CompletionCacheKey(
+        host="http://localhost:11434",
+        model="model-a",
+        temperature=0.1,
+        num_predict=64,
+        single_line=True,
+        prompt_prefix="beta",
+        suffix="",
+    )
+    third = _CompletionCacheKey(
+        host="http://localhost:11434",
+        model="model-a",
+        temperature=0.1,
+        num_predict=64,
+        single_line=True,
+        prompt_prefix="gamma",
+        suffix="",
+    )
+
+    cache.put(first, {"text": "", "filter_reason": "duplicate"})
+    cache.put(second, {"text": "value", "filter_reason": None})
+    assert cache.get(first) == {"text": "", "filter_reason": "duplicate"}
+    cache.put(third, {"text": "other", "filter_reason": None})
+
+    assert cache.get(first) == {"text": "", "filter_reason": "duplicate"}
+    assert cache.get(second) is _CompletionCache._MISSING
+    assert cache.get(third) == {"text": "other", "filter_reason": None}

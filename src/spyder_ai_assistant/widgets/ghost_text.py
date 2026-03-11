@@ -22,8 +22,8 @@ Architecture:
 Components:
 - GhostTextManager: Manages the full lifecycle — show, clear, accept.
 - _GhostEventFilter: Intercepts Tab/Escape/other keys on the editor.
-- _CompletionPopupBlocker: Blocks Spyder's LSP dropdown while ghost
-  text is visible.
+- _CompletionPopupWatcher: Tracks Spyder's native completion popup so
+  ghost text stays out of the way when the LSP menu is visible.
 
 Usage (from plugin.py):
     manager = GhostTextManager(codeeditor)
@@ -69,7 +69,23 @@ class _GhostEventFilter(QObject):
             obj.__class__.__name__,
         )
 
-        if key == Qt.Key_Tab and not (event.modifiers() & Qt.ControlModifier):
+        modifiers = event.modifiers()
+
+        if (
+            key == Qt.Key_Right
+            and modifiers == Qt.AltModifier
+            and self._manager.accept_next_word()
+        ):
+            return True
+
+        if (
+            key == Qt.Key_Right
+            and modifiers == (Qt.AltModifier | Qt.ShiftModifier)
+            and self._manager.accept_next_line()
+        ):
+            return True
+
+        if key == Qt.Key_Tab and not (modifiers & Qt.ControlModifier):
             # Tab pressed with ghost text visible → accept the suggestion.
             # The ghost text becomes real code in the document.
             self._manager.accept()
@@ -77,7 +93,7 @@ class _GhostEventFilter(QObject):
 
         elif key == Qt.Key_Escape:
             # Escape pressed → dismiss the ghost text
-            self._manager.clear()
+            self._manager.clear(reason="escape")
             return True  # Consume the event
 
         else:
@@ -87,16 +103,16 @@ class _GhostEventFilter(QObject):
             # Any other key → clear ghost text first, then let the editor
             # process the key normally. The user is typing new code, so
             # the suggestion is stale.
-            self._manager.clear()
+            self._manager.clear(reason="typing")
             return False  # Let the event propagate to the editor
 
 
-class _CompletionPopupBlocker(QObject):
+class _CompletionPopupWatcher(QObject):
     """Event filter installed on the editor's completion popup widget.
 
-    Blocks the popup from showing while ghost text is active, so the
-    LSP dropdown doesn't compete with the inline AI suggestion. When
-    the manager has no active suggestion, the popup shows normally.
+    The native LSP popup should take priority over inline ghost text.
+    This watcher keeps the manager informed about popup visibility so
+    ghost suggestions are cleared or suppressed when needed.
     """
 
     def __init__(self, manager, completion_widget):
@@ -104,11 +120,18 @@ class _CompletionPopupBlocker(QObject):
         self._manager = manager
 
     def eventFilter(self, obj, event):
-        """Block Show events on the completion popup while ghost is active."""
-        if event.type() == QEvent.Show and self._manager.has_suggestion():
-            # Prevent the popup from appearing — ghost text takes priority
-            obj.hide()
-            return True
+        """Track completion popup visibility changes."""
+        if event.type() == QEvent.Show:
+            if self._manager.has_suggestion():
+                self._manager._emit_lifecycle_event(
+                    "suppressed",
+                    reason="native_popup",
+                )
+                obj.hide()
+                return True
+            self._manager.on_completion_popup_visibility_changed(True)
+        elif event.type() in (QEvent.Hide, QEvent.Close):
+            self._manager.on_completion_popup_visibility_changed(False)
         return False
 
 
@@ -131,14 +154,15 @@ class GhostTextManager:
     - Tab key acceptance (ghost text becomes real code)
     - Escape key dismissal
     - Auto-clearing when the user types or moves the cursor
-    - Suppressing Spyder's LSP completion popup while ghost text is visible
+    - Hiding ghost text while Spyder's native completion popup is visible
 
     Args:
         editor: The Spyder CodeEditor widget to manage.
     """
 
-    def __init__(self, editor):
+    def __init__(self, editor, lifecycle_callback=None):
         self._editor = editor
+        self._lifecycle_callback = lifecycle_callback
         self._ghost_active = False
         self._ghost_text = ""
         self._target = None
@@ -159,15 +183,14 @@ class GhostTextManager:
             viewport.installEventFilter(self._event_filter)
             self._event_targets.append(viewport)
 
-        # Event filter on the completion popup to block it while ghost
-        # text is active. This prevents the LSP dropdown from appearing
-        # on top of the inline AI suggestion.
-        self._popup_blocker = None
+        # Event filter on the completion popup so the native LSP menu
+        # can suppress inline ghost text while it is visible.
+        self._popup_watcher = None
         if hasattr(editor, "completion_widget"):
-            self._popup_blocker = _CompletionPopupBlocker(
+            self._popup_watcher = _CompletionPopupWatcher(
                 self, editor.completion_widget
             )
-            editor.completion_widget.installEventFilter(self._popup_blocker)
+            editor.completion_widget.installEventFilter(self._popup_watcher)
 
         # Auto-clear ghost text when the user clicks elsewhere or uses
         # arrow keys. This handler doesn't fire during our own insertions
@@ -185,8 +208,6 @@ class GhostTextManager:
         The cursor is restored to its original position so the user sees
         the suggestion appearing after their cursor.
 
-        Also hides Spyder's LSP completion popup to avoid visual conflict.
-
         Args:
             text: The completion text to show. Can be multi-line.
             target: Optional target metadata dict containing the cursor
@@ -194,10 +215,13 @@ class GhostTextManager:
         """
         # Clear any previous ghost text first
         if self._ghost_active:
-            self.clear()
+            self.clear(reason="replaced", record_event=False)
 
         if not text:
             return False
+
+        if self._completion_popup_visible():
+            self._hide_completion_popup()
 
         if not self._matches_target(target):
             logger.debug("Ghost text skipped because the editor target moved")
@@ -243,13 +267,15 @@ class GhostTextManager:
         # gray regardless of syntax colors.
         self._apply_ghost_extra_selection()
 
-        # Dismiss the LSP completion dropdown if it's open.
-        self._hide_completion_popup()
-
         logger.debug("Ghost text shown: %d chars", len(text))
+        self._emit_lifecycle_event(
+            "shown",
+            chars=len(text),
+            target=dict(self._target or {}),
+        )
         return True
 
-    def clear(self):
+    def clear(self, reason="unknown", record_event=True):
         """Remove the ghost text from the document.
 
         Uses document.undo() to cleanly reverse the insertion in one step.
@@ -281,6 +307,9 @@ class GhostTextManager:
         # so the selection is invalid. Rebuild without it.
         self._remove_ghost_extra_selection()
 
+        if record_event:
+            self._emit_lifecycle_event("dismissed", reason=reason)
+
     def has_suggestion(self):
         """Return True if ghost text is currently visible."""
         return self._ghost_active
@@ -298,12 +327,38 @@ class GhostTextManager:
         text = self._ghost_text
 
         # Remove the gray ghost text (silently via undo)
-        self.clear()
+        self.clear(reason="accepted", record_event=False)
 
         # Re-insert as normal text — this is a real edit that enters
         # the undo stack and triggers textChanged/dirty indicators.
         self._editor.insert_text(text)
         logger.debug("Ghost text accepted: %d chars", len(text))
+        self._emit_lifecycle_event(
+            "accepted",
+            method="full",
+            chars=len(text),
+            remaining_chars=0,
+        )
+
+    def accept_next_word(self):
+        """Accept one leading word-like segment from the ghost text."""
+        if not self._ghost_active:
+            return False
+
+        return self._accept_prefix(
+            self._next_word_segment(self._ghost_text),
+            method="word",
+        )
+
+    def accept_next_line(self):
+        """Accept one leading line from the ghost text."""
+        if not self._ghost_active:
+            return False
+
+        return self._accept_prefix(
+            self._next_line_segment(self._ghost_text),
+            method="line",
+        )
 
     def try_accept_typed_text(self, event):
         """Consume a keypress that matches the next ghost-text prefix.
@@ -329,7 +384,7 @@ class GhostTextManager:
         full_text = self._ghost_text
         remainder = full_text[len(text):]
 
-        self.clear()
+        self.clear(reason="accepted", record_event=False)
         self._editor.insert_text(text)
 
         if remainder:
@@ -347,8 +402,20 @@ class GhostTextManager:
                 text,
                 len(remainder),
             )
+            self._emit_lifecycle_event(
+                "advanced",
+                method="typed",
+                chars=len(text),
+                remaining_chars=len(remainder),
+            )
         else:
             logger.debug("Ghost text fully accepted by typing: %r", text)
+            self._emit_lifecycle_event(
+                "accepted",
+                method="full",
+                chars=len(text),
+                remaining_chars=0,
+            )
 
         return True
 
@@ -417,21 +484,6 @@ class GhostTextManager:
         except (RuntimeError, AttributeError):
             pass  # Editor may be destroyed
 
-    def _hide_completion_popup(self):
-        """Hide Spyder's LSP completion dropdown if visible.
-
-        Uses the editor's hide_completion_widget() method (defined in
-        TextEditBaseWidget) which safely hides the popup and tooltips.
-        Falls back to direct widget.hide() if the method isn't available.
-        """
-        try:
-            if hasattr(self._editor, "hide_completion_widget"):
-                self._editor.hide_completion_widget()
-            elif hasattr(self._editor, "completion_widget"):
-                self._editor.completion_widget.hide()
-        except (RuntimeError, AttributeError):
-            pass  # Widget already destroyed or not available
-
     def _on_cursor_moved(self):
         """Auto-clear ghost text when the cursor moves.
 
@@ -441,7 +493,11 @@ class GhostTextManager:
         own insertions because we block editor signals.
         """
         if self._ghost_active:
-            self.clear()
+            self.clear(reason="cursor_move")
+
+    def on_completion_popup_visibility_changed(self, visible):
+        """Track popup visibility and clear ghost text if the menu opens."""
+        return
 
     def _matches_target(self, target):
         """Return True if the editor is still at the target cursor position."""
@@ -466,7 +522,7 @@ class GhostTextManager:
         """
         # Remove any active ghost text from the document
         if self._ghost_active:
-            self.clear()
+            self.clear(reason="cleanup", record_event=False)
 
         try:
             self._editor.cursorPositionChanged.disconnect(
@@ -481,11 +537,128 @@ class GhostTextManager:
             except (RuntimeError, TypeError):
                 pass
 
-        # Remove the completion popup blocker
-        if self._popup_blocker is not None:
+        # Remove the completion popup watcher
+        if self._popup_watcher is not None:
             try:
                 self._editor.completion_widget.removeEventFilter(
-                    self._popup_blocker
+                    self._popup_watcher
                 )
             except (RuntimeError, TypeError, AttributeError):
                 pass
+
+    def _accept_prefix(self, accepted_text, method):
+        """Accept a prefix of the ghost text and keep the remainder visible."""
+        if not accepted_text or not self._ghost_text.startswith(accepted_text):
+            return False
+
+        full_text = self._ghost_text
+        remainder = full_text[len(accepted_text):]
+
+        self.clear(reason="accepted", record_event=False)
+        self._editor.insert_text(accepted_text)
+
+        if remainder:
+            cursor = self._editor.textCursor()
+            self.show_suggestion(
+                remainder,
+                target={
+                    "offset": cursor.position(),
+                    "line": cursor.blockNumber(),
+                    "column": cursor.columnNumber(),
+                },
+            )
+
+        logger.debug(
+            "Ghost text partially accepted by %s: %d chars accepted, %d remain",
+            method,
+            len(accepted_text),
+            len(remainder),
+        )
+        self._emit_lifecycle_event(
+            "accepted",
+            method=method,
+            chars=len(accepted_text),
+            remaining_chars=len(remainder),
+        )
+        return True
+
+    @staticmethod
+    def _next_word_segment(text):
+        """Return the next word-like prefix from one ghost suggestion."""
+        if not text:
+            return ""
+
+        length = len(text)
+        index = 0
+
+        while index < length and text[index].isspace():
+            index += 1
+
+        if index == length:
+            return text
+
+        if text[index].isalnum() or text[index] == "_":
+            while index < length and (
+                text[index].isalnum() or text[index] == "_"
+            ):
+                index += 1
+        else:
+            while index < length and (
+                not text[index].isalnum()
+                and text[index] != "_"
+                and not text[index].isspace()
+            ):
+                index += 1
+
+        while index < length and text[index].isspace() and text[index] != "\n":
+            index += 1
+
+        return text[:index]
+
+    @staticmethod
+    def _next_line_segment(text):
+        """Return the next line prefix from one ghost suggestion."""
+        if not text:
+            return ""
+
+        newline_index = text.find("\n")
+        if newline_index == -1:
+            return text
+        return text[:newline_index + 1]
+
+    def _emit_lifecycle_event(self, event_name, **payload):
+        """Send one lifecycle event to the optional observer callback."""
+        if self._lifecycle_callback is None:
+            return
+
+        try:
+            self._lifecycle_callback(event_name, payload)
+        except Exception as error:  # pragma: no cover - defensive UI guard
+            logger.debug("Ghost lifecycle callback failed: %s", error)
+
+    def _completion_popup_visible(self, manual_only=False):
+        """Return True when the editor's native completion popup is visible."""
+        popup_widget = getattr(self._editor, "completion_widget", None)
+        if popup_widget is None:
+            return False
+
+        try:
+            if not popup_widget.isVisible():
+                return False
+            if hasattr(popup_widget, "is_empty") and popup_widget.is_empty():
+                return False
+            if manual_only and bool(getattr(popup_widget, "automatic", False)):
+                return False
+            return True
+        except (RuntimeError, AttributeError):
+            return False
+
+    def _hide_completion_popup(self):
+        """Hide Spyder's native completion popup when ghost text takes over."""
+        try:
+            if hasattr(self._editor, "hide_completion_widget"):
+                self._editor.hide_completion_widget()
+            elif hasattr(self._editor, "completion_widget"):
+                self._editor.completion_widget.hide()
+        except (RuntimeError, AttributeError):
+            pass
