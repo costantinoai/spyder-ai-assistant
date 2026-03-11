@@ -51,7 +51,8 @@ class OllamaWorker(QObject):
 
     def __init__(self, host="http://localhost:11434"):
         super().__init__()
-        self._client = OllamaClient(host=host)
+        self._host = host
+        self._client = None
         self._abort = False
         self._mutex = QMutex()
 
@@ -60,6 +61,7 @@ class OllamaWorker(QObject):
 
         Called when the user changes the Ollama host in preferences.
         """
+        self._host = host
         self._client = OllamaClient(host=host)
 
     # --- Slots invoked via signals from main thread ---
@@ -84,6 +86,7 @@ class OllamaWorker(QObject):
         self.status_changed.emit("generating")
 
         try:
+            self._ensure_client()
             chunks = []
             for chunk_data in self._client.chat_stream(
                 model, messages, options
@@ -123,6 +126,7 @@ class OllamaWorker(QObject):
         """
         self.status_changed.emit("loading_models")
         try:
+            self._ensure_client()
             models = self._client.list_models()
             self.models_listed.emit(models)
         except Exception as e:
@@ -157,8 +161,13 @@ class OllamaWorker(QObject):
         error_str = str(error)
         if "Connect" in error_str or "refused" in error_str:
             return (
-                f"Cannot connect to Ollama at {self._client.host}. "
+                f"Cannot connect to Ollama at {self._host}. "
                 "Is the Ollama service running?"
             )
 
         return f"Unexpected error: {error}"
+
+    def _ensure_client(self):
+        """Create the Ollama client on the worker thread when needed."""
+        if self._client is None:
+            self._client = OllamaClient(host=self._host)

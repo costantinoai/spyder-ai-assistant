@@ -80,7 +80,14 @@ class ChatInput(QPlainTextEdit):
             The input text, stripped of whitespace.
         """
         text = self.toPlainText().strip()
-        self.clear()
-        # Reset to minimum height after sending
-        self.setFixedHeight(_MIN_HEIGHT)
+        self.clear_text()
         return text
+
+    def peek_text(self):
+        """Return the current stripped text without mutating the widget."""
+        return self.toPlainText().strip()
+
+    def clear_text(self):
+        """Clear the input field and reset its compact height."""
+        self.clear()
+        self.setFixedHeight(_MIN_HEIGHT)

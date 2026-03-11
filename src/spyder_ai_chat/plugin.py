@@ -17,6 +17,7 @@ from functools import partial
 
 from qtpy.QtCore import QTimer
 
+from spyder.api.config.decorators import on_conf_change
 from spyder.api.plugins import Plugins, SpyderDockablePlugin
 from spyder.api.plugin_registration.decorators import (
     on_plugin_available, on_plugin_teardown,
@@ -82,7 +83,10 @@ class AIChatPlugin(SpyderDockablePlugin):
             "chat_model": "gpt-oss-20b-abliterated",
             "completion_model":
                 "qooba/qwen3-coder-30b-a3b-instruct:q3_k_m",
-            "chat_temperature": 0.5,
+            # Stored as "temperature x10" for the current preferences UI.
+            # Runtime normalization keeps backward compatibility with older
+            # float values that may already exist in user config.
+            "chat_temperature": 5,
             "completion_temperature": 0.15,
             "max_tokens": 1024,
             "completion_max_tokens": 256,
@@ -206,9 +210,10 @@ class AIChatPlugin(SpyderDockablePlugin):
 
         # Register actions on any editors that were already open
         # before our plugin loaded (e.g., files restored from session)
+        self._register_existing_editors(editor_plugin)
+
         current_editor = editor_plugin.get_current_editor()
         if current_editor is not None:
-            self._on_codeeditor_created(current_editor)
             self._on_codeeditor_changed(current_editor)
 
     @on_plugin_teardown(plugin=Plugins.Editor)
@@ -249,11 +254,15 @@ class AIChatPlugin(SpyderDockablePlugin):
             key_combo = self.get_conf("completion_shortcut")
             shortcut = QShortcut(QKeySequence(key_combo), codeeditor)
             shortcut.activated.connect(manager.request_completion)
+            codeeditor._ai_chat_completion_shortcut = shortcut
 
         # Import here to avoid import errors if editor plugin is not available
         from spyder.plugins.editor.widgets.codeeditor.codeeditor import (
             CodeEditorContextMenuSections,
         )
+
+        if getattr(codeeditor, "_ai_chat_actions_installed", False):
+            return
 
         # Define the context menu actions: (id_suffix, display_text, action_key)
         actions = [
@@ -286,6 +295,8 @@ class AIChatPlugin(SpyderDockablePlugin):
                 menu=codeeditor.menu,
                 section=CodeEditorContextMenuSections.InspectSection,
             )
+
+        codeeditor._ai_chat_actions_installed = True
 
     def _on_codeeditor_changed(self, codeeditor):
         """Update the toolbar context label and filename tracking.
@@ -534,8 +545,39 @@ class AIChatPlugin(SpyderDockablePlugin):
         preferences = self.get_plugin(Plugins.Preferences)
         preferences.register_plugin_preferences(self)
 
+    @on_conf_change(option="ollama_host")
+    def on_host_changed(self, value):
+        """Propagate Ollama host changes to the chat widget worker."""
+        self.get_widget().update_ollama_host(value)
+
     @on_plugin_teardown(plugin=Plugins.Preferences)
     def on_preferences_teardown(self):
         """Remove our config page from Preferences on teardown."""
         preferences = self.get_plugin(Plugins.Preferences)
         preferences.deregister_plugin_preferences(self)
+
+    def _register_existing_editors(self, editor_plugin):
+        """Install AI wiring on editors restored before plugin startup."""
+        try:
+            filenames = editor_plugin.get_filenames() or []
+        except Exception:
+            filenames = []
+
+        seen_editors = set()
+        for filename in filenames:
+            try:
+                codeeditor = editor_plugin.get_codeeditor_for_filename(filename)
+            except Exception:
+                codeeditor = None
+
+            if codeeditor is None:
+                continue
+
+            editor_id = id(codeeditor)
+            if editor_id in seen_editors:
+                continue
+
+            seen_editors.add(editor_id)
+            self._on_codeeditor_created(codeeditor)
+            if filename:
+                self._filename_to_editor[filename] = codeeditor
