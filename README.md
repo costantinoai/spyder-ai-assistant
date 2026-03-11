@@ -18,6 +18,8 @@ AI-powered code assistance for [Spyder IDE](https://www.spyder-ide.org/), runnin
 
 **Inline code completions** — Copilot-style ghost text appears as you type. Press Tab to accept. The completions use Ollama's Fill-in-Middle API when the model supports it, with automatic fallback to prefix-only generation. You can also trigger completions manually with `Ctrl+Shift+Space`.
 
+![Ghost text inline completions](docs/screenshots/ghost-completions.png)
+
 **Thinking/reasoning display** — If you use a model that emits `<think>` blocks (like QwQ or DeepSeek-R1), the plugin renders the reasoning process in a dimmed section above the actual response.
 
 Everything runs locally on your GPU through Ollama. It works offline, air-gapped, and with no setup beyond installing the plugin and pulling a model.
