@@ -27,10 +27,10 @@ from spyder_ai_assistant.utils.context import (
     get_editor_context,
     get_open_files_context,
     get_project_context,
-    get_console_context,
     get_toolbar_context,
     build_action_prompt,
 )
+from spyder_ai_assistant.utils.runtime_context import RuntimeContextService
 from spyder_ai_assistant.widgets.chat_widget import ChatWidget
 from spyder_ai_assistant.widgets.config_page import AIChatConfigPage
 from spyder_ai_assistant.widgets.ghost_text import GhostTextManager
@@ -63,10 +63,11 @@ class AIChatPlugin(SpyderDockablePlugin):
     # Editor and MainMenu are optional — used for context menu actions,
     # editor context awareness, and menu integration.
     # Projects is optional — used for project file tree context.
-    # IPythonConsole is optional — used for console output and variable context.
+    # IPythonConsole is optional — used for live runtime context.
+    # VariableExplorer is optional — used to mirror namespace filter settings.
     OPTIONAL = [
         Plugins.Editor, Plugins.MainMenu, Plugins.Completions,
-        Plugins.Projects, Plugins.IPythonConsole,
+        Plugins.Projects, Plugins.IPythonConsole, Plugins.VariableExplorer,
     ]
 
     # --- Pane positioning ---
@@ -170,6 +171,9 @@ class AIChatPlugin(SpyderDockablePlugin):
         # Reverse map: filename → editor widget, for routing ghost text
         # from the completion provider to the correct editor.
         self._filename_to_editor = {}
+        # Cached runtime context service keyed by active shellwidget.
+        self._runtime_context = RuntimeContextService(self)
+        widget.set_runtime_request_executor(self._runtime_context.execute_request)
 
     def on_close(self, cancellable=True):
         """Called during Spyder shutdown.
@@ -184,6 +188,7 @@ class AIChatPlugin(SpyderDockablePlugin):
             manager.cleanup()
         self._ghost_managers.clear()
         self._filename_to_editor.clear()
+        self._runtime_context.cleanup()
 
         return True
 
@@ -374,19 +379,16 @@ class AIChatPlugin(SpyderDockablePlugin):
         """Get the full context for system prompt enrichment.
 
         Called by the chat widget on each message send. Returns a dict
-        with five context levels:
+        with three context levels:
         1. Active file — full content, cursor, selection
         2. Other open files — summaries of non-active open tabs
         3. Project structure — file tree of the project root
-        4. Console output — recent lines from the IPython console
-        5. Namespace variables — names, types, values from the kernel
 
         Returns:
             Dict with keys:
                 - context: Dict from get_editor_context() (active file).
                 - open_files: List from get_open_files_context().
                 - project: Dict from get_project_context().
-                - console: Dict from get_console_context().
             Returns dict with empty values if plugins are unavailable.
         """
         result = {
@@ -409,11 +411,34 @@ class AIChatPlugin(SpyderDockablePlugin):
         projects_plugin = self.get_plugin(Plugins.Projects)
         result["project"] = get_project_context(projects_plugin)
 
-        # --- IPython console output and namespace variables ---
-        ipython_plugin = self.get_plugin(Plugins.IPythonConsole)
-        result["console"] = get_console_context(ipython_plugin)
-
         return result
+
+    # --- IPython Console wiring ---
+
+    @on_plugin_available(plugin=Plugins.IPythonConsole)
+    def on_ipython_console_available(self):
+        """Bind runtime-context collection to the IPython Console plugin."""
+        ipython_plugin = self.get_plugin(Plugins.IPythonConsole)
+        self._runtime_context.bind_ipython_console(ipython_plugin)
+
+        variable_explorer = self.get_plugin(Plugins.VariableExplorer, error=False)
+        self._runtime_context.set_variable_explorer_plugin(variable_explorer)
+
+    @on_plugin_teardown(plugin=Plugins.IPythonConsole)
+    def on_ipython_console_teardown(self):
+        """Release runtime-context signal wiring on console teardown."""
+        self._runtime_context.unbind_ipython_console()
+
+    @on_plugin_available(plugin=Plugins.VariableExplorer)
+    def on_variable_explorer_available(self):
+        """Reuse Variable Explorer settings for runtime namespace filters."""
+        variable_explorer = self.get_plugin(Plugins.VariableExplorer)
+        self._runtime_context.set_variable_explorer_plugin(variable_explorer)
+
+    @on_plugin_teardown(plugin=Plugins.VariableExplorer)
+    def on_variable_explorer_teardown(self):
+        """Fall back to default namespace filters when Variable Explorer closes."""
+        self._runtime_context.set_variable_explorer_plugin(None)
 
     # --- Insert code into editor ---
 

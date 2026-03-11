@@ -18,6 +18,7 @@ Multi-tab design:
 
 import logging
 import os
+from dataclasses import dataclass
 from datetime import datetime
 
 from qtpy.QtCore import Qt, Signal, QThread
@@ -30,6 +31,12 @@ from spyder.api.widgets.main_widget import PluginMainWidget
 
 from spyder_ai_assistant.backend.worker import OllamaWorker
 from spyder_ai_assistant.utils.context import build_system_context_block
+from spyder_ai_assistant.utils.runtime_bridge import (
+    MAX_RUNTIME_TOOL_CALLS_PER_TURN,
+    build_runtime_bridge_instructions,
+    format_runtime_observation,
+    parse_runtime_request,
+)
 from spyder_ai_assistant.widgets.chat_input import ChatInput
 from spyder_ai_assistant.widgets.chat_display import ChatDisplay
 
@@ -111,6 +118,15 @@ class ChatSession:
         self.title = f"Chat {ChatSession._counter}"
 
 
+@dataclass
+class ChatTurnState:
+    """Internal per-turn state used for runtime inspection loops."""
+
+    session: ChatSession
+    request_messages: list
+    tool_calls: int = 0
+
+
 # ---------------------------------------------------------------------------
 # ChatWidget — the main dockable pane
 # ---------------------------------------------------------------------------
@@ -158,11 +174,15 @@ class ChatWidget(PluginMainWidget):
         # When set, _send_message() enriches the system prompt with
         # the current file content and cursor position.
         self._context_provider = None
+        # Callable that executes one runtime inspection request.
+        self._runtime_request_executor = None
 
         # The session that initiated the current generation.
         # Streaming tokens and the final response are routed here,
         # even if the user switches tabs mid-generation.
         self._generating_session = None
+        # Hidden per-turn state used when the model asks for runtime data.
+        self._pending_turn = None
 
     # --- PluginMainWidget interface ---
 
@@ -397,20 +417,36 @@ class ChatWidget(PluginMainWidget):
         Strips <think>...</think> blocks from the saved history.
         """
         session = self._generating_session
+        clean_text = self._strip_thinking(full_text)
+        runtime_request = parse_runtime_request(clean_text)
+
+        if session and runtime_request is not None:
+            if self._handle_runtime_request(session, runtime_request):
+                return
+
+        if session and not clean_text.strip():
+            logger.warning(
+                "Chat model %s returned an empty response",
+                self._current_model or "<unknown>",
+            )
+            session.display.finish_assistant_message()
+            session.display.append_error(
+                "The selected chat model returned an empty response. "
+                "Try another chat model."
+            )
+            self._pending_turn = None
+            self._set_generating(False)
+            self.status_label.setText("Empty response")
+            return
+
         if session:
             session.display.finish_assistant_message()
-
-            # Strip thinking blocks from conversation history to avoid
-            # bloating the context window with reasoning tokens.
-            clean_text = self._strip_thinking(full_text)
             session.messages.append({
                 "role": "assistant", "content": clean_text
             })
-
-            # Auto-rename the tab based on the first user message
-            # (more descriptive than "Chat N")
             self._maybe_rename_tab(session)
 
+        self._pending_turn = None
         self._set_generating(False)
 
         # Display generation speed if metrics are available
@@ -465,6 +501,7 @@ class ChatWidget(PluginMainWidget):
         if session:
             session.display.finish_assistant_message()
             session.display.append_error(message)
+        self._pending_turn = None
         self._set_generating(False)
         self.status_label.setText("Error")
 
@@ -520,6 +557,10 @@ class ChatWidget(PluginMainWidget):
                 "when relevant."
             ),
         )
+        system_prompt = (
+            f"{system_prompt}\n\n"
+            f"{build_runtime_bridge_instructions()}"
+        )
 
         if self._context_provider:
             full_context = self._context_provider()
@@ -548,6 +589,10 @@ class ChatWidget(PluginMainWidget):
         # and the final response will be routed here regardless of
         # which tab is visible.
         self._generating_session = session
+        self._pending_turn = ChatTurnState(
+            session=session,
+            request_messages=list(messages),
+        )
         session.display.start_assistant_message()
         self._set_generating(True)
 
@@ -559,6 +604,7 @@ class ChatWidget(PluginMainWidget):
         session = self._generating_session
         if session:
             session.display.finish_assistant_message()
+        self._pending_turn = None
         self._set_generating(False)
         self.status_label.setText("Stopped")
 
@@ -619,10 +665,14 @@ class ChatWidget(PluginMainWidget):
         """Set the callable that provides editor context.
 
         Args:
-            provider: Callable returning dict with editor context,
-                or empty dict if no editor is active.
+            provider: Callable returning a dict with editor context, or
+                empty dict if no editor is active.
         """
         self._context_provider = provider
+
+    def set_runtime_request_executor(self, executor):
+        """Set the callable that executes one runtime inspection request."""
+        self._runtime_request_executor = executor
 
     def update_toolbar_context(self, context_str):
         """Update the toolbar context label with the current file info.
@@ -713,6 +763,7 @@ class ChatWidget(PluginMainWidget):
         else:
             self.stop_spinner()
             self._generating_session = None
+            self._pending_turn = None
 
     def _select_default_model(self, previous=""):
         """Select the best model in the combo box.
@@ -735,6 +786,159 @@ class ChatWidget(PluginMainWidget):
 
         if self.model_combo.count() > 0:
             self.model_combo.setCurrentIndex(0)
+
+    def _handle_runtime_request(self, session, runtime_request):
+        """Execute an internal runtime request and continue the turn."""
+        session.display.discard_assistant_message()
+
+        if self._pending_turn is None or self._pending_turn.session is not session:
+            logger.warning("Missing pending turn state for runtime request")
+            return False
+
+        logger.info(
+            "Intercepted runtime request from model: %s",
+            runtime_request.get("tool", "runtime.unknown"),
+        )
+
+        if not runtime_request.get("valid"):
+            logger.warning(
+                "Rejected malformed runtime request: %s",
+                runtime_request.get("error", "unknown error"),
+            )
+            return self._continue_after_runtime_observation(
+                session,
+                runtime_request,
+                {
+                    "ok": False,
+                    "tool": "runtime.invalid_request",
+                    "source": "unavailable",
+                    "shell_status": "unavailable",
+                    "shell_detail": "",
+                    "working_directory": "",
+                    "last_refreshed_at": "",
+                    "payload": {},
+                    "query_note": "",
+                    "error": runtime_request.get(
+                        "error", "Malformed runtime request."
+                    ),
+                },
+            )
+
+        if self._runtime_request_executor is None:
+            logger.warning(
+                "Runtime request executor is unavailable for tool %s",
+                runtime_request["tool"],
+            )
+            return self._continue_after_runtime_observation(
+                session,
+                runtime_request,
+                {
+                    "ok": False,
+                    "tool": runtime_request["tool"],
+                    "source": "unavailable",
+                    "shell_status": "unavailable",
+                    "shell_detail": "",
+                    "working_directory": "",
+                    "last_refreshed_at": "",
+                    "payload": {},
+                    "query_note": "",
+                    "error": "Runtime inspection is not currently available.",
+                },
+            )
+
+        if self._pending_turn.tool_calls >= MAX_RUNTIME_TOOL_CALLS_PER_TURN:
+            logger.warning(
+                "Runtime request limit reached for this turn (%d)",
+                MAX_RUNTIME_TOOL_CALLS_PER_TURN,
+            )
+            return self._continue_after_runtime_observation(
+                session,
+                runtime_request,
+                {
+                    "ok": False,
+                    "tool": runtime_request["tool"],
+                    "source": "unavailable",
+                    "shell_status": "unavailable",
+                    "shell_detail": "",
+                    "working_directory": "",
+                    "last_refreshed_at": "",
+                    "payload": {},
+                    "query_note": "",
+                    "error": (
+                        "Runtime inspection limit reached for this turn. "
+                        "Answer with the available information."
+                    ),
+                },
+            )
+
+        self.status_label.setText("Inspecting runtime...")
+        try:
+            result = self._runtime_request_executor(runtime_request)
+        except Exception as error:
+            logger.exception(
+                "Runtime request executor crashed for tool %s",
+                runtime_request["tool"],
+            )
+            result = {
+                "ok": False,
+                "tool": runtime_request["tool"],
+                "source": "unavailable",
+                "shell_status": "unavailable",
+                "shell_detail": "",
+                "working_directory": "",
+                "last_refreshed_at": "",
+                "payload": {},
+                "query_note": "",
+                "error": f"Runtime inspection failed: {error}",
+            }
+        logger.info(
+            "Runtime request %s completed (ok=%s, source=%s)",
+            runtime_request["tool"],
+            result.get("ok"),
+            result.get("source", ""),
+        )
+        self._pending_turn.tool_calls += 1
+        return self._continue_after_runtime_observation(
+            session,
+            runtime_request,
+            result,
+        )
+
+    def _continue_after_runtime_observation(self, session, runtime_request, result):
+        """Append a hidden runtime observation and continue the same turn."""
+        if self._pending_turn is None or self._pending_turn.session is not session:
+            return False
+
+        observation = format_runtime_observation(runtime_request, result)
+        logger.info(
+            "Continuing chat turn after runtime observation for %s (tool call %d/%d)",
+            runtime_request.get("tool", "runtime.unknown"),
+            self._pending_turn.tool_calls,
+            MAX_RUNTIME_TOOL_CALLS_PER_TURN,
+        )
+        self._pending_turn.request_messages.extend([
+            {
+                "role": "assistant",
+                "content": runtime_request.get("raw_text", ""),
+            },
+            {
+                "role": "user",
+                "content": observation,
+            },
+        ])
+        session.display.start_assistant_message()
+        options = {
+            "temperature": _normalize_chat_temperature(
+                self.get_conf("chat_temperature", default=0.5)
+            ),
+            "num_predict": self.get_conf("max_tokens", default=1024),
+        }
+        self.sig_send_chat.emit(
+            self._current_model,
+            list(self._pending_turn.request_messages),
+            options,
+        )
+        return True
 
     # --- Cleanup ---
 
