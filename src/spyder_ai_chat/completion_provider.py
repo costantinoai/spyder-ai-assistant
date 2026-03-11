@@ -18,6 +18,7 @@ Signal flow:
 """
 
 import logging
+from dataclasses import dataclass
 
 from qtpy.QtCore import QObject, QThread, QTimer, Signal, Slot
 
@@ -45,6 +46,88 @@ COMPLETION_PROVIDER_NAME = "ai_chat"
 #   generates code that duplicates what's already there.
 MAX_PREFIX_CHARS = 3000
 MAX_SUFFIX_CHARS = 3000
+
+
+@dataclass
+class _QueuedCompletionRequest:
+    """One completion request tracked by the provider.
+
+    The provider only keeps three request slots alive at a time:
+    - one debounced request waiting for the timer
+    - one active request running on the worker thread
+    - one queued "latest" request waiting behind the active one
+
+    This prevents backlog growth when the user types quickly.
+    """
+
+    req: dict
+    req_id: int
+
+
+class _LatestOnlyCompletionQueue:
+    """Keep only the latest relevant completion requests.
+
+    The completion experience must prioritize freshness. Older requests are
+    discarded aggressively so that a slow model cannot trap the user behind
+    a backlog of obsolete completions.
+    """
+
+    def __init__(self):
+        self._debounced = None
+        self._queued = None
+        self._active_req_id = None
+
+    @property
+    def active_req_id(self):
+        """Return the currently active request id, if any."""
+        return self._active_req_id
+
+    def replace_debounced(self, request):
+        """Store a debounced request, dropping any previous debounced one."""
+        dropped = self._debounced
+        self._debounced = request
+        return dropped
+
+    def pop_debounced(self):
+        """Return and clear the current debounced request."""
+        request = self._debounced
+        self._debounced = None
+        return request
+
+    def replace_queued(self, request):
+        """Store the newest queued request behind the active one."""
+        dropped = self._queued
+        self._queued = request
+        return dropped
+
+    def pop_queued(self):
+        """Return and clear the queued request waiting behind the active one."""
+        request = self._queued
+        self._queued = None
+        return request
+
+    def start_active(self, req_id):
+        """Mark a request id as active on the worker thread."""
+        self._active_req_id = req_id
+
+    def finish_active(self, req_id):
+        """Clear the active slot when the matching request finishes."""
+        if self._active_req_id == req_id:
+            self._active_req_id = None
+
+    def clear_pending(self):
+        """Drop debounced and queued requests.
+
+        Returns:
+            List of request ids that should be answered immediately.
+        """
+        dropped_ids = []
+        for request in (self._debounced, self._queued):
+            if request is not None:
+                dropped_ids.append(request.req_id)
+        self._debounced = None
+        self._queued = None
+        return dropped_ids
 
 
 def _clean_completion(raw_text, prefix, suffix=""):
@@ -180,16 +263,17 @@ class CompletionWorker(QObject):
     Signals:
         sig_completion_ready(int, list): (req_id, completion_items)
             Emitted when a completion finishes successfully.
-        sig_error(str): Emitted on connection or model errors.
+        sig_error(int, str): Emitted on connection or model errors.
     """
 
     # Input signal: dispatched from the main thread via QTimer debounce
     # Args: (req_id, model, prefix, suffix, options)
     sig_perform_completion = Signal(int, str, str, str, dict)
+    sig_update_host = Signal(str)
     # Output signals: consumed by the provider on the main thread
     # sig_completion_ready(req_id, completion_text, suffix) — text for ghost display
     sig_completion_ready = Signal(int, str, str)
-    sig_error = Signal(str)
+    sig_error = Signal(int, str)
 
     def __init__(self, host="http://localhost:11434"):
         super().__init__()
@@ -203,6 +287,7 @@ class CompletionWorker(QObject):
 
         # Connect input signal to the processing slot
         self.sig_perform_completion.connect(self._handle_completion)
+        self.sig_update_host.connect(self._handle_update_host)
 
     # --- Thread lifecycle ---
 
@@ -246,7 +331,7 @@ class CompletionWorker(QObject):
             options: Model parameters (temperature, num_predict, etc.).
         """
         if self._client is None:
-            self.sig_error.emit("Completion worker not initialized")
+            self.sig_error.emit(req_id, "Completion worker not initialized")
             return
 
         try:
@@ -277,7 +362,7 @@ class CompletionWorker(QObject):
 
         except Exception as e:
             logger.warning("Completion request %d failed: %s", req_id, e)
-            self.sig_error.emit(str(e))
+            self.sig_error.emit(req_id, str(e))
 
     def update_host(self, host):
         """Update the Ollama server URL (called from main thread).
@@ -285,10 +370,13 @@ class CompletionWorker(QObject):
         Recreates the client on the next request. Thread-safe because
         the actual client creation happens in the slot.
         """
+        self.sig_update_host.emit(host)
+
+    @Slot(str)
+    def _handle_update_host(self, host):
+        """Update the worker-owned client on the worker thread."""
         self._host = host
-        # Recreate client on the worker thread
-        if self._client is not None:
-            self._client = OllamaClient(host=host)
+        self._client = OllamaClient(host=host)
 
 
 # ---------------------------------------------------------------------------
@@ -362,8 +450,9 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._debounce_timer.setSingleShot(True)
         self._debounce_timer.timeout.connect(self._debounce_fire)
 
-        # Pending request waiting for debounce to expire
-        self._pending_request = None   # (req, req_id)
+        # Keep only the freshest requests instead of letting stale work
+        # pile up behind the worker thread.
+        self._request_queue = _LatestOnlyCompletionQueue()
         # Monotonically increasing request ID for staleness detection.
         # Only the response matching _latest_req_id is delivered.
         self._latest_req_id = 0
@@ -459,6 +548,11 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             if filename:
                 self._file_contents[filename] = text
 
+        elif req_type == CompletionRequestTypes.DOCUMENT_DID_CLOSE:
+            filename = req.get("file", "")
+            if filename:
+                self._file_contents.pop(filename, None)
+
         elif req_type == CompletionRequestTypes.DOCUMENT_COMPLETION:
             # Completion request — debounce to avoid spamming the model
             self._handle_completion_request(req, req_id)
@@ -482,10 +576,16 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         """
         # Check if completions are enabled
         if not self.get_conf("completions_enabled"):
+            self._emit_empty_response(req_id)
             return
 
-        # Update the pending request — previous ones are discarded
-        self._pending_request = (req, req_id)
+        # Replace any previous debounced request and answer it immediately.
+        dropped = self._request_queue.replace_debounced(
+            _QueuedCompletionRequest(req=req, req_id=req_id)
+        )
+        if dropped is not None:
+            self._emit_empty_response(dropped.req_id)
+
         self._latest_req_id = req_id
 
         # Restart the debounce timer
@@ -498,11 +598,24 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         Extracts prefix/suffix from the stored file content at the
         cursor offset, then dispatches the request to the worker thread.
         """
-        if self._pending_request is None:
+        request = self._request_queue.pop_debounced()
+        if request is None:
             return
 
-        req, req_id = self._pending_request
-        self._pending_request = None
+        # Do not queue arbitrary backlog behind a running request. Keep
+        # only one "latest" request waiting for the active one to finish.
+        if self._request_queue.active_req_id is not None:
+            dropped = self._request_queue.replace_queued(request)
+            if dropped is not None:
+                self._emit_empty_response(dropped.req_id)
+            return
+
+        self._dispatch_request(request)
+
+    def _dispatch_request(self, request):
+        """Dispatch a request to the worker thread if it is still valid."""
+        req = request.req
+        req_id = request.req_id
 
         # Extract file content and cursor position
         filename = req.get("file", "")
@@ -511,6 +624,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
         if not text:
             logger.debug("No file content for %s, skipping completion", filename)
+            self._emit_empty_response(req_id)
             return
 
         # Split file content at cursor position into prefix (before cursor)
@@ -532,6 +646,8 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
         # Track which file this request is for (to route ghost text later)
         self._req_filename[req_id] = filename
+        self._request_queue.start_active(req_id)
+        self._update_status("AI: generating")
 
         logger.debug(
             "Dispatching completion req_id=%d, model=%s, prefix=%d chars, suffix=%d chars",
@@ -567,43 +683,42 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             {"params": []},
         )
 
-        # Discard stale responses — only the most recent request matters.
-        # This prevents old, slow completions from overwriting newer ones.
-        if req_id != self._latest_req_id:
-            logger.debug(
-                "Discarding stale completion: req_id=%d, latest=%d",
-                req_id, self._latest_req_id,
-            )
-            return
-
         # Look up the filename for this request
         filename = self._req_filename.pop(req_id, "")
-        # Clean up old entries
-        stale_ids = [k for k in self._req_filename if k < req_id]
-        for k in stale_ids:
-            del self._req_filename[k]
 
-        if not completion_text or not filename:
-            return
+        if (completion_text
+                and filename
+                and req_id == self._latest_req_id
+                and self.get_conf("completions_enabled")):
+            # Emit ghost text signal — the plugin will route this to the
+            # appropriate editor's GhostTextManager
+            self.sig_ghost_text_ready.emit(filename, completion_text)
+            logger.debug(
+                "Ghost text ready for %s: %d chars",
+                filename, len(completion_text),
+            )
 
-        # Emit ghost text signal — the plugin will route this to the
-        # appropriate editor's GhostTextManager
-        self.sig_ghost_text_ready.emit(filename, completion_text)
-        logger.debug(
-            "Ghost text ready for %s: %d chars",
-            filename, len(completion_text),
-        )
+        self._finish_request(req_id)
 
-    def _on_completion_error(self, error_msg):
+    def _on_completion_error(self, req_id, error_msg):
         """Handle an error from the worker thread.
 
         Logs the error and updates the status bar to show offline state.
 
         Args:
+            req_id: The request that failed.
             error_msg: Human-readable error description.
         """
         logger.warning("AI completion error: %s", error_msg)
-        self._update_status("AI: offline")
+        self._emit_empty_response(req_id)
+        restore_ready = True
+        if self._looks_offline(error_msg):
+            self._update_status("AI: offline")
+            restore_ready = False
+        else:
+            self._set_ready_status()
+        self._req_filename.pop(req_id, None)
+        self._finish_request(req_id, restore_ready=restore_ready)
 
     # --- Status bar helper ---
 
@@ -623,19 +738,67 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             {},
         )
 
+    def _set_ready_status(self):
+        """Restore the steady-state model status text."""
+        if not self._started:
+            return
+
+        model = self.get_conf("completion_model")
+        short_model = (
+            model.split("/")[-1].split(":")[0] if "/" in model else model
+        )
+        self._update_status(f"AI: {short_model}")
+
+    def _emit_empty_response(self, req_id):
+        """Emit an empty completion response for a request id."""
+        self.sig_response_ready.emit(
+            self.COMPLETION_PROVIDER_NAME,
+            req_id,
+            {"params": []},
+        )
+
+    def _finish_request(self, req_id, restore_ready=True):
+        """Finish an active request and dispatch the newest queued one."""
+        self._request_queue.finish_active(req_id)
+        next_request = self._request_queue.pop_queued()
+        if next_request is not None and self.get_conf("completions_enabled"):
+            self._dispatch_request(next_request)
+            return
+
+        if restore_ready and self.get_conf("completions_enabled"):
+            self._set_ready_status()
+
+    @staticmethod
+    def _looks_offline(error_msg):
+        """Return True if an error looks like an Ollama connectivity issue."""
+        lowered = error_msg.lower()
+        offline_markers = (
+            "connect", "connection refused", "failed to establish",
+            "timed out", "timeout", "all connection attempts failed",
+        )
+        return any(marker in lowered for marker in offline_markers)
+
     # --- Config change handlers ---
 
     @on_conf_change(option="ollama_host")
     def on_host_changed(self, value):
         """Update the worker's Ollama server URL when config changes."""
         self._worker.update_host(value)
+        if self.get_conf("completions_enabled"):
+            self._set_ready_status()
 
     @on_conf_change(option="completions_enabled")
     def on_enabled_changed(self, value):
         """Start or stop the worker when completions are toggled."""
         if value and not self._worker._thread.isRunning():
             self._worker.start()
+            self._set_ready_status()
             logger.info("AI completions enabled")
+        elif value:
+            self._set_ready_status()
         elif not value:
             self._debounce_timer.stop()
+            for req_id in self._request_queue.clear_pending():
+                self._emit_empty_response(req_id)
+            self._update_status("AI: disabled")
             logger.info("AI completions disabled")
