@@ -12,7 +12,7 @@ AI-powered code assistance for [Spyder IDE](https://www.spyder-ide.org/), runnin
 
 ## What it does
 
-**Chat panel** — A dockable pane where you talk to a local LLM about your code. It supports multi-tab sessions, streams responses token by token, renders Markdown with syntax-highlighted code blocks, and gives you copy, insert-at-cursor, and replace-selection actions on every code snippet.
+**Chat panel** — A dockable pane where you talk to a local LLM about your code. It supports multi-tab sessions, streams responses token by token, restores saved conversations, renders Markdown with syntax-highlighted code blocks, and gives you copy, insert-at-cursor, and replace-selection actions on every code snippet.
 
 **Editor context awareness** — The AI automatically sees your current file, cursor position, selection, other open tabs, and your project's file tree. Right-click any selection in the editor to trigger actions like *Ask AI*, *Explain*, *Fix*, or *Add Docstring*.
 
@@ -89,6 +89,8 @@ Open via **View > Panes > AI Chat**. Type a message and press Enter.
 Each conversation lives in its own tab — click "+" to start a new one. Responses stream in real time, and code blocks come with syntax highlighting (Pygments, with automatic dark/light theme detection). You can copy any code block to your clipboard, insert it at the current caret, or replace the current editor selection directly from the chat.
 
 Models that support reasoning (those that emit `<think>` blocks) show their thinking process in a dimmed section above the response. You can switch models mid-conversation from the toolbar dropdown, which shows each model's size and VRAM usage. Click Stop to cancel a response mid-stream, use `Regenerate` to rerun the last user turn on the active tab, and use Export to save any session as Markdown with model, editor, and runtime metadata.
+
+Chat sessions persist automatically. When a Spyder project is open, conversations are stored in `.spyproject/ai-assistant/chat-sessions.json` and restored when that project is reopened. When no project is active, the plugin falls back to a global session file in Spyder's config directory.
 
 When a question depends on your live session, the chat can inspect the active kernel in a read-only way. That includes:
 
@@ -227,7 +229,13 @@ The chat panel (not completions — those stay lightweight and code-only) will g
 
 ### Session history and persistence
 
-Chat sessions will be saved automatically and tied to your Spyder project. Conversations persist in the `.spyproject` folder so they're there when you reopen the project — no more losing context between sessions. Full session history with search, so you can find that useful exchange from last week.
+Basic project-aware persistence is already shipped: chat sessions are saved to `.spyproject/ai-assistant/chat-sessions.json` and restored when you reopen the project, with a global fallback when no project is active.
+
+What still remains here is the richer layer:
+
+- a history browser
+- search across past sessions
+- better management of saved conversations
 
 ### Multi-provider support
 

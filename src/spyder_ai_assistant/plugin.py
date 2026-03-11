@@ -30,6 +30,11 @@ from spyder_ai_assistant.utils.context import (
     get_toolbar_context,
     build_action_prompt,
 )
+from spyder_ai_assistant.utils.chat_persistence import (
+    get_chat_session_storage_path,
+    load_chat_session_state,
+    save_chat_session_state,
+)
 from spyder_ai_assistant.utils.runtime_context import RuntimeContextService
 from spyder_ai_assistant.widgets.chat_widget import ChatWidget
 from spyder_ai_assistant.widgets.config_page import AIChatConfigPage
@@ -183,6 +188,19 @@ class AIChatPlugin(SpyderDockablePlugin):
             widget.update_runtime_context
         )
         widget.update_runtime_context(self._runtime_context.get_current_context())
+        widget.set_session_state_changed_callback(
+            self._schedule_chat_session_save
+        )
+
+        self._chat_session_project_path = None
+        self._chat_session_storage_path = None
+        self._chat_session_state_restored = False
+        self._chat_session_save_timer = QTimer(self)
+        self._chat_session_save_timer.setSingleShot(True)
+        self._chat_session_save_timer.timeout.connect(
+            self._flush_chat_session_state
+        )
+        QTimer.singleShot(0, self._restore_initial_chat_session_state)
 
     def on_close(self, cancellable=True):
         """Called during Spyder shutdown.
@@ -190,6 +208,7 @@ class AIChatPlugin(SpyderDockablePlugin):
         Stops the background worker thread and cleans up ghost text
         managers. Returns True to allow Spyder to proceed with shutdown.
         """
+        self._flush_chat_session_state()
         self.get_widget().cleanup_worker()
 
         # Clean up all ghost text managers
@@ -240,6 +259,29 @@ class AIChatPlugin(SpyderDockablePlugin):
         editor_plugin.sig_codeeditor_changed.disconnect(
             self._on_codeeditor_changed
         )
+
+    @on_plugin_available(plugin=Plugins.Projects)
+    def on_projects_available(self):
+        """Bind project-aware chat session persistence when Projects loads."""
+        projects_plugin = self.get_plugin(Plugins.Projects)
+        projects_plugin.sig_project_loaded.connect(self._on_project_loaded)
+        projects_plugin.sig_project_closed.connect(self._on_project_closed)
+
+        active_project_path = projects_plugin.get_active_project_path()
+        if active_project_path:
+            self._switch_chat_session_scope(
+                active_project_path,
+                restore=True,
+                save_current=False,
+            )
+            self._chat_session_state_restored = True
+
+    @on_plugin_teardown(plugin=Plugins.Projects)
+    def on_projects_teardown(self):
+        """Disconnect project-aware chat persistence hooks on teardown."""
+        projects_plugin = self.get_plugin(Plugins.Projects)
+        projects_plugin.sig_project_loaded.disconnect(self._on_project_loaded)
+        projects_plugin.sig_project_closed.disconnect(self._on_project_closed)
 
     # --- Editor event handlers ---
 
@@ -421,6 +463,121 @@ class AIChatPlugin(SpyderDockablePlugin):
         result["project"] = get_project_context(projects_plugin)
 
         return result
+
+    # --- Chat session persistence ---
+
+    def _restore_initial_chat_session_state(self):
+        """Restore chat sessions for the active project or global scope."""
+        if self._chat_session_state_restored:
+            return
+
+        self._switch_chat_session_scope(
+            self._get_active_project_path(),
+            restore=True,
+            save_current=False,
+        )
+        self._chat_session_state_restored = True
+
+    def _get_active_project_path(self):
+        """Return the active Spyder project path, if any."""
+        projects_plugin = self.get_plugin(Plugins.Projects, error=False)
+        if projects_plugin is None:
+            return None
+
+        try:
+            return projects_plugin.get_active_project_path()
+        except Exception:
+            return None
+
+    def _on_project_loaded(self, project_path):
+        """Switch persisted chat state when a project is opened."""
+        self._switch_chat_session_scope(project_path, restore=True)
+
+    def _on_project_closed(self, _project_path):
+        """Return persisted chat state to the global scope when closing."""
+        self._switch_chat_session_scope(None, restore=True)
+
+    def _resolve_chat_session_storage_path(self, project_path=None):
+        """Resolve the persistence file for the given project scope."""
+        return get_chat_session_storage_path(project_path)
+
+    def _switch_chat_session_scope(self, project_path, restore=True,
+                                   save_current=True):
+        """Save the current scope and load sessions for the new scope."""
+        new_storage_path = self._resolve_chat_session_storage_path(project_path)
+        current_storage_path = self._chat_session_storage_path
+
+        if (
+            current_storage_path is not None
+            and str(new_storage_path) == str(current_storage_path)
+        ):
+            if restore:
+                self._restore_chat_session_state(new_storage_path)
+            return
+
+        if save_current:
+            self._flush_chat_session_state()
+
+        self._chat_session_project_path = project_path or None
+        self._chat_session_storage_path = new_storage_path
+        logger.info(
+            "Chat session scope set to %s (%s)",
+            project_path or "<global>",
+            new_storage_path,
+        )
+
+        if restore:
+            self._restore_chat_session_state(new_storage_path)
+
+    def _restore_chat_session_state(self, storage_path):
+        """Load persisted chat sessions and restore them into the widget."""
+        state = load_chat_session_state(storage_path)
+        session_count = (
+            len(state.get("sessions", []))
+            if isinstance(state, dict) else 0
+        )
+        self.get_widget().restore_session_state(state)
+        logger.info(
+            "Restored %d chat session(s) from %s",
+            session_count,
+            storage_path,
+        )
+
+    def _schedule_chat_session_save(self):
+        """Debounce chat-session persistence after UI state changes."""
+        if self._chat_session_storage_path is None:
+            self._chat_session_storage_path = (
+                self._resolve_chat_session_storage_path(
+                    self._get_active_project_path()
+                )
+            )
+
+        self._chat_session_save_timer.start(250)
+
+    def _flush_chat_session_state(self):
+        """Write the current chat sessions to the active persistence file."""
+        timer = getattr(self, "_chat_session_save_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+
+        if self._chat_session_storage_path is None:
+            self._chat_session_storage_path = (
+                self._resolve_chat_session_storage_path(
+                    self._get_active_project_path()
+                )
+            )
+
+        widget = self.get_widget()
+        if widget is None:
+            return
+
+        state = widget.serialize_session_state()
+        if save_chat_session_state(self._chat_session_storage_path, state):
+            logger.debug(
+                "Saved %d chat session(s) to %s",
+                len(state.get("sessions", [])),
+                self._chat_session_storage_path,
+            )
 
     # --- IPython Console wiring ---
 

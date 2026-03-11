@@ -95,6 +95,15 @@ class ChatSessionStore:
                 return index
         return -1
 
+    def ordered_sessions(self, tab_widget):
+        """Return sessions in the current visible tab order."""
+        sessions = []
+        for index in range(tab_widget.count()):
+            session = self.get_for_index(tab_widget, index)
+            if session is not None:
+                sessions.append(session)
+        return sessions
+
 
 # ---------------------------------------------------------------------------
 # ChatSession — one conversation tab
@@ -116,11 +125,11 @@ class ChatSession:
     # Counter for auto-naming new tabs ("Chat 1", "Chat 2", ...)
     _counter = 0
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, title=None, messages=None):
         ChatSession._counter += 1
         self.display = ChatDisplay(parent)
-        self.messages = []
-        self.title = f"Chat {ChatSession._counter}"
+        self.messages = list(messages or [])
+        self.title = title or f"Chat {ChatSession._counter}"
 
 
 @dataclass
@@ -192,6 +201,9 @@ class ChatWidget(PluginMainWidget):
         self._pending_turn = None
         # Cached public runtime snapshot for toolbar status and exports.
         self._runtime_context_snapshot = {}
+        # Optional callback invoked when chat-session state changes and
+        # should be persisted by the plugin layer.
+        self._session_state_changed_callback = None
 
     # --- PluginMainWidget interface ---
 
@@ -269,6 +281,9 @@ class ChatWidget(PluginMainWidget):
         self._tab_widget.setTabsClosable(True)
         self._tab_widget.setMovable(True)
         self._tab_widget.tabCloseRequested.connect(self._close_tab)
+        self._tab_widget.tabBar().tabMoved.connect(
+            lambda _from, _to: self._notify_session_state_changed("tab-move")
+        )
 
         # "+" button in the tab bar corner to create new tabs
         add_tab_btn = QToolButton(self)
@@ -420,22 +435,10 @@ class ChatWidget(PluginMainWidget):
         session = self._active_session
         return session.display if session else None
 
-    def _add_new_tab(self):
+    def _add_new_tab(self, notify=True):
         """Create a new chat session tab and switch to it."""
         session = ChatSession(parent=self._tab_widget)
-
-        # Connect code-apply signals from this tab's display
-        session.display.sig_insert_code_requested.connect(
-            self.sig_insert_code
-        )
-        session.display.sig_replace_code_requested.connect(
-            self.sig_replace_code
-        )
-
-        idx = self._tab_widget.addTab(session.display, session.title)
-        self._sessions.add(session)
-        self._tab_widget.setCurrentIndex(idx)
-        logger.debug("New chat tab: %s (index %d)", session.title, idx)
+        return self._add_session(session, notify=notify)
 
     def _close_tab(self, index):
         """Close a chat tab. Prevents closing the last tab.
@@ -450,6 +453,7 @@ class ChatWidget(PluginMainWidget):
             if session:
                 session.messages.clear()
                 session.display.clear_conversation()
+                self._notify_session_state_changed("tab-clear")
             return
 
         # Don't close a tab that's currently generating
@@ -461,6 +465,8 @@ class ChatWidget(PluginMainWidget):
         widget = self._tab_widget.widget(index)
         self._tab_widget.removeTab(index)
         self._sessions.remove_for_widget(widget)
+        widget.deleteLater()
+        self._notify_session_state_changed("tab-close")
 
     # --- Worker signal handlers (called on main thread) ---
 
@@ -511,6 +517,7 @@ class ChatWidget(PluginMainWidget):
                 "role": "assistant", "content": clean_text
             })
             self._maybe_rename_tab(session)
+            self._notify_session_state_changed("assistant-response")
 
         self._pending_turn = None
         self._set_generating(False)
@@ -676,6 +683,10 @@ class ChatWidget(PluginMainWidget):
         """Set the callable that executes one runtime inspection request."""
         self._runtime_request_executor = executor
 
+    def set_session_state_changed_callback(self, callback):
+        """Set the callback invoked when chat session state changes."""
+        self._session_state_changed_callback = callback
+
     def update_toolbar_context(self, context_str):
         """Update the toolbar context label with the current file info.
 
@@ -716,7 +727,96 @@ class ChatWidget(PluginMainWidget):
         """
         self._send_prompt_text(prompt)
 
+    def serialize_session_state(self):
+        """Return the current chat sessions as a persisted payload."""
+        sessions = []
+        for session in self._sessions.ordered_sessions(self._tab_widget):
+            sessions.append({
+                "title": session.title,
+                "messages": list(session.messages),
+            })
+
+        return {
+            "active_index": max(0, self._tab_widget.currentIndex()),
+            "sessions": sessions,
+        }
+
+    def restore_session_state(self, state):
+        """Restore tabs and messages from persisted state."""
+        if self._generating:
+            logger.warning(
+                "Skipping chat session restore while a response is generating"
+            )
+            return False
+
+        sessions = []
+        if isinstance(state, dict):
+            sessions = state.get("sessions", [])
+
+        self._clear_all_tabs()
+        if not sessions:
+            self._add_new_tab(notify=False)
+            return True
+
+        for session_state in sessions:
+            if not isinstance(session_state, dict):
+                continue
+            session = ChatSession(
+                parent=self._tab_widget,
+                title=session_state.get("title", ""),
+                messages=session_state.get("messages", []),
+            )
+            self._add_session(session, notify=False)
+            session.display.rebuild_from_messages(session.messages)
+
+        if self._tab_widget.count() == 0:
+            self._add_new_tab(notify=False)
+            return True
+
+        active_index = 0
+        if isinstance(state, dict):
+            active_index = state.get("active_index", 0)
+        if not isinstance(active_index, int):
+            active_index = 0
+        active_index = max(0, min(active_index, self._tab_widget.count() - 1))
+        self._tab_widget.setCurrentIndex(active_index)
+        return True
+
     # --- Internal helpers ---
+
+    def _notify_session_state_changed(self, reason):
+        """Notify the plugin layer that persisted session state changed."""
+        callback = self._session_state_changed_callback
+        if callback is None:
+            return
+
+        logger.debug("Chat session state changed: %s", reason)
+        callback()
+
+    def _add_session(self, session, notify=True):
+        """Insert one chat session into the tab widget."""
+        session.display.sig_insert_code_requested.connect(
+            self.sig_insert_code
+        )
+        session.display.sig_replace_code_requested.connect(
+            self.sig_replace_code
+        )
+
+        idx = self._tab_widget.addTab(session.display, session.title)
+        self._sessions.add(session)
+        self._tab_widget.setCurrentIndex(idx)
+        logger.debug("New chat tab: %s (index %d)", session.title, idx)
+        if notify:
+            self._notify_session_state_changed("tab-add")
+        return session
+
+    def _clear_all_tabs(self):
+        """Remove all tabs and forget their tracked sessions."""
+        while self._tab_widget.count():
+            widget = self._tab_widget.widget(0)
+            self._tab_widget.removeTab(0)
+            self._sessions.remove_for_widget(widget)
+            widget.deleteLater()
 
     def _maybe_rename_tab(self, session):
         """Auto-rename a tab based on the first user message.
@@ -773,6 +873,7 @@ class ChatWidget(PluginMainWidget):
         session.display.append_user_message(prompt_text)
         session.messages.append({"role": "user", "content": prompt_text})
         self._maybe_rename_tab(session)
+        self._notify_session_state_changed("user-message")
         return self._dispatch_messages(
             session,
             self._build_request_messages(session),
@@ -868,6 +969,7 @@ class ChatWidget(PluginMainWidget):
 
         session.display.rebuild_from_messages(session.messages)
         logger.info("Regenerating the last assistant answer for the active chat tab")
+        self._notify_session_state_changed("regenerate")
         self._dispatch_messages(
             session,
             self._build_request_messages(session),

@@ -18,6 +18,24 @@ The kernel label tooltip adds:
 
 This keeps runtime visibility in the UI without attaching live state to every prompt.
 
+## Session persistence
+
+Chat sessions persist automatically.
+
+Storage rules:
+
+- if a Spyder project is active, sessions are saved to `.spyproject/ai-assistant/chat-sessions.json`
+- if no project is active, sessions are saved to a global file in Spyder's config directory
+
+The persisted payload keeps:
+
+- tab order
+- active tab index
+- tab titles
+- visible user/assistant message history
+
+Hidden runtime tool requests are not written into saved history.
+
 ## Quick actions
 
 The chat pane exposes one-click actions for the highest-frequency debugging flows:
@@ -70,6 +88,9 @@ The exported message history remains user-plus-assistant only. Hidden runtime to
 Useful Phase 4 log lines include:
 
 - `Updated runtime toolbar status: Kernel: ready`
+- `Chat session scope set to ...`
+- `Restored 2 chat session(s) from ...`
+- `Saved 2 chat session(s) to ...`
 - `Dispatching debug quick action: explain_error`
 - `Intercepted runtime request from model: runtime.get_latest_error`
 - `Runtime request runtime.get_latest_error completed (ok=True, source=snapshot)`
@@ -88,4 +109,5 @@ Useful Phase 4 log lines include:
 6. Print a visible marker, click `Use Console`, and confirm the answer references the marker.
 7. Send a normal prompt, click `Regenerate`, and confirm the active tab still has one user message and one assistant answer for that turn.
 8. Use the code-block apply actions in an editor and confirm `Insert at cursor` and `Replace selection` behave differently.
-9. Export the conversation and confirm the Markdown contains model, editor context, and runtime metadata.
+9. Close and reopen Spyder with the same project open, then confirm the chat tabs and active tab restore from `.spyproject/ai-assistant/chat-sessions.json`.
+10. Export the conversation and confirm the Markdown contains model, editor context, and runtime metadata.
