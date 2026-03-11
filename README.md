@@ -279,6 +279,51 @@ spyder
 
 ---
 
+## Roadmap
+
+Planned features and improvements, roughly in priority order.
+
+### Multi-Provider Support
+
+- **OpenAI and Anthropic API integration** — Use GPT-4, Claude, or other cloud models alongside local Ollama models. Bring your own API key.
+- **Claude Code / Codex integration** — Connect to Claude Code or OpenAI Codex via subscription or API for users who want cloud-grade completions without running local models.
+- **Unified model selector** — Single dropdown that lists local (Ollama) and cloud models together, with clear provider labels.
+
+### Smart Setup & Model Management
+
+- **One-click Ollama install** — Detect if Ollama is missing and offer to download and install it directly from the plugin settings page.
+- **Guided model download** — Browse, search, and pull Ollama models from the preferences UI without touching the terminal.
+- **Hardware-aware model recommendations** — Use [LLMFit](https://github.com/containers/ramalama/tree/main/ramalama/model_inspect) (or similar) to detect available VRAM/RAM and recommend the best models that fit the current system — separately for completions (fast, small) and chat (capable, reasoning).
+- **Dual-model configuration** — Explicit split setup: one model optimized for fast autocompletion (low latency, small footprint) and one for chat/reasoning (larger, thinking-capable, agentic).
+
+### Smarter Completions
+
+- **Improved context for completions** — Better selection of reference lines and surrounding code sent to the completion model. Smarter truncation, scope-aware context (e.g., prioritize the current function, imports, and type hints).
+- **Rename-aware suggestions** — VS Code-style intelligence: when you rename a variable, the AI detects the pattern and proactively suggests the same rename at all other usage sites in the file.
+- **Multi-site edit suggestions** — Inline diff overlays (accept/reject per change) for AI-proposed edits across multiple locations, similar to VS Code's Copilot Edit experience.
+
+### Better Edit UX
+
+- **Accept/reject overlays** — Green/red inline markers on AI-suggested edits with one-click accept or reject, instead of replacing code silently.
+- **Inline diff preview** — Show a side-by-side or inline diff before applying any AI-generated change to the editor.
+- **Undo integration** — Group all AI-applied changes into a single undo step so Ctrl+Z reverts the entire suggestion cleanly.
+
+### UI & Experience
+
+- **Redesigned chat panel** — Modern, polished UI with better typography, avatars, and smoother streaming animations.
+- **Markdown preview improvements** — Tables, LaTeX math rendering, and image support in chat responses.
+- **Conversation search** — Full-text search across all chat sessions and tabs.
+- **Prompt templates library** — Saved prompt templates for common tasks (review, refactor, test generation, etc.) accessible from a quick-pick menu.
+- **Token usage display** — Show token count and estimated cost (for cloud providers) per message and per session.
+
+### Agent & Workflow Features
+
+- **Multi-step task execution** — Let the AI plan and execute multi-file changes autonomously (with approval gates), similar to agentic coding assistants.
+- **Terminal integration** — AI can read terminal output and suggest fixes for errors, failed tests, or build issues.
+- **Git-aware context** — Include recent diffs, commit messages, and branch context in the AI's awareness for more relevant suggestions.
+
+---
+
 ## License
 
 This project is licensed under the [Creative Commons Attribution-NonCommercial 4.0 International License](https://creativecommons.org/licenses/by-nc/4.0/).
