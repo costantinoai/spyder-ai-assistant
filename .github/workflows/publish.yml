@@ -10,6 +10,9 @@
 #
 # Uses PyPI Trusted Publisher (OIDC) — no API tokens needed.
 # Configure once at: https://pypi.org/manage/project/spyder-ai-assistant/settings/publishing/
+#
+# Keep the official actions on Node24-ready major versions so releases do
+# not trip the GitHub-hosted Node 20 deprecation path.
 
 name: Publish to PyPI
 
@@ -22,12 +25,14 @@ jobs:
   build:
     name: Build distribution
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0  # setuptools-scm needs full history for version
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -38,7 +43,7 @@ jobs:
         run: python -m build
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: dist
           path: dist/
@@ -52,7 +57,7 @@ jobs:
       id-token: write  # required for trusted publishing
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: dist
           path: dist/
@@ -67,7 +72,7 @@ jobs:
     permissions:
       contents: write  # required to create releases
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Create GitHub Release
         env:

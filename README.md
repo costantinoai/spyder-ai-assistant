@@ -201,7 +201,7 @@ src/spyder_ai_assistant/
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, release process, and how to contribute.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and contribution guidance, and [docs/release-workflow.md](docs/release-workflow.md) for the tag-driven release pipeline and post-release checks.
 
 ---
 

@@ -34,3 +34,7 @@ The pipeline runs in three stages:
 1. **Build** — builds the sdist and wheel on Ubuntu with Python 3.11
 2. **Publish** — uploads to PyPI via [trusted publishing](https://docs.pypi.org/trusted-publishers/) (OIDC, no API tokens)
 3. **Release** — creates a GitHub Release with auto-generated notes
+
+The release workflow now uses the Node 24-ready major versions of the official GitHub actions to stay ahead of the GitHub runner deprecation path. If you mirror it to self-hosted runners, keep them on Actions Runner `2.329.0+`.
+
+See [docs/release-workflow.md](docs/release-workflow.md) for the exact workflow components and the post-release verification checklist.
