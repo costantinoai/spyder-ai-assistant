@@ -23,7 +23,7 @@ from datetime import datetime
 from qtpy.QtCore import Qt, Signal, QThread
 from qtpy.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QSplitter, QPushButton, QComboBox, QLabel,
-    QFileDialog, QTabWidget, QTabBar, QToolButton,
+    QFileDialog, QTabWidget, QToolButton,
 )
 
 from spyder.api.widgets.main_widget import PluginMainWidget
@@ -34,6 +34,54 @@ from spyder_ai_chat.widgets.chat_input import ChatInput
 from spyder_ai_chat.widgets.chat_display import ChatDisplay
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_chat_temperature(value):
+    """Normalize stored chat temperature values to Ollama's expected range.
+
+    The preferences UI historically exposed "temperature x10" values
+    (e.g. 5 meaning 0.5), while the runtime config used decimal floats.
+    Phase 1 keeps backward compatibility by accepting either format.
+    """
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return 0.5
+
+    if numeric > 2.0:
+        numeric = numeric / 10.0
+
+    return max(0.0, min(numeric, 2.0))
+
+
+class ChatSessionStore:
+    """Track chat sessions by their display widget instead of tab index."""
+
+    def __init__(self):
+        self._by_widget = {}
+
+    def add(self, session):
+        """Register a new session by its display widget."""
+        self._by_widget[session.display] = session
+
+    def get_for_widget(self, widget):
+        """Return the session bound to a display widget, if any."""
+        return self._by_widget.get(widget)
+
+    def get_for_index(self, tab_widget, index):
+        """Return the session currently shown at a tab index."""
+        return self.get_for_widget(tab_widget.widget(index))
+
+    def remove_for_widget(self, widget):
+        """Forget the session associated with a display widget."""
+        return self._by_widget.pop(widget, None)
+
+    def index_of(self, tab_widget, session):
+        """Return the current tab index for a session, or -1."""
+        for index in range(tab_widget.count()):
+            if tab_widget.widget(index) is session.display:
+                return index
+        return -1
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +135,8 @@ class ChatWidget(PluginMainWidget):
 
     # Signal to request model listing from the background worker
     sig_list_models = Signal()
+    # Signal to update the Ollama host on the worker thread
+    sig_update_host = Signal(str)
 
     # Emitted when the user clicks "Insert into editor" on a code block.
     # Bubbles up from ChatDisplay so the plugin can handle insertion.
@@ -188,8 +238,9 @@ class ChatWidget(PluginMainWidget):
         add_tab_btn.clicked.connect(self._add_new_tab)
         self._tab_widget.setCornerWidget(add_tab_btn, Qt.TopRightCorner)
 
-        # Map tab index → ChatSession for state lookup
-        self._sessions = {}  # {tab_index: ChatSession}
+        # Track sessions by their display widget so tab moves do not
+        # corrupt the mapping between visible tabs and conversations.
+        self._sessions = ChatSessionStore()
 
         # Create the first tab
         self._add_new_tab()
@@ -238,6 +289,7 @@ class ChatWidget(PluginMainWidget):
         # Main thread → worker: dispatch work requests via signals
         self.sig_send_chat.connect(self._worker.send_chat)
         self.sig_list_models.connect(self._worker.list_models)
+        self.sig_update_host.connect(self._worker.update_host)
 
         # Worker → main thread: receive results via signals
         self._worker.chunk_received.connect(self._on_chunk)
@@ -273,8 +325,7 @@ class ChatWidget(PluginMainWidget):
     @property
     def _active_session(self):
         """The ChatSession for the currently visible tab."""
-        idx = self._tab_widget.currentIndex()
-        return self._sessions.get(idx)
+        return self._sessions.get_for_widget(self._tab_widget.currentWidget())
 
     @property
     def chat_display(self):
@@ -296,7 +347,7 @@ class ChatWidget(PluginMainWidget):
         )
 
         idx = self._tab_widget.addTab(session.display, session.title)
-        self._sessions[idx] = session
+        self._sessions.add(session)
         self._tab_widget.setCurrentIndex(idx)
         logger.debug("New chat tab: %s (index %d)", session.title, idx)
 
@@ -309,40 +360,21 @@ class ChatWidget(PluginMainWidget):
         # Don't close the last tab — always keep at least one
         if self._tab_widget.count() <= 1:
             # Instead of closing, just clear the conversation
-            session = self._sessions.get(index)
+            session = self._sessions.get_for_index(self._tab_widget, index)
             if session:
                 session.messages.clear()
                 session.display.clear_conversation()
             return
 
         # Don't close a tab that's currently generating
-        session = self._sessions.get(index)
+        session = self._sessions.get_for_index(self._tab_widget, index)
         if session is self._generating_session:
             return
 
         # Remove the tab and clean up the session
+        widget = self._tab_widget.widget(index)
         self._tab_widget.removeTab(index)
-        if index in self._sessions:
-            del self._sessions[index]
-
-        # Rebuild the sessions dict because tab indices shift after removal
-        self._rebuild_session_map()
-
-    def _rebuild_session_map(self):
-        """Rebuild the tab index → session mapping after tab reorder/removal.
-
-        QTabWidget reindexes tabs after removal, so we need to re-map
-        each tab's widget back to its ChatSession.
-        """
-        new_sessions = {}
-        for i in range(self._tab_widget.count()):
-            widget = self._tab_widget.widget(i)
-            # Find the session whose display matches this tab's widget
-            for session in self._sessions.values():
-                if session.display is widget:
-                    new_sessions[i] = session
-                    break
-        self._sessions = new_sessions
+        self._sessions.remove_for_widget(widget)
 
     # --- Worker signal handlers (called on main thread) ---
 
@@ -455,12 +487,15 @@ class ChatWidget(PluginMainWidget):
         The response will be routed back to this tab's display
         even if the user switches tabs mid-generation.
         """
-        text = self.chat_input.get_text_and_clear()
-        if not text or self._generating:
+        if self._generating:
             return
 
         session = self._active_session
         if session is None:
+            return
+
+        text = self.chat_input.peek_text()
+        if not text:
             return
 
         if not self._current_model:
@@ -469,6 +504,8 @@ class ChatWidget(PluginMainWidget):
                 "Try 'Refresh Models' from the options menu."
             )
             return
+
+        self.chat_input.clear_text()
 
         # Add user message to the active tab's display and history
         session.display.append_user_message(text)
@@ -501,8 +538,8 @@ class ChatWidget(PluginMainWidget):
         )
 
         options = {
-            "temperature": self.get_conf(
-                "chat_temperature", default=0.5
+            "temperature": _normalize_chat_temperature(
+                self.get_conf("chat_temperature", default=0.5)
             ),
             "num_predict": self.get_conf("max_tokens", default=1024),
         }
@@ -595,6 +632,12 @@ class ChatWidget(PluginMainWidget):
         """
         self.context_label.setText(context_str)
 
+    def update_ollama_host(self, host):
+        """Update the chat worker host and refresh the model list."""
+        self.status_label.setText("Connecting...")
+        self.sig_update_host.emit(host)
+        self.sig_list_models.emit()
+
     def send_with_prompt(self, prompt):
         """Inject a prompt into the input and send it immediately.
 
@@ -636,10 +679,9 @@ class ChatWidget(PluginMainWidget):
                 session.title = short
 
                 # Update the tab label in the QTabWidget
-                for i in range(self._tab_widget.count()):
-                    if self._sessions.get(i) is session:
-                        self._tab_widget.setTabText(i, short)
-                        break
+                index = self._sessions.index_of(self._tab_widget, session)
+                if index >= 0:
+                    self._tab_widget.setTabText(index, short)
                 break
 
     @staticmethod
