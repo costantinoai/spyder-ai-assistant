@@ -37,6 +37,8 @@ The main entry points are:
 - `python -m tools.spyder_validation.run_chat_workflow_validation`
 - `python -m tools.spyder_validation.run_chat_persistence_setup`
 - `python -m tools.spyder_validation.run_chat_persistence_verify`
+- `python -m tools.spyder_validation.run_chat_history_browser_validation`
+- `python -m tools.spyder_validation.run_chat_history_browser_restore_validation`
 - `python -m tools.spyder_validation.run_chat_use_console_smoke`
 
 ## Typical full validation pass
@@ -48,6 +50,8 @@ DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_completion_valid
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_workflow_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_persistence_setup
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_persistence_verify
+DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_history_browser_validation
+DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_history_browser_restore_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_use_console_smoke
 ```
 
@@ -84,6 +88,21 @@ it clears stale local build artifacts before rebuilding the sdist and wheel.
 - active tab restore
 - session title and message restore
 
+### History browser validation
+
+- real `History` button and modal dialog path
+- visible browser rows and open/saved status
+- reopen from saved history
+- duplicate into a fresh session id
+- delete from history and close the matching open tab
+- persist the resulting history state to the project storage file
+
+### History browser restore validation
+
+- reopen Spyder against the same project after browser actions
+- confirm restored tabs, titles, and active index
+- confirm deleted history sessions stay deleted across restart
+
 ### Use-console smoke
 
 - focused verification that the console quick action inspects the visible
@@ -116,6 +135,9 @@ For example:
   `runtime.list_variables`, or `runtime.get_console_tail`
 - persistence tests should show save and restore log lines
 - completion tests should show provider startup and clean shutdown
+- history-browser tests should show dialog creation plus reopen, duplicate,
+  and delete log lines
+- restore tests should show the expected save and restore counts
 
 ## Release usage
 

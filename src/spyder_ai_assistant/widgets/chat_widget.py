@@ -30,6 +30,12 @@ from qtpy.QtWidgets import (
 from spyder.api.widgets.main_widget import PluginMainWidget
 
 from spyder_ai_assistant.backend.worker import OllamaWorker
+from spyder_ai_assistant.utils.chat_persistence import (
+    build_chat_session_history_rows,
+    make_chat_session_record,
+    merge_chat_session_history,
+    remove_chat_session_from_history,
+)
 from spyder_ai_assistant.utils.context import build_system_context_block
 from spyder_ai_assistant.utils.runtime_bridge import (
     MAX_RUNTIME_TOOL_CALLS_PER_TURN,
@@ -43,6 +49,7 @@ from spyder_ai_assistant.utils.chat_workflows import (
     build_export_markdown,
 )
 from spyder_ai_assistant.widgets.chat_input import ChatInput
+from spyder_ai_assistant.widgets.session_history_dialog import SessionHistoryDialog
 from spyder_ai_assistant.widgets.chat_display import ChatDisplay
 
 logger = logging.getLogger(__name__)
@@ -125,11 +132,42 @@ class ChatSession:
     # Counter for auto-naming new tabs ("Chat 1", "Chat 2", ...)
     _counter = 0
 
-    def __init__(self, parent=None, title=None, messages=None):
+    def __init__(self, parent=None, title=None, messages=None, session_id=None,
+                 created_at=None, updated_at=None):
         ChatSession._counter += 1
+        default_title = title or f"Chat {ChatSession._counter}"
+        record = make_chat_session_record(
+            title=default_title,
+            messages=messages or [],
+            session_id=session_id,
+            created_at=created_at,
+            updated_at=updated_at,
+        )
         self.display = ChatDisplay(parent)
-        self.messages = list(messages or [])
-        self.title = title or f"Chat {ChatSession._counter}"
+        self.session_id = record["session_id"]
+        self.title = record["title"]
+        self.messages = record["messages"]
+        self.created_at = record["created_at"]
+        self.updated_at = record["updated_at"]
+
+    def touch(self):
+        """Refresh the session updated timestamp after a state change."""
+        self.updated_at = make_chat_session_record(
+            title=self.title,
+            messages=self.messages,
+            session_id=self.session_id,
+            created_at=self.created_at,
+        )["updated_at"]
+
+    def to_state(self):
+        """Return one persisted session payload."""
+        return make_chat_session_record(
+            title=self.title,
+            messages=self.messages,
+            session_id=self.session_id,
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+        )
 
 
 @dataclass
@@ -204,6 +242,11 @@ class ChatWidget(PluginMainWidget):
         # Optional callback invoked when chat-session state changes and
         # should be persisted by the plugin layer.
         self._session_state_changed_callback = None
+        # Callable returning the current persistence-scope metadata used by
+        # the history browser dialog.
+        self._session_scope_provider = None
+        # Cached saved-session history for the current project/global scope.
+        self._history_sessions = []
 
     # --- PluginMainWidget interface ---
 
@@ -271,9 +314,15 @@ class ChatWidget(PluginMainWidget):
             text="Export Chat...",
             triggered=self._export_chat,
         )
+        history_action = self.create_action(
+            "ai_chat_history",
+            text="Chat History...",
+            triggered=self._open_history_browser,
+        )
         options_menu = self.get_options_menu()
         self.add_item_to_menu(refresh_action, menu=options_menu)
         self.add_item_to_menu(new_tab_action, menu=options_menu)
+        self.add_item_to_menu(history_action, menu=options_menu)
         self.add_item_to_menu(export_action, menu=options_menu)
 
         # --- Tab widget for multiple chat sessions ---
@@ -335,12 +384,15 @@ class ChatWidget(PluginMainWidget):
         button_layout = QHBoxLayout()
         self.new_btn = QPushButton("New")
         self.new_btn.setToolTip("Open a new chat tab")
+        self.history_btn = QPushButton("History")
+        self.history_btn.setToolTip("Browse saved chat sessions for the current scope")
         self.export_btn = QPushButton("Export")
         self.export_btn.setToolTip("Export the current conversation to a file")
         self.stop_btn = QPushButton("Stop")
         self.send_btn = QPushButton("Send")
         self.stop_btn.setEnabled(False)
         button_layout.addWidget(self.new_btn)
+        button_layout.addWidget(self.history_btn)
         button_layout.addWidget(self.export_btn)
         button_layout.addStretch()
         button_layout.addWidget(self.stop_btn)
@@ -379,6 +431,7 @@ class ChatWidget(PluginMainWidget):
         self.send_btn.clicked.connect(self._send_message)
         self.stop_btn.clicked.connect(self._stop_generation)
         self.new_btn.clicked.connect(self._add_new_tab)
+        self.history_btn.clicked.connect(self._open_history_browser)
         self.export_btn.clicked.connect(self._export_chat)
         self.explain_error_btn.clicked.connect(
             lambda: self._send_debug_prompt("explain_error")
@@ -448,18 +501,27 @@ class ChatWidget(PluginMainWidget):
         """
         # Don't close the last tab — always keep at least one
         if self._tab_widget.count() <= 1:
-            # Instead of closing, just clear the conversation
             session = self._sessions.get_for_index(self._tab_widget, index)
-            if session:
-                session.messages.clear()
-                session.display.clear_conversation()
-                self._notify_session_state_changed("tab-clear")
+            if session and session.messages:
+                self._history_sessions = merge_chat_session_history(
+                    [session.to_state()],
+                    self._history_sessions,
+                )
+            self._clear_all_tabs()
+            self._add_new_tab(notify=False)
+            self._notify_session_state_changed("tab-clear")
             return
 
         # Don't close a tab that's currently generating
         session = self._sessions.get_for_index(self._tab_widget, index)
         if session is self._generating_session:
             return
+
+        if session and session.messages:
+            self._history_sessions = merge_chat_session_history(
+                [session.to_state()],
+                self._history_sessions,
+            )
 
         # Remove the tab and clean up the session
         widget = self._tab_widget.widget(index)
@@ -516,6 +578,7 @@ class ChatWidget(PluginMainWidget):
             session.messages.append({
                 "role": "assistant", "content": clean_text
             })
+            session.touch()
             self._maybe_rename_tab(session)
             self._notify_session_state_changed("assistant-response")
 
@@ -687,6 +750,10 @@ class ChatWidget(PluginMainWidget):
         """Set the callback invoked when chat session state changes."""
         self._session_state_changed_callback = callback
 
+    def set_session_scope_provider(self, provider):
+        """Set the callable that returns the current history-browser scope."""
+        self._session_scope_provider = provider
+
     def update_toolbar_context(self, context_str):
         """Update the toolbar context label with the current file info.
 
@@ -729,16 +796,14 @@ class ChatWidget(PluginMainWidget):
 
     def serialize_session_state(self):
         """Return the current chat sessions as a persisted payload."""
-        sessions = []
-        for session in self._sessions.ordered_sessions(self._tab_widget):
-            sessions.append({
-                "title": session.title,
-                "messages": list(session.messages),
-            })
+        sessions = self._serialize_open_sessions()
+        history = merge_chat_session_history(sessions, self._history_sessions)
+        self._history_sessions = list(history)
 
         return {
             "active_index": max(0, self._tab_widget.currentIndex()),
             "sessions": sessions,
+            "history": history,
         }
 
     def restore_session_state(self, state):
@@ -750,10 +815,13 @@ class ChatWidget(PluginMainWidget):
             return False
 
         sessions = []
+        history = []
         if isinstance(state, dict):
             sessions = state.get("sessions", [])
+            history = state.get("history", [])
 
         self._clear_all_tabs()
+        self._history_sessions = merge_chat_session_history(sessions, history)
         if not sessions:
             self._add_new_tab(notify=False)
             return True
@@ -765,6 +833,9 @@ class ChatWidget(PluginMainWidget):
                 parent=self._tab_widget,
                 title=session_state.get("title", ""),
                 messages=session_state.get("messages", []),
+                session_id=session_state.get("session_id"),
+                created_at=session_state.get("created_at"),
+                updated_at=session_state.get("updated_at"),
             )
             self._add_session(session, notify=False)
             session.display.rebuild_from_messages(session.messages)
@@ -786,6 +857,10 @@ class ChatWidget(PluginMainWidget):
 
     def _notify_session_state_changed(self, reason):
         """Notify the plugin layer that persisted session state changed."""
+        self._history_sessions = merge_chat_session_history(
+            self._serialize_open_sessions(),
+            self._history_sessions,
+        )
         callback = self._session_state_changed_callback
         if callback is None:
             return
@@ -809,6 +884,13 @@ class ChatWidget(PluginMainWidget):
         if notify:
             self._notify_session_state_changed("tab-add")
         return session
+
+    def _serialize_open_sessions(self):
+        """Return the current visible tabs as persisted session records."""
+        sessions = []
+        for session in self._sessions.ordered_sessions(self._tab_widget):
+            sessions.append(session.to_state())
+        return sessions
 
     def _clear_all_tabs(self):
         """Remove all tabs and forget their tracked sessions."""
@@ -847,7 +929,156 @@ class ChatWidget(PluginMainWidget):
                 index = self._sessions.index_of(self._tab_widget, session)
                 if index >= 0:
                     self._tab_widget.setTabText(index, short)
+                session.touch()
                 break
+
+    def _find_session_by_id(self, session_id):
+        """Return the currently open session with one persisted id."""
+        for session in self._sessions.ordered_sessions(self._tab_widget):
+            if session.session_id == session_id:
+                return session
+        return None
+
+    def _session_scope_info(self):
+        """Return metadata for the current chat history scope."""
+        if self._session_scope_provider is None:
+            return {"scope_label": "Global", "storage_path": ""}
+        try:
+            return dict(self._session_scope_provider() or {})
+        except Exception:
+            logger.exception("Failed to query chat session scope info")
+            return {"scope_label": "Global", "storage_path": ""}
+
+    def _create_history_browser_dialog(self):
+        """Build the modal history browser for the current persistence scope."""
+        open_session_ids = {
+            session.session_id
+            for session in self._sessions.ordered_sessions(self._tab_widget)
+        }
+        rows = build_chat_session_history_rows(
+            self._history_sessions,
+            open_session_ids=open_session_ids,
+        )
+        logger.info(
+            "Built chat history browser with %d saved session(s)",
+            len(rows),
+        )
+        return SessionHistoryDialog(
+            rows=rows,
+            scope_info=self._session_scope_info(),
+            parent=self,
+        )
+
+    def _open_history_browser(self):
+        """Open the saved-session history browser and apply one chosen action."""
+        dialog = self._create_history_browser_dialog()
+        logger.info(
+            "Opened chat history browser for %s scope",
+            self._session_scope_info().get("scope_label", "unknown"),
+        )
+        if dialog.exec_() != dialog.Accepted:
+            return
+
+        session_id = dialog.selected_session_id()
+        action = dialog.selected_action()
+        if not session_id or not action:
+            return
+
+        logger.info(
+            "History browser selected action '%s' for session %s",
+            action,
+            session_id,
+        )
+
+        if action == "open":
+            self._open_session_from_history(session_id, duplicate=False)
+        elif action == "duplicate":
+            self._open_session_from_history(session_id, duplicate=True)
+        elif action == "delete":
+            self._delete_session_from_history(session_id)
+
+    def _history_session_by_id(self, session_id):
+        """Return one saved history record by id."""
+        for session_state in self._history_sessions:
+            if session_state.get("session_id") == session_id:
+                return session_state
+        return None
+
+    def _open_session_from_history(self, session_id, duplicate=False):
+        """Reopen or duplicate one saved history session into the tab widget."""
+        session_state = self._history_session_by_id(session_id)
+        if session_state is None:
+            if self.chat_display:
+                self.chat_display.append_error("Saved chat session no longer exists.")
+            return False
+
+        if not duplicate:
+            existing = self._find_session_by_id(session_id)
+            if existing is not None:
+                index = self._sessions.index_of(self._tab_widget, existing)
+                if index >= 0:
+                    self._tab_widget.setCurrentIndex(index)
+                logger.info("Focused already-open chat session from history: %s", session_id)
+                return True
+
+        title = session_state.get("title", "")
+        if duplicate and title:
+            title = f"{title} (copy)"
+
+        session = ChatSession(
+            parent=self._tab_widget,
+            title=title,
+            messages=session_state.get("messages", []),
+            session_id=None if duplicate else session_state.get("session_id"),
+            created_at=None if duplicate else session_state.get("created_at"),
+            updated_at=None if duplicate else session_state.get("updated_at"),
+        )
+        self._add_session(session, notify=True)
+        session.display.rebuild_from_messages(session.messages)
+        if duplicate:
+            logger.info(
+                "Duplicated chat session from history: %s -> %s",
+                session_id,
+                session.session_id,
+            )
+        else:
+            logger.info("Reopened chat session from history: %s", session_id)
+        return True
+
+    def _delete_session_from_history(self, session_id):
+        """Delete one saved history session and close any matching open tab."""
+        open_session = self._find_session_by_id(session_id)
+        if open_session is self._generating_session:
+            if self.chat_display:
+                self.chat_display.append_error(
+                    "Stop the active response before deleting this session."
+                )
+            return False
+
+        updated_history, removed = remove_chat_session_from_history(
+            self._history_sessions,
+            session_id,
+        )
+        if not removed:
+            if self.chat_display:
+                self.chat_display.append_error("Saved chat session no longer exists.")
+            return False
+
+        self._history_sessions = updated_history
+
+        if open_session is not None:
+            index = self._sessions.index_of(self._tab_widget, open_session)
+            if index >= 0:
+                widget = self._tab_widget.widget(index)
+                self._tab_widget.removeTab(index)
+                self._sessions.remove_for_widget(widget)
+                widget.deleteLater()
+            if self._tab_widget.count() == 0:
+                self._add_new_tab(notify=False)
+
+        logger.info("Deleted chat session from history: %s", session_id)
+        self._notify_session_state_changed("history-delete")
+        return True
 
     def _send_prompt_text(self, text):
         """Append one user prompt to the active session and dispatch it."""
@@ -872,6 +1103,7 @@ class ChatWidget(PluginMainWidget):
         self.chat_input.clear_text()
         session.display.append_user_message(prompt_text)
         session.messages.append({"role": "user", "content": prompt_text})
+        session.touch()
         self._maybe_rename_tab(session)
         self._notify_session_state_changed("user-message")
         return self._dispatch_messages(
@@ -968,6 +1200,7 @@ class ChatWidget(PluginMainWidget):
             return
 
         session.display.rebuild_from_messages(session.messages)
+        session.touch()
         logger.info("Regenerating the last assistant answer for the active chat tab")
         self._notify_session_state_changed("regenerate")
         self._dispatch_messages(
@@ -1020,6 +1253,7 @@ class ChatWidget(PluginMainWidget):
         self.send_btn.setEnabled(not generating)
         self.stop_btn.setEnabled(generating)
         self.chat_input.setEnabled(not generating)
+        self.history_btn.setEnabled(not generating)
         self.explain_error_btn.setEnabled(not generating)
         self.fix_traceback_btn.setEnabled(not generating)
         self.use_variables_btn.setEnabled(not generating)

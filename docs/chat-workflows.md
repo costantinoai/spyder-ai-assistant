@@ -1,6 +1,6 @@
 # Chat Workflows
 
-This document describes the current Phase 4 chat workflow in Spyder.
+This document describes the current shipped chat workflow in Spyder.
 
 ## Toolbar status
 
@@ -18,7 +18,7 @@ The kernel label tooltip adds:
 
 This keeps runtime visibility in the UI without attaching live state to every prompt.
 
-## Session persistence
+## Session persistence and history
 
 Chat sessions persist automatically.
 
@@ -33,8 +33,32 @@ The persisted payload keeps:
 - active tab index
 - tab titles
 - visible user/assistant message history
+- a broader history archive for saved sessions in the current scope
 
 Hidden runtime tool requests are not written into saved history.
+
+The chat pane also exposes a session history browser through:
+
+- the `History` button in the pane
+- the `Chat History...` action in the pane options menu
+
+The history browser works within the current persistence scope:
+
+- `Project` when a Spyder project is active
+- `Global` when no project is active
+
+Each saved row shows:
+
+- title
+- last updated timestamp
+- message count
+- whether the session is currently open in a tab
+
+Available actions:
+
+- `Open` focuses an already-open session or restores a saved one into a tab
+- `Duplicate` creates a new tab with a fresh session id and copied messages
+- `Delete` removes the saved session from history and closes its tab if it is open
 
 ## Quick actions
 
@@ -91,6 +115,13 @@ Useful Phase 4 log lines include:
 - `Chat session scope set to ...`
 - `Restored 2 chat session(s) from ...`
 - `Saved 2 chat session(s) to ...`
+- `Built chat history browser with 2 saved session(s)`
+- `History browser selected action 'open' for session ...`
+- `History browser selected action 'duplicate' for session ...`
+- `History browser selected action 'delete' for session ...`
+- `Reopened chat session from history: ...`
+- `Duplicated chat session from history: ... -> ...`
+- `Deleted chat session from history: ...`
 - `Dispatching debug quick action: explain_error`
 - `Intercepted runtime request from model: runtime.get_latest_error`
 - `Runtime request runtime.get_latest_error completed (ok=True, source=snapshot)`
@@ -109,5 +140,6 @@ Useful Phase 4 log lines include:
 6. Print a visible marker, click `Use Console`, and confirm the answer references the marker.
 7. Send a normal prompt, click `Regenerate`, and confirm the active tab still has one user message and one assistant answer for that turn.
 8. Use the code-block apply actions in an editor and confirm `Insert at cursor` and `Replace selection` behave differently.
-9. Close and reopen Spyder with the same project open, then confirm the chat tabs and active tab restore from `.spyproject/ai-assistant/chat-sessions.json`.
-10. Export the conversation and confirm the Markdown contains model, editor context, and runtime metadata.
+9. Click `History`, confirm the browser shows the current scope, reopen a saved session, duplicate another one, and delete a saved session.
+10. Close and reopen Spyder with the same project open, then confirm the chat tabs and active tab restore from `.spyproject/ai-assistant/chat-sessions.json`.
+11. Export the conversation and confirm the Markdown contains model, editor context, and runtime metadata.

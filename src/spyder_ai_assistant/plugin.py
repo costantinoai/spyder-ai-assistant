@@ -191,6 +191,7 @@ class AIChatPlugin(SpyderDockablePlugin):
         widget.set_session_state_changed_callback(
             self._schedule_chat_session_save
         )
+        widget.set_session_scope_provider(self._get_chat_session_scope_info)
 
         self._chat_session_project_path = None
         self._chat_session_storage_path = None
@@ -500,6 +501,25 @@ class AIChatPlugin(SpyderDockablePlugin):
     def _resolve_chat_session_storage_path(self, project_path=None):
         """Resolve the persistence file for the given project scope."""
         return get_chat_session_storage_path(project_path)
+
+    def _get_chat_session_scope_info(self):
+        """Return the current persistence-scope metadata for the widget."""
+        storage_path = self._chat_session_storage_path
+        if storage_path is None:
+            storage_path = self._resolve_chat_session_storage_path(
+                self._get_active_project_path()
+            )
+
+        if self._chat_session_project_path:
+            scope_label = "Project"
+        else:
+            scope_label = "Global"
+
+        return {
+            "scope_label": scope_label,
+            "project_path": self._chat_session_project_path or "",
+            "storage_path": str(storage_path),
+        }
 
     def _switch_chat_session_scope(self, project_path, restore=True,
                                    save_current=True):
