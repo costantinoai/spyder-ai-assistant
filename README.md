@@ -159,7 +159,7 @@ Without a GPU, Ollama falls back to CPU. Expect 1–3 tokens/sec on a 3B model �
 
 **Too much VRAM usage** — Run `ollama ps` to see loaded models and `ollama stop <model-name>` to unload them.
 
-**Live runtime questions get a generic answer instead of inspecting the kernel** — Switch to a stronger instruction-following chat model. The runtime bridge depends on the model being willing to emit a small structured request block when it needs console or variable data. In local validation, Qwen-based chat models handled this reliably; weaker or less compliant models may ignore the protocol.
+**Live runtime questions get a generic answer or `Empty response` instead of inspecting the kernel** — Switch to a stronger instruction-following chat model. The runtime bridge depends on the model being willing to emit a small structured request block when it needs console or variable data. In local validation, Qwen-based chat models handled this reliably; weaker or less compliant models may ignore the protocol or return nothing.
 
 ---
 

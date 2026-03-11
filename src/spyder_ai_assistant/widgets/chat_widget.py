@@ -424,6 +424,21 @@ class ChatWidget(PluginMainWidget):
             if self._handle_runtime_request(session, runtime_request):
                 return
 
+        if session and not clean_text.strip():
+            logger.warning(
+                "Chat model %s returned an empty response",
+                self._current_model or "<unknown>",
+            )
+            session.display.finish_assistant_message()
+            session.display.append_error(
+                "The selected chat model returned an empty response. "
+                "Try another chat model."
+            )
+            self._pending_turn = None
+            self._set_generating(False)
+            self.status_label.setText("Empty response")
+            return
+
         if session:
             session.display.finish_assistant_message()
             session.messages.append({

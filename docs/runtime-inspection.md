@@ -71,6 +71,8 @@ Healthy logs for the runtime bridge should contain lines like:
 
 If a model ignores the protocol, the logs will usually show a normal assistant response with no runtime request interception. That is a model-compatibility issue, not a shell integration failure.
 
+If a model returns an empty answer instead of following the protocol, the chat pane now reports `Empty response` and logs a warning instead of silently saving a blank assistant message.
+
 ## Manual validation checklist
 
 1. Start Spyder in the environment where the editable plugin is installed.
@@ -89,6 +91,6 @@ Runtime inspection depends on the selected chat model following the structured r
 In local validation for this phase:
 
 - Qwen-based chat models followed the protocol correctly
-- some other local chat models returned empty or generic answers instead of requesting runtime data
+- `gpt-oss:20b` returned an empty answer for a live runtime question in Spyder, which is now surfaced in the UI as `Empty response` with a warning in the logs instead of a blank assistant turn
 
 This does not break the plugin, but it does reduce the usefulness of live debugging. If runtime inspection does not trigger when it should, test with a stronger instruction-following model first.
