@@ -21,10 +21,14 @@ from uuid import uuid4
 
 from spyder.config.base import get_conf_path
 
+from spyder_ai_assistant.utils.prompt_library import (
+    normalize_chat_prompt_preset,
+)
+
 logger = logging.getLogger(__name__)
 
 
-CHAT_SESSION_STATE_VERSION = 2
+CHAT_SESSION_STATE_VERSION = 3
 GLOBAL_CHAT_STATE_FILENAME = "spyder-ai-assistant-chat-sessions.json"
 PROJECT_CHAT_STATE_RELATIVE_PATH = (
     ".spyproject/ai-assistant/chat-sessions.json"
@@ -39,7 +43,8 @@ def get_chat_session_storage_path(project_path=None):
 
 
 def make_chat_session_record(title="", messages=None, session_id=None,
-                             created_at=None, updated_at=None):
+                             created_at=None, updated_at=None,
+                             prompt_preset_id=None):
     """Return one normalized persisted chat session record."""
     normalized_messages = _normalize_messages(messages or [])
     normalized_title = title if isinstance(title, str) else ""
@@ -53,6 +58,7 @@ def make_chat_session_record(title="", messages=None, session_id=None,
         "messages": normalized_messages,
         "created_at": created,
         "updated_at": updated,
+        "prompt_preset_id": normalize_chat_prompt_preset(prompt_preset_id),
     }
 
 
@@ -201,6 +207,7 @@ def _normalize_sessions(sessions):
                 session_id=session.get("session_id"),
                 created_at=session.get("created_at"),
                 updated_at=session.get("updated_at"),
+                prompt_preset_id=session.get("prompt_preset_id"),
             )
         )
 

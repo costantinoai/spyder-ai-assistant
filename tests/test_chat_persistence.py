@@ -12,6 +12,9 @@ from spyder_ai_assistant.utils.chat_persistence import (
     remove_chat_session_from_history,
     save_chat_session_state,
 )
+from spyder_ai_assistant.utils.prompt_library import (
+    DEFAULT_CHAT_PROMPT_PRESET,
+)
 
 
 def test_load_chat_session_state_returns_empty_for_missing_file(tmp_path):
@@ -57,6 +60,7 @@ def test_load_chat_session_state_normalizes_legacy_payload(tmp_path):
     assert session["session_id"]
     assert session["created_at"]
     assert session["updated_at"]
+    assert session["prompt_preset_id"] == DEFAULT_CHAT_PROMPT_PRESET
 
     assert state["history"][0]["session_id"] == session["session_id"]
 
@@ -71,6 +75,7 @@ def test_save_chat_session_state_writes_sessions_and_history(tmp_path):
                 "title": "Session 1",
                 "created_at": "2026-03-11T12:00:00Z",
                 "updated_at": "2026-03-11T12:05:00Z",
+                "prompt_preset_id": "debugging",
                 "messages": [
                     {"role": "user", "content": "hello"},
                     {"role": "assistant", "content": "world"},
@@ -84,6 +89,7 @@ def test_save_chat_session_state_writes_sessions_and_history(tmp_path):
                 "title": "Archived",
                 "created_at": "2026-03-10T09:00:00Z",
                 "updated_at": "2026-03-10T09:30:00Z",
+                "prompt_preset_id": "documentation",
                 "messages": [
                     {"role": "user", "content": "alpha"},
                     {"role": "assistant", "content": "beta"},
@@ -104,6 +110,8 @@ def test_save_chat_session_state_writes_sessions_and_history(tmp_path):
         "open-session",
         "archived-session",
     ]
+    assert payload["sessions"][0]["prompt_preset_id"] == "debugging"
+    assert payload["history"][1]["prompt_preset_id"] == "documentation"
 
 
 def test_merge_chat_session_history_preserves_closed_sessions():
@@ -114,6 +122,7 @@ def test_merge_chat_session_history_preserves_closed_sessions():
                 "title": "Open",
                 "created_at": "2026-03-11T12:00:00Z",
                 "updated_at": "2026-03-11T12:10:00Z",
+                "prompt_preset_id": "documentation",
                 "messages": [{"role": "user", "content": "open"}],
             }
         ],
@@ -123,6 +132,7 @@ def test_merge_chat_session_history_preserves_closed_sessions():
                 "title": "Closed",
                 "created_at": "2026-03-10T08:00:00Z",
                 "updated_at": "2026-03-10T08:30:00Z",
+                "prompt_preset_id": "debugging",
                 "messages": [{"role": "user", "content": "closed"}],
             }
         ],
@@ -142,6 +152,7 @@ def test_merge_chat_session_history_updates_matching_open_session():
                 "title": "Updated title",
                 "created_at": "2026-03-11T12:00:00Z",
                 "updated_at": "2026-03-11T12:10:00Z",
+                "prompt_preset_id": "documentation",
                 "messages": [
                     {"role": "user", "content": "new question"},
                     {"role": "assistant", "content": "new answer"},
@@ -154,6 +165,7 @@ def test_merge_chat_session_history_updates_matching_open_session():
                 "title": "Old title",
                 "created_at": "2026-03-11T12:00:00Z",
                 "updated_at": "2026-03-11T12:05:00Z",
+                "prompt_preset_id": "coding",
                 "messages": [{"role": "user", "content": "old question"}],
             }
         ],
@@ -162,6 +174,7 @@ def test_merge_chat_session_history_updates_matching_open_session():
     assert len(merged) == 1
     assert merged[0]["title"] == "Updated title"
     assert merged[0]["messages"][-1]["content"] == "new answer"
+    assert merged[0]["prompt_preset_id"] == "documentation"
 
 
 def test_remove_chat_session_from_history_removes_matching_id():
@@ -172,6 +185,7 @@ def test_remove_chat_session_from_history_removes_matching_id():
                 "title": "Keep",
                 "created_at": "2026-03-10T08:00:00Z",
                 "updated_at": "2026-03-10T08:30:00Z",
+                "prompt_preset_id": "coding",
                 "messages": [{"role": "user", "content": "keep"}],
             },
             {
@@ -179,6 +193,7 @@ def test_remove_chat_session_from_history_removes_matching_id():
                 "title": "Delete",
                 "created_at": "2026-03-11T08:00:00Z",
                 "updated_at": "2026-03-11T08:30:00Z",
+                "prompt_preset_id": "debugging",
                 "messages": [{"role": "user", "content": "delete"}],
             },
         ],
@@ -197,6 +212,7 @@ def test_build_chat_session_history_rows_marks_open_sessions():
                 "title": "Open",
                 "created_at": "2026-03-11T12:00:00Z",
                 "updated_at": "2026-03-11T12:10:00Z",
+                "prompt_preset_id": "debugging",
                 "messages": [{"role": "user", "content": "open preview"}],
             },
             {
@@ -204,6 +220,7 @@ def test_build_chat_session_history_rows_marks_open_sessions():
                 "title": "Empty",
                 "created_at": "2026-03-11T12:00:00Z",
                 "updated_at": "2026-03-11T12:10:00Z",
+                "prompt_preset_id": "documentation",
                 "messages": [],
             },
         ],
@@ -224,6 +241,7 @@ def test_build_chat_session_history_rows_sorts_newest_first():
                 "title": "Older",
                 "created_at": "2026-03-10T12:00:00Z",
                 "updated_at": "2026-03-10T12:10:00Z",
+                "prompt_preset_id": "debugging",
                 "messages": [{"role": "user", "content": "older preview"}],
             },
             {
@@ -231,6 +249,7 @@ def test_build_chat_session_history_rows_sorts_newest_first():
                 "title": "Newer",
                 "created_at": "2026-03-11T12:00:00Z",
                 "updated_at": "2026-03-11T12:10:00Z",
+                "prompt_preset_id": "documentation",
                 "messages": [{"role": "user", "content": "newer preview"}],
             },
         ],
@@ -240,3 +259,28 @@ def test_build_chat_session_history_rows_sorts_newest_first():
         "newer-session",
         "older-session",
     ]
+
+
+def test_load_chat_session_state_normalizes_invalid_prompt_preset(tmp_path):
+    path = tmp_path / "sessions.json"
+    path.write_text(
+        json.dumps(
+            {
+                "active_index": 0,
+                "sessions": [
+                    {
+                        "title": "Preset",
+                        "prompt_preset_id": "not-a-real-preset",
+                        "messages": [
+                            {"role": "user", "content": "Hello"},
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = load_chat_session_state(path)
+
+    assert state["sessions"][0]["prompt_preset_id"] == DEFAULT_CHAT_PROMPT_PRESET

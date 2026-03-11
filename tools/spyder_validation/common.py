@@ -20,6 +20,10 @@ from qtpy.QtWidgets import QApplication
 from spyder.api.plugins import Plugins
 from spyder.app.mainwindow import MainWindow
 
+from spyder_ai_assistant.utils.prompt_library import (
+    normalize_chat_prompt_preset,
+)
+
 
 ARTIFACT_ROOT = Path("/tmp/spyder-ai-assistant-validation")
 DEFAULT_CHAT_MODEL = (
@@ -160,6 +164,17 @@ def select_model(widget, model_name):
             QApplication.instance().processEvents()
             return True
     raise RuntimeError(f"Requested chat model not found: {model_name}")
+
+
+def select_prompt_preset(widget, preset_id):
+    """Select one chat prompt preset from the shared toolbar combo."""
+    normalized = normalize_chat_prompt_preset(preset_id)
+    for index in range(widget.prompt_preset_combo.count()):
+        if widget.prompt_preset_combo.itemData(index) == normalized:
+            widget.prompt_preset_combo.setCurrentIndex(index)
+            QApplication.instance().processEvents()
+            return normalized
+    raise RuntimeError(f"Requested chat prompt preset not found: {normalized}")
 
 
 def set_input_text(widget, text):

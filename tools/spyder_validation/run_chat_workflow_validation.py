@@ -10,6 +10,7 @@ from qtpy.QtGui import QTextCursor
 from qtpy.QtWidgets import QApplication
 
 from spyder_ai_assistant.utils.chat_workflows import build_export_markdown
+from spyder_ai_assistant.utils.prompt_library import get_chat_prompt_preset
 from tools.spyder_validation.common import (
     DEFAULT_CHAT_MODEL,
     artifact_path,
@@ -310,6 +311,9 @@ def run_export_check(window, results):
         build_export_markdown(
             session.messages,
             model_name=widget._current_model,
+            prompt_preset_label=get_chat_prompt_preset(
+                session.prompt_preset_id
+            )["label"],
             context_label=widget.context_label.text(),
             runtime_context=widget._runtime_context_snapshot,
         ),
@@ -321,6 +325,7 @@ def run_export_check(window, results):
         "path": str(EXPORT_PATH),
         "headless_validation": True,
         "contains_model": "**Model:**" in exported,
+        "contains_chat_mode": "**Chat mode:**" in exported,
         "contains_editor_context": "**Editor context:**" in exported,
         "contains_runtime_status": "**Runtime status:**" in exported,
         "contains_runtime_latest_error": "**Runtime latest error:**" in exported,

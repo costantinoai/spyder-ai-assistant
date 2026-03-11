@@ -37,6 +37,8 @@ The main entry points are:
 - `python -m tools.spyder_validation.run_chat_workflow_validation`
 - `python -m tools.spyder_validation.run_chat_persistence_setup`
 - `python -m tools.spyder_validation.run_chat_persistence_verify`
+- `python -m tools.spyder_validation.run_chat_prompt_preset_validation`
+- `python -m tools.spyder_validation.run_chat_prompt_preset_restore_validation`
 - `python -m tools.spyder_validation.run_chat_history_browser_validation`
 - `python -m tools.spyder_validation.run_chat_history_browser_restore_validation`
 - `python -m tools.spyder_validation.run_chat_use_console_smoke`
@@ -50,6 +52,8 @@ DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_completion_valid
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_workflow_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_persistence_setup
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_persistence_verify
+DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_prompt_preset_validation
+DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_prompt_preset_restore_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_history_browser_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_history_browser_restore_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_use_console_smoke
@@ -87,6 +91,19 @@ it clears stale local build artifacts before rebuilding the sdist and wheel.
 - project reopen and state restore
 - active tab restore
 - session title and message restore
+
+### Prompt preset validation
+
+- per-tab preset selection through the shared toolbar combo
+- deterministic prompt block checks for the selected mode
+- tab switching keeps the selector aligned with the active session
+- persisted `prompt_preset_id` values are written to the project state file
+
+### Prompt preset restore validation
+
+- reopen Spyder against the same project after preset selection
+- confirm restored tabs keep their saved preset ids
+- confirm the shared toolbar combo follows the restored active tab
 
 ### History browser validation
 
@@ -137,6 +154,8 @@ For example:
 - completion tests should show provider startup and clean shutdown
 - history-browser tests should show dialog creation plus reopen, duplicate,
   and delete log lines
+- prompt-preset tests should show preset selection log lines and restored
+  preset ids in the JSON artifact
 - restore tests should show the expected save and restore counts
 
 ## Release usage

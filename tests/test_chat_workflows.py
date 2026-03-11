@@ -33,6 +33,7 @@ def test_build_export_markdown_includes_metadata_and_messages():
             {"role": "assistant", "content": "Try checking the latest traceback."},
         ],
         model_name="qwen-test",
+        prompt_preset_label="Documentation",
         context_label="main.py",
         runtime_context={
             "status": "ready",
@@ -46,6 +47,7 @@ def test_build_export_markdown_includes_metadata_and_messages():
 
     assert "# AI Chat Export" in markdown
     assert "**Model:** qwen-test" in markdown
+    assert "**Chat mode:** Documentation" in markdown
     assert "**Editor context:** main.py" in markdown
     assert "**Runtime status:** ready" in markdown
     assert "**Runtime variables tracked:** 1" in markdown

@@ -37,6 +37,12 @@ from spyder_ai_assistant.utils.chat_persistence import (
     remove_chat_session_from_history,
 )
 from spyder_ai_assistant.utils.context import build_system_context_block
+from spyder_ai_assistant.utils.prompt_library import (
+    build_chat_prompt_preset_block,
+    get_chat_prompt_preset,
+    list_chat_prompt_presets,
+    normalize_chat_prompt_preset,
+)
 from spyder_ai_assistant.utils.runtime_bridge import (
     MAX_RUNTIME_TOOL_CALLS_PER_TURN,
     build_runtime_bridge_instructions,
@@ -133,7 +139,7 @@ class ChatSession:
     _counter = 0
 
     def __init__(self, parent=None, title=None, messages=None, session_id=None,
-                 created_at=None, updated_at=None):
+                 created_at=None, updated_at=None, prompt_preset_id=None):
         ChatSession._counter += 1
         default_title = title or f"Chat {ChatSession._counter}"
         record = make_chat_session_record(
@@ -142,6 +148,7 @@ class ChatSession:
             session_id=session_id,
             created_at=created_at,
             updated_at=updated_at,
+            prompt_preset_id=prompt_preset_id,
         )
         self.display = ChatDisplay(parent)
         self.session_id = record["session_id"]
@@ -149,6 +156,7 @@ class ChatSession:
         self.messages = record["messages"]
         self.created_at = record["created_at"]
         self.updated_at = record["updated_at"]
+        self.prompt_preset_id = record["prompt_preset_id"]
 
     def touch(self):
         """Refresh the session updated timestamp after a state change."""
@@ -157,6 +165,7 @@ class ChatSession:
             messages=self.messages,
             session_id=self.session_id,
             created_at=self.created_at,
+            prompt_preset_id=self.prompt_preset_id,
         )["updated_at"]
 
     def to_state(self):
@@ -167,6 +176,7 @@ class ChatSession:
             session_id=self.session_id,
             created_at=self.created_at,
             updated_at=self.updated_at,
+            prompt_preset_id=self.prompt_preset_id,
         )
 
 
@@ -268,6 +278,12 @@ class ChatWidget(PluginMainWidget):
         self.model_combo.setToolTip("Select the AI model for chat")
         self.model_combo.ID = "ai_chat_model_selector"
 
+        self.prompt_preset_combo = QComboBox(self)
+        self.prompt_preset_combo.setMinimumWidth(150)
+        self.prompt_preset_combo.setToolTip("Select the active chat mode for this tab")
+        self.prompt_preset_combo.ID = "ai_chat_prompt_preset_selector"
+        self._populate_prompt_preset_combo()
+
         self.status_label = QLabel("Connecting...")
         self.status_label.ID = "ai_chat_status_label"
 
@@ -287,6 +303,9 @@ class ChatWidget(PluginMainWidget):
         toolbar = self.get_main_toolbar()
         self.add_item_to_toolbar(
             self.model_combo, toolbar=toolbar, section="main",
+        )
+        self.add_item_to_toolbar(
+            self.prompt_preset_combo, toolbar=toolbar, section="preset",
         )
         self.add_item_to_toolbar(
             self.context_label, toolbar=toolbar, section="context",
@@ -449,6 +468,11 @@ class ChatWidget(PluginMainWidget):
         self.model_combo.currentIndexChanged.connect(
             self._on_model_changed
         )
+        self.prompt_preset_combo.currentIndexChanged.connect(
+            self._on_prompt_preset_changed
+        )
+        self._tab_widget.currentChanged.connect(self._on_current_tab_changed)
+        self._sync_prompt_preset_combo()
 
         # Start the worker thread and fetch available models
         self._thread.start()
@@ -470,6 +494,46 @@ class ChatWidget(PluginMainWidget):
             f"Send a runtime-aware chat request for: {label.lower()}"
         )
         return button
+
+    def _populate_prompt_preset_combo(self):
+        """Fill the shared preset selector with built-in prompt presets."""
+        self.prompt_preset_combo.blockSignals(True)
+        self.prompt_preset_combo.clear()
+        for preset in list_chat_prompt_presets():
+            self.prompt_preset_combo.addItem(preset["label"], preset["id"])
+            index = self.prompt_preset_combo.count() - 1
+            self.prompt_preset_combo.setItemData(
+                index,
+                preset["description"],
+                Qt.ToolTipRole,
+            )
+        self.prompt_preset_combo.blockSignals(False)
+
+    def _sync_prompt_preset_combo(self, session=None):
+        """Reflect the active session preset in the shared combo box."""
+        if session is None:
+            session = self._active_session
+
+        preset = get_chat_prompt_preset(
+            getattr(session, "prompt_preset_id", None)
+        )
+        combo_index = 0
+        for index in range(self.prompt_preset_combo.count()):
+            if self.prompt_preset_combo.itemData(index) == preset["id"]:
+                combo_index = index
+                break
+
+        self.prompt_preset_combo.blockSignals(True)
+        self.prompt_preset_combo.setCurrentIndex(combo_index)
+        self.prompt_preset_combo.setToolTip(
+            f"{preset['label']}: {preset['description']}"
+        )
+        self.prompt_preset_combo.blockSignals(False)
+
+    def _on_current_tab_changed(self, index):
+        """Update shared tab-scoped controls when the active tab changes."""
+        del index
+        self._sync_prompt_preset_combo()
 
     # --- Tab management ---
 
@@ -718,6 +782,9 @@ class ChatWidget(PluginMainWidget):
                         model_name=self._current_model,
                         context_label=self.context_label.text(),
                         runtime_context=self._runtime_context_snapshot,
+                        prompt_preset_label=get_chat_prompt_preset(
+                            session.prompt_preset_id
+                        )["label"],
                     )
                 )
             self.status_label.setText(
@@ -730,6 +797,31 @@ class ChatWidget(PluginMainWidget):
     def _on_model_changed(self, index):
         """Update the current model when the combo selection changes."""
         self._current_model = self.model_combo.currentData() or ""
+
+    def _on_prompt_preset_changed(self, index):
+        """Persist the selected prompt preset on the active session."""
+        del index
+        session = self._active_session
+        if session is None:
+            return
+
+        preset_id = normalize_chat_prompt_preset(
+            self.prompt_preset_combo.currentData()
+        )
+        if session.prompt_preset_id == preset_id:
+            self._sync_prompt_preset_combo(session)
+            return
+
+        session.prompt_preset_id = preset_id
+        session.touch()
+        preset = get_chat_prompt_preset(preset_id)
+        logger.info(
+            "Chat prompt preset set to %s for session %s",
+            preset["label"],
+            session.session_id,
+        )
+        self._sync_prompt_preset_combo(session)
+        self._notify_session_state_changed("prompt-preset")
 
     # --- Public API (called by plugin) ---
 
@@ -836,6 +928,7 @@ class ChatWidget(PluginMainWidget):
                 session_id=session_state.get("session_id"),
                 created_at=session_state.get("created_at"),
                 updated_at=session_state.get("updated_at"),
+                prompt_preset_id=session_state.get("prompt_preset_id"),
             )
             self._add_session(session, notify=False)
             session.display.rebuild_from_messages(session.messages)
@@ -1032,6 +1125,7 @@ class ChatWidget(PluginMainWidget):
             session_id=None if duplicate else session_state.get("session_id"),
             created_at=None if duplicate else session_state.get("created_at"),
             updated_at=None if duplicate else session_state.get("updated_at"),
+            prompt_preset_id=session_state.get("prompt_preset_id"),
         )
         self._add_session(session, notify=True)
         session.display.rebuild_from_messages(session.messages)
@@ -1138,11 +1232,11 @@ class ChatWidget(PluginMainWidget):
     def _build_request_messages(self, session):
         """Build the full request payload for the current chat session."""
         return (
-            [{"role": "system", "content": self._build_system_prompt()}]
+            [{"role": "system", "content": self._build_system_prompt(session)}]
             + session.messages
         )
 
-    def _build_system_prompt(self):
+    def _build_system_prompt(self, session):
         """Build the system prompt plus the current editor/project context."""
         system_prompt = self.get_conf(
             "chat_system_prompt",
@@ -1152,9 +1246,18 @@ class ChatWidget(PluginMainWidget):
                 "when relevant."
             ),
         )
+        preset_id = normalize_chat_prompt_preset(
+            getattr(session, "prompt_preset_id", None)
+        )
         system_prompt = (
             f"{system_prompt}\n\n"
+            f"{build_chat_prompt_preset_block(preset_id)}\n\n"
             f"{build_runtime_bridge_instructions()}"
+        )
+        logger.debug(
+            "Building chat system prompt with preset %s for session %s",
+            preset_id,
+            getattr(session, "session_id", "<unknown>"),
         )
 
         if self._context_provider:

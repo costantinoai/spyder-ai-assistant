@@ -18,6 +18,36 @@ The kernel label tooltip adds:
 
 This keeps runtime visibility in the UI without attaching live state to every prompt.
 
+The toolbar also exposes the per-tab chat mode selector. Each tab can choose
+its own working mode:
+
+- `Coding`
+- `Debugging`
+- `Explanation`
+- `Documentation`
+
+The selector is shared in the toolbar, but the chosen mode is stored on the
+active chat session rather than globally.
+
+## Prompt presets
+
+Prompt presets are built-in system-prompt overlays for the active chat tab.
+
+Behavior:
+
+- the base prompt from Preferences still applies to every chat request
+- the active tab's preset adds mode-specific instructions on top of that base
+- runtime bridge instructions remain separate and always apply consistently
+- switching tabs updates the selector to the restored preset for that tab
+- duplicating or reopening a saved session preserves its preset
+
+The shipped presets are:
+
+- `Coding` for implementation, refactoring, and code changes
+- `Debugging` for root-cause analysis and concrete fixes
+- `Explanation` for teaching and understanding code
+- `Documentation` for docstrings, usage notes, and polished written guidance
+
 ## Session persistence and history
 
 Chat sessions persist automatically.
@@ -33,6 +63,7 @@ The persisted payload keeps:
 - active tab index
 - tab titles
 - visible user/assistant message history
+- the selected prompt preset per tab
 - a broader history archive for saved sessions in the current scope
 
 Hidden runtime tool requests are not written into saved history.
@@ -102,6 +133,7 @@ Chat export now writes Markdown with:
 
 - timestamp
 - model
+- chat mode
 - editor context label
 - runtime status metadata
 
@@ -109,12 +141,15 @@ The exported message history remains user-plus-assistant only. Hidden runtime to
 
 ## Logging expectations
 
-Useful Phase 4 log lines include:
+Useful log lines include:
 
 - `Updated runtime toolbar status: Kernel: ready`
 - `Chat session scope set to ...`
 - `Restored 2 chat session(s) from ...`
 - `Saved 2 chat session(s) to ...`
+- `Chat prompt preset set to Debugging for session ...`
+- `Chat prompt preset set to Documentation for session ...`
+- `Building chat system prompt with preset debugging for session ...`
 - `Built chat history browser with 2 saved session(s)`
 - `History browser selected action 'open' for session ...`
 - `History browser selected action 'duplicate' for session ...`
@@ -140,6 +175,7 @@ Useful Phase 4 log lines include:
 6. Print a visible marker, click `Use Console`, and confirm the answer references the marker.
 7. Send a normal prompt, click `Regenerate`, and confirm the active tab still has one user message and one assistant answer for that turn.
 8. Use the code-block apply actions in an editor and confirm `Insert at cursor` and `Replace selection` behave differently.
-9. Click `History`, confirm the browser shows the current scope, reopen a saved session, duplicate another one, and delete a saved session.
-10. Close and reopen Spyder with the same project open, then confirm the chat tabs and active tab restore from `.spyproject/ai-assistant/chat-sessions.json`.
-11. Export the conversation and confirm the Markdown contains model, editor context, and runtime metadata.
+9. Set one tab to `Debugging`, open a second tab, set it to `Documentation`, then switch between tabs and confirm the toolbar selector follows the active tab.
+10. Click `History`, confirm the browser shows the current scope, reopen a saved session, duplicate another one, and delete a saved session.
+11. Close and reopen Spyder with the same project open, then confirm the chat tabs, active tab, and prompt presets restore from `.spyproject/ai-assistant/chat-sessions.json`.
+12. Export the conversation and confirm the Markdown contains model, chat mode, editor context, and runtime metadata.

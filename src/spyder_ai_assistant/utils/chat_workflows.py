@@ -65,13 +65,16 @@ def build_debug_prompt(action, user_text="", context_label=""):
     return f"{base_prompt}\n\n{context_hint}".rstrip()
 
 
-def build_export_markdown(messages, model_name="", context_label="", runtime_context=None):
+def build_export_markdown(messages, model_name="", context_label="",
+                          runtime_context=None, prompt_preset_label=""):
     """Render one conversation plus metadata as Markdown."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = [f"# AI Chat Export — {timestamp}\n"]
 
     if model_name:
         lines.append(f"**Model:** {model_name}")
+    if prompt_preset_label:
+        lines.append(f"**Chat mode:** {prompt_preset_label}")
     if context_label:
         lines.append(f"**Editor context:** {context_label}")
 
