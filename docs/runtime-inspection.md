@@ -1,6 +1,6 @@
 # Runtime Inspection
 
-The Phase 2 chat workflow keeps live kernel state out of ordinary prompts by default.
+The chat workflow keeps live kernel state out of ordinary prompts by default.
 
 Instead of attaching console dumps and variable lists to every request, the chat system prompt advertises a small read-only runtime inspection protocol. When a question depends on the current Spyder session, the model can request runtime data from the active IPython console and continue the same turn with that observation.
 
@@ -57,6 +57,17 @@ Supported read-only tools:
 
 The frontend intercepts that request, queries the active shellwidget, formats the result as a hidden observation, and lets the same chat turn continue. The visible conversation only shows the user's message and the final assistant answer.
 
+## Phase 4 chat workflow on top of the bridge
+
+The chat pane now adds a few explicit runtime-aware affordances on top of the same bridge:
+
+- a toolbar label that shows the active kernel state (`unavailable`, `starting`, `busy`, `ready`, or `error`)
+- a runtime tooltip with cwd, refresh time, variable count, and latest-error availability
+- quick actions for `Explain Error`, `Fix Traceback`, `Use Variables`, and `Use Console`
+- `Regenerate`, which reruns the last user turn on the active tab without duplicating the old assistant answer
+
+These actions still do not inject runtime dumps into the prompt. They only steer the model toward the existing inspection protocol when the question depends on live state.
+
 ## Logging expectations
 
 Healthy logs for the runtime bridge should contain lines like:
@@ -75,14 +86,16 @@ If a model returns an empty answer instead of following the protocol, the chat p
 
 ## Manual validation checklist
 
-1. Start Spyder in the environment where the editable plugin is installed.
-2. Open the AI Chat pane and confirm the plugin loads without registration errors.
-3. In IPython, create one or two variables and trigger a traceback such as `1/0`.
-4. Ask the chat a file-only question. Confirm it answers without runtime inspection logs.
-5. Ask the chat about the current error. Confirm the logs show a runtime request and the answer references the live traceback.
-6. Ask about a specific live variable. Confirm the logs show `runtime.inspect_variable` or `runtime.list_variables`.
-7. Switch to another console, create a different variable, and ask again. Confirm the runtime answer follows the active console.
-8. With a busy kernel, repeat a variable question and confirm the logs show a cached fallback instead of a crash.
+1. Start Spyder in the environment where the plugin is installed.
+2. Open the AI Chat pane and confirm the runtime label progresses from `Kernel: unavailable` to `Kernel: ready`.
+3. In IPython, trigger a traceback such as `1/0`, then click `Explain Error`. Confirm the logs show `runtime.get_latest_error`.
+4. Click `Fix Traceback`. Confirm the answer is based on the live traceback rather than only file context.
+5. Create a variable such as `values = [1, 2, 3]`, then click `Use Variables` with a short prompt like "focus on values". Confirm the logs show `runtime.list_variables` or `runtime.inspect_variable`.
+6. Print a marker such as `print("PHASE4_CONSOLE_MARKER")`, then click `Use Console`. Confirm the answer references the printed marker and the logs show `runtime.get_console_tail`.
+7. Send a normal prompt, then click `Regenerate`. Confirm the last assistant answer is replaced rather than duplicated.
+8. Export the active conversation and confirm the Markdown includes model, editor context, runtime status, and runtime metadata.
+9. Switch to another console, create a different variable, and ask again. Confirm the runtime answer follows the active console.
+10. With a busy kernel, repeat a variable question and confirm the logs show a cached fallback instead of a crash.
 
 ## Model compatibility note
 

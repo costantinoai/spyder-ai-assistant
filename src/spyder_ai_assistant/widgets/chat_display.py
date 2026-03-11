@@ -6,13 +6,13 @@ markdown formatting including fenced code blocks and inline code.
 
 Thinking/reasoning support: Models like Qwen3 emit <think>...</think>
 blocks before the actual answer. These are detected during streaming and
-rendered in a dimmed, collapsible section separate from the main response.
+rendered in a dimmed section separate from the main response.
 The thinking block shows the model's reasoning process (like Cursor's
 "Show reasoning" feature).
 
-Code blocks in assistant messages include an "Insert into editor" link
-that emits sig_insert_code_requested when clicked, allowing the plugin
-to insert the code at the cursor position in the active editor.
+Code blocks in assistant messages include apply links that emit signals
+when clicked, allowing the plugin to insert code at the cursor position
+or replace the current selection in the active editor.
 
 HTML structure note: Qt's QTextEdit HTML renderer cannot properly contain
 block-level elements (<pre>, <table>) inside <div> tags — they break out
@@ -39,7 +39,10 @@ class ChatDisplay(QTextEdit):
 
     Signals:
         sig_insert_code_requested(str): Emitted when the user clicks an
-            "Insert into editor" link on a code block. The str argument
+            "Insert at cursor" link on a code block. The str argument
+            is the raw code content to insert.
+        sig_replace_code_requested(str): Emitted when the user clicks a
+            "Replace selection" link on a code block. The str argument
             is the raw code content to insert.
 
     Usage:
@@ -50,9 +53,11 @@ class ChatDisplay(QTextEdit):
         display.finish_assistant_message()
     """
 
-    # Emitted when the user clicks "Insert into editor" on a code block.
+    # Emitted when the user clicks "Insert at cursor" on a code block.
     # Carries the raw code text to be inserted into the active editor.
     sig_insert_code_requested = Signal(str)
+    # Emitted when the user clicks "Replace selection" on a code block.
+    sig_replace_code_requested = Signal(str)
 
     # Theme color presets for light and dark Spyder themes.
     # Selected at runtime based on the widget's background luminance.
@@ -108,8 +113,8 @@ class ChatDisplay(QTextEdit):
         self._html_content = ""
 
         # Extracted code blocks from assistant messages, indexed by
-        # position. Used to look up code when user clicks "Insert
-        # into editor" links (which reference blocks by index).
+        # position. Used to look up code when user clicks code-apply
+        # links (which reference blocks by index).
         self._code_blocks = []
 
         # Initialize the document (empty chat)
@@ -167,6 +172,17 @@ class ChatDisplay(QTextEdit):
             self._theme["user_bg"], self._theme["user_text"],
             "YOU", escaped,
             label_color=self._theme["user_label"],
+        )
+        self.setHtml(self._html_content)
+        self._scroll_to_bottom()
+
+    def append_assistant_message(self, text):
+        """Add a finalized assistant message to the display."""
+        rendered = self._render_markdown(text or "", track_code_blocks=True)
+        self._html_content += self._wrap_message(
+            self._theme["assistant_bg"], self._theme["assistant_text"],
+            "AI", rendered,
+            label_color=self._theme["assistant_label"],
         )
         self.setHtml(self._html_content)
         self._scroll_to_bottom()
@@ -245,7 +261,7 @@ class ChatDisplay(QTextEdit):
 
         # Render the response with code block tracking enabled.
         # This stores code blocks in self._code_blocks and adds
-        # "Insert into editor" links below each code block.
+        # code-apply links below each code block.
         # If no response (model only produced thinking), show empty.
         response_text = response or ""
         rendered = self._render_markdown(
@@ -294,6 +310,17 @@ class ChatDisplay(QTextEdit):
         self._is_streaming = False
         self._code_blocks.clear()
         self.setHtml(self._html_content)
+
+    def rebuild_from_messages(self, messages):
+        """Re-render the full conversation from authoritative history."""
+        self.clear_conversation()
+        for message in messages:
+            role = message.get("role")
+            content = message.get("content", "")
+            if role == "user":
+                self.append_user_message(content)
+            elif role == "assistant":
+                self.append_assistant_message(content)
 
     # --- Thinking/reasoning parsing ---
 
@@ -388,7 +415,7 @@ class ChatDisplay(QTextEdit):
         Args:
             text: Raw text from the LLM (may contain markdown).
             track_code_blocks: If True, store code blocks in
-                self._code_blocks and add "Insert into editor" links.
+                self._code_blocks and add code-apply links.
                 Used only for finalized messages (not during streaming)
                 to avoid index instability while chunks arrive.
 
@@ -451,19 +478,23 @@ class ChatDisplay(QTextEdit):
                 )
 
             if track_code_blocks:
-                # Store the raw code for "Insert into editor" and "Copy"
+                # Store the raw code for code-apply actions and "Copy"
                 # actions. Uses the unescaped version so insertions are clean.
                 index = len(self._code_blocks)
                 self._code_blocks.append(raw_code)
-                # Action links below the code block: Copy + Insert
+                # Action links below the code block: Copy + Insert/Replace
                 block_html += (
                     f'<a href="copy://{index}" style="color:{link_color};'
                     f' font-size:0.85em; text-decoration:none;">'
                     f'Copy</a>'
                     f'&nbsp;&nbsp;'
                     f'<a href="insert://{index}" style="color:{link_color};'
+                     f' font-size:0.85em; text-decoration:none;">'
+                    f'Insert at cursor</a>'
+                    f'&nbsp;&nbsp;'
+                    f'<a href="replace://{index}" style="color:{link_color};'
                     f' font-size:0.85em; text-decoration:none;">'
-                    f'Insert into editor</a>'
+                    f'Replace selection</a>'
                 )
 
             return block_html
@@ -555,7 +586,7 @@ class ChatDisplay(QTextEdit):
         """Reverse HTML escaping to recover the original text.
 
         Used to store raw code from code blocks (which were HTML-escaped
-        during markdown rendering) so that "Insert into editor" inserts
+        during markdown rendering) so that code-apply actions insert
         the original code, not HTML entities.
         """
         return (
@@ -570,7 +601,8 @@ class ChatDisplay(QTextEdit):
         """Handle clicks on code block action links.
 
         Detects clicks on custom URLs embedded below code blocks:
-        - insert://<index> → emit sig_insert_code_requested (insert into editor)
+        - insert://<index> → emit sig_insert_code_requested (insert at cursor)
+        - replace://<index> → emit sig_replace_code_requested
         - copy://<index> → copy code to system clipboard
 
         Falls through to default behavior for all other clicks.
@@ -583,6 +615,8 @@ class ChatDisplay(QTextEdit):
         # Parse the action and code block index from the URL
         if anchor.startswith("insert://"):
             prefix = "insert://"
+        elif anchor.startswith("replace://"):
+            prefix = "replace://"
         elif anchor.startswith("copy://"):
             prefix = "copy://"
         else:
@@ -601,6 +635,8 @@ class ChatDisplay(QTextEdit):
         if prefix == "insert://":
             # Send code to the active editor via the plugin
             self.sig_insert_code_requested.emit(code)
+        elif prefix == "replace://":
+            self.sig_replace_code_requested.emit(code)
         elif prefix == "copy://":
             # Copy code to the system clipboard
             clipboard = QApplication.clipboard()

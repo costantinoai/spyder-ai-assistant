@@ -8,7 +8,7 @@ Features:
 - Dockable chat panel with streaming Ollama responses
 - Right-click context menu actions (Ask AI, Explain, Fix, Add Docstring)
 - Editor context (file content, selection, cursor) in the system prompt
-- "Insert into editor" support from chat code blocks
+- Code apply support from chat code blocks
 - Ghost text inline completions (Cursor/VS Code Copilot style)
 """
 
@@ -157,8 +157,13 @@ class AIChatPlugin(SpyderDockablePlugin):
         """
         widget = self.get_widget()
 
-        # Connect "Insert into editor" signal from chat code blocks
-        widget.sig_insert_code.connect(self._insert_code_into_editor)
+        # Connect code-apply signals from chat code blocks
+        widget.sig_insert_code.connect(
+            partial(self._apply_code_into_editor, mode="insert")
+        )
+        widget.sig_replace_code.connect(
+            partial(self._apply_code_into_editor, mode="replace")
+        )
 
         # Provide the widget with a callable that returns the current
         # editor context (file, selection, cursor). The widget calls
@@ -174,6 +179,10 @@ class AIChatPlugin(SpyderDockablePlugin):
         # Cached runtime context service keyed by active shellwidget.
         self._runtime_context = RuntimeContextService(self)
         widget.set_runtime_request_executor(self._runtime_context.execute_request)
+        self._runtime_context.sig_current_context_changed.connect(
+            widget.update_runtime_context
+        )
+        widget.update_runtime_context(self._runtime_context.get_current_context())
 
     def on_close(self, cancellable=True):
         """Called during Spyder shutdown.
@@ -442,32 +451,57 @@ class AIChatPlugin(SpyderDockablePlugin):
 
     # --- Insert code into editor ---
 
-    def _insert_code_into_editor(self, code):
-        """Insert code from a chat response into the active editor.
-
-        If the user has text selected, replaces the selection with the
-        code. Otherwise, inserts at the current cursor position.
+    def _apply_code_into_editor(self, code, mode="insert"):
+        """Apply code from a chat response into the active editor.
 
         Args:
             code: The code text to insert.
+            mode: Either ``insert`` to insert at the caret without
+                deleting the current selection, or ``replace`` to
+                replace the current selection when one exists.
         """
         editor_plugin = self.get_plugin(Plugins.Editor)
         if editor_plugin is None:
-            logger.warning("Cannot insert code: Editor plugin not available")
+            logger.warning(
+                "Cannot apply chat code (%s): Editor plugin not available",
+                mode,
+            )
             return
 
         editor = editor_plugin.get_current_editor()
         if editor is None:
-            logger.warning("Cannot insert code: No active editor")
+            logger.warning("Cannot apply chat code (%s): No active editor", mode)
             return
 
-        # If text is selected, replace the selection with the new code.
-        # Otherwise, insert at the current cursor position.
-        if editor.get_selected_text():
+        if mode == "replace" and editor.get_selected_text():
             cursor = editor.textCursor()
             cursor.insertText(code)
+            logger.info(
+                "Applied chat code by replacing the current editor selection"
+            )
+            return
+
+        if mode == "insert" and editor.get_selected_text():
+            cursor = editor.textCursor()
+            insert_position = cursor.position()
+            cursor.clearSelection()
+            cursor.setPosition(insert_position)
+            editor.setTextCursor(cursor)
+            cursor.insertText(code)
+            logger.info(
+                "Applied chat code at the current cursor position without replacing the selection"
+            )
+            return
+
+        editor.insert_text(code)
+        if mode == "replace":
+            logger.info(
+                "Applied chat code in replace-selection mode with no active selection; inserted at the current cursor position instead"
+            )
         else:
-            editor.insert_text(code)
+            logger.info(
+                "Applied chat code at the current cursor position"
+            )
 
     # --- Ghost text routing ---
 

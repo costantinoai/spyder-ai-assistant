@@ -12,7 +12,7 @@ AI-powered code assistance for [Spyder IDE](https://www.spyder-ide.org/), runnin
 
 ## What it does
 
-**Chat panel** — A dockable pane where you talk to a local LLM about your code. It supports multi-tab sessions, streams responses token by token, renders Markdown with syntax-highlighted code blocks, and gives you copy and insert-to-editor buttons on every code snippet.
+**Chat panel** — A dockable pane where you talk to a local LLM about your code. It supports multi-tab sessions, streams responses token by token, renders Markdown with syntax-highlighted code blocks, and gives you copy, insert-at-cursor, and replace-selection actions on every code snippet.
 
 **Editor context awareness** — The AI automatically sees your current file, cursor position, selection, other open tabs, and your project's file tree. Right-click any selection in the editor to trigger actions like *Ask AI*, *Explain*, *Fix*, or *Add Docstring*.
 
@@ -23,6 +23,8 @@ AI-powered code assistance for [Spyder IDE](https://www.spyder-ide.org/), runnin
 **Thinking/reasoning display** — If you use a model that emits `<think>` blocks (like QwQ or DeepSeek-R1), the plugin renders the reasoning process in a dimmed section above the actual response.
 
 **Live runtime inspection** — The chat panel can inspect the active Spyder IPython session on demand. It does not dump your console, variables, or kernel state into every prompt. Instead, the system prompt teaches the chat model a small read-only inspection protocol so it can ask for the latest traceback, recent console output, or specific live variables only when the question actually depends on runtime state.
+
+**Debugging workflows** — The chat toolbar shows the active kernel state, and the quick-action row gives you one-click paths for `Explain Error`, `Fix Traceback`, `Use Variables`, `Use Console`, and `Regenerate`.
 
 Everything runs locally on your GPU through Ollama. It works offline, air-gapped, and with no setup beyond installing the plugin and pulling a model.
 
@@ -84,9 +86,9 @@ No configuration files, no API keys, no setup wizards.
 
 Open via **View > Panes > AI Chat**. Type a message and press Enter.
 
-Each conversation lives in its own tab — click "+" to start a new one. Responses stream in real time, and code blocks come with syntax highlighting (Pygments, with automatic dark/light theme detection). You can copy any code block to your clipboard or insert it directly into the editor at your cursor position.
+Each conversation lives in its own tab — click "+" to start a new one. Responses stream in real time, and code blocks come with syntax highlighting (Pygments, with automatic dark/light theme detection). You can copy any code block to your clipboard, insert it at the current caret, or replace the current editor selection directly from the chat.
 
-Models that support reasoning (those that emit `<think>` blocks) show their thinking process in a dimmed, collapsible section above the response. You can switch models mid-conversation from the toolbar dropdown, which shows each model's size and VRAM usage. Click Stop to cancel a response mid-stream, and use Export to save any session as Markdown.
+Models that support reasoning (those that emit `<think>` blocks) show their thinking process in a dimmed section above the response. You can switch models mid-conversation from the toolbar dropdown, which shows each model's size and VRAM usage. Click Stop to cancel a response mid-stream, use `Regenerate` to rerun the last user turn on the active tab, and use Export to save any session as Markdown with model, editor, and runtime metadata.
 
 When a question depends on your live session, the chat can inspect the active kernel in a read-only way. That includes:
 
@@ -96,6 +98,14 @@ When a question depends on your live session, the chat can inspect the active ke
 - targeted inspection of named variables
 
 This runtime inspection is on demand, not automatic. Ordinary code questions stay file-focused and lean by default. Runtime inspection never executes code on your behalf in Phase 2; it only reads state that Spyder already exposes through the current IPython console and Variable Explorer integration.
+
+The chat toolbar also exposes the active kernel state without attaching runtime data to every prompt. The quick-action row is tuned for common debugging loops:
+
+- `Explain Error` asks the model to inspect the latest traceback first.
+- `Fix Traceback` asks for a concrete fix based on the latest runtime failure.
+- `Use Variables` asks the model to inspect the current variable state only when needed.
+- `Use Console` asks the model to inspect recent visible console output.
+- `Regenerate` removes the last assistant answer on the active tab and reruns the last user turn.
 
 ### Editor integration
 
@@ -109,6 +119,8 @@ Select code in the editor and right-click for AI actions:
 | **Add Docstring** | Generates a docstring for the selected function or class |
 
 Behind the scenes, the AI always has access to the full content of your current file (up to 50K chars), summaries of your other open files, your project's file tree, and your cursor position. This context is assembled automatically — you don't need to copy-paste anything.
+
+When the chat produces code, the code-block actions let you either insert it at the current caret or replace the current editor selection explicitly.
 
 ### Inline completions
 
@@ -201,7 +213,7 @@ src/spyder_ai_assistant/
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and contribution guidance, and [docs/release-workflow.md](docs/release-workflow.md) for the tag-driven release pipeline and post-release checks.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and contribution guidance, [docs/runtime-inspection.md](docs/runtime-inspection.md) for the runtime bridge design and validation checklist, [docs/chat-workflows.md](docs/chat-workflows.md) for the current chat UX, and [docs/release-workflow.md](docs/release-workflow.md) for the tag-driven release pipeline and post-release checks.
 
 ---
 

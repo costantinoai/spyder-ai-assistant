@@ -37,6 +37,11 @@ from spyder_ai_assistant.utils.runtime_bridge import (
     format_runtime_observation,
     parse_runtime_request,
 )
+from spyder_ai_assistant.utils.chat_workflows import (
+    DEBUG_ACTION_LABELS,
+    build_debug_prompt,
+    build_export_markdown,
+)
 from spyder_ai_assistant.widgets.chat_input import ChatInput
 from spyder_ai_assistant.widgets.chat_display import ChatDisplay
 
@@ -154,9 +159,11 @@ class ChatWidget(PluginMainWidget):
     # Signal to update the Ollama host on the worker thread
     sig_update_host = Signal(str)
 
-    # Emitted when the user clicks "Insert into editor" on a code block.
+    # Emitted when the user clicks "Insert at cursor" on a code block.
     # Bubbles up from ChatDisplay so the plugin can handle insertion.
     sig_insert_code = Signal(str)
+    # Emitted when the user clicks "Replace selection" on a code block.
+    sig_replace_code = Signal(str)
 
     # Enable the built-in loading spinner in the corner toolbar
     ENABLE_SPINNER = True
@@ -183,6 +190,8 @@ class ChatWidget(PluginMainWidget):
         self._generating_session = None
         # Hidden per-turn state used when the model asks for runtime data.
         self._pending_turn = None
+        # Cached public runtime snapshot for toolbar status and exports.
+        self._runtime_context_snapshot = {}
 
     # --- PluginMainWidget interface ---
 
@@ -213,12 +222,22 @@ class ChatWidget(PluginMainWidget):
         self.context_label.setMinimumWidth(100)
         self.context_label.setToolTip("Current editor file and cursor position")
 
+        # Runtime label: shows the active kernel state without dumping
+        # console or variable content into the normal chat prompt path.
+        self.runtime_label = QLabel("Kernel: unavailable")
+        self.runtime_label.ID = "ai_chat_runtime_label"
+        self.runtime_label.setMinimumWidth(130)
+        self.runtime_label.setToolTip("Active IPython console runtime status")
+
         toolbar = self.get_main_toolbar()
         self.add_item_to_toolbar(
             self.model_combo, toolbar=toolbar, section="main",
         )
         self.add_item_to_toolbar(
             self.context_label, toolbar=toolbar, section="context",
+        )
+        self.add_item_to_toolbar(
+            self.runtime_label, toolbar=toolbar, section="runtime",
         )
         self.add_item_to_toolbar(
             self.status_label, toolbar=toolbar, section="status",
@@ -276,6 +295,27 @@ class ChatWidget(PluginMainWidget):
         splitter.setStretchFactor(0, 4)  # Tabs get ~80% of space
         splitter.setStretchFactor(1, 1)  # Input gets ~20% of space
 
+        # Quick actions for the highest-frequency debugging workflows.
+        # These are explicit runtime-aware entry points, not hidden prompt
+        # tricks, so users can steer the model toward live debugging tasks.
+        debug_layout = QHBoxLayout()
+        self.explain_error_btn = self._create_debug_button("explain_error")
+        self.fix_traceback_btn = self._create_debug_button("fix_traceback")
+        self.use_variables_btn = self._create_debug_button("use_variables")
+        self.use_console_btn = self._create_debug_button("use_console")
+        self.regenerate_btn = QPushButton("Regenerate")
+        self.regenerate_btn.setToolTip(
+            "Remove the last assistant answer on this tab and ask again"
+        )
+        for button in (
+                self.explain_error_btn,
+                self.fix_traceback_btn,
+                self.use_variables_btn,
+                self.use_console_btn,
+                self.regenerate_btn):
+            debug_layout.addWidget(button)
+        debug_layout.addStretch()
+
         # Button bar: [New] [Export] ----stretch---- [Stop] [Send]
         button_layout = QHBoxLayout()
         self.new_btn = QPushButton("New")
@@ -294,6 +334,7 @@ class ChatWidget(PluginMainWidget):
         # Assemble the content layout (splitter + buttons)
         content_layout = QVBoxLayout()
         content_layout.addWidget(splitter)
+        content_layout.addLayout(debug_layout)
         content_layout.addLayout(button_layout)
 
         self.setLayout(content_layout)
@@ -324,6 +365,19 @@ class ChatWidget(PluginMainWidget):
         self.stop_btn.clicked.connect(self._stop_generation)
         self.new_btn.clicked.connect(self._add_new_tab)
         self.export_btn.clicked.connect(self._export_chat)
+        self.explain_error_btn.clicked.connect(
+            lambda: self._send_debug_prompt("explain_error")
+        )
+        self.fix_traceback_btn.clicked.connect(
+            lambda: self._send_debug_prompt("fix_traceback")
+        )
+        self.use_variables_btn.clicked.connect(
+            lambda: self._send_debug_prompt("use_variables")
+        )
+        self.use_console_btn.clicked.connect(
+            lambda: self._send_debug_prompt("use_console")
+        )
+        self.regenerate_btn.clicked.connect(self._regenerate_last_turn)
         self.model_combo.currentIndexChanged.connect(
             self._on_model_changed
         )
@@ -339,6 +393,15 @@ class ChatWidget(PluginMainWidget):
         actions to update.
         """
         pass
+
+    def _create_debug_button(self, action):
+        """Create one small quick-action button for a debug workflow."""
+        label = DEBUG_ACTION_LABELS.get(action, action)
+        button = QPushButton(label)
+        button.setToolTip(
+            f"Send a runtime-aware chat request for: {label.lower()}"
+        )
+        return button
 
     # --- Tab management ---
 
@@ -361,9 +424,12 @@ class ChatWidget(PluginMainWidget):
         """Create a new chat session tab and switch to it."""
         session = ChatSession(parent=self._tab_widget)
 
-        # Connect the "Insert into editor" signal from this tab's display
+        # Connect code-apply signals from this tab's display
         session.display.sig_insert_code_requested.connect(
             self.sig_insert_code
+        )
+        session.display.sig_replace_code_requested.connect(
+            self.sig_replace_code
         )
 
         idx = self._tab_widget.addTab(session.display, session.title)
@@ -524,79 +590,18 @@ class ChatWidget(PluginMainWidget):
         The response will be routed back to this tab's display
         even if the user switches tabs mid-generation.
         """
-        if self._generating:
-            return
+        self._send_prompt_text(self.chat_input.peek_text())
 
-        session = self._active_session
-        if session is None:
-            return
-
-        text = self.chat_input.peek_text()
-        if not text:
-            return
-
-        if not self._current_model:
-            session.display.append_error(
-                "No model selected. Is Ollama running? "
-                "Try 'Refresh Models' from the options menu."
-            )
-            return
-
-        self.chat_input.clear_text()
-
-        # Add user message to the active tab's display and history
-        session.display.append_user_message(text)
-        session.messages.append({"role": "user", "content": text})
-
-        # Build system prompt with editor/project context
-        system_prompt = self.get_conf(
-            "chat_system_prompt",
-            default=(
-                "You are a helpful AI coding assistant working inside "
-                "the Spyder IDE. Be concise and provide code examples "
-                "when relevant."
-            ),
+    def _send_debug_prompt(self, action):
+        """Send a predefined runtime-aware debug prompt."""
+        user_text = self.chat_input.peek_text()
+        prompt = build_debug_prompt(
+            action,
+            user_text=user_text,
+            context_label=self.context_label.text(),
         )
-        system_prompt = (
-            f"{system_prompt}\n\n"
-            f"{build_runtime_bridge_instructions()}"
-        )
-
-        if self._context_provider:
-            full_context = self._context_provider()
-            context_block = build_system_context_block(
-                context=full_context.get("context", {}),
-                open_files=full_context.get("open_files"),
-                project=full_context.get("project"),
-                console=full_context.get("console"),
-            )
-            if context_block:
-                system_prompt = f"{system_prompt}\n\n{context_block}"
-
-        messages = (
-            [{"role": "system", "content": system_prompt}]
-            + session.messages
-        )
-
-        options = {
-            "temperature": _normalize_chat_temperature(
-                self.get_conf("chat_temperature", default=0.5)
-            ),
-            "num_predict": self.get_conf("max_tokens", default=1024),
-        }
-
-        # Lock this session as the generation target. Streaming tokens
-        # and the final response will be routed here regardless of
-        # which tab is visible.
-        self._generating_session = session
-        self._pending_turn = ChatTurnState(
-            session=session,
-            request_messages=list(messages),
-        )
-        session.display.start_assistant_message()
-        self._set_generating(True)
-
-        self.sig_send_chat.emit(self._current_model, messages, options)
+        logger.info("Dispatching debug quick action: %s", action)
+        self._send_prompt_text(prompt)
 
     def _stop_generation(self):
         """Abort the current LLM generation."""
@@ -635,23 +640,20 @@ class ChatWidget(PluginMainWidget):
         if not filepath:
             return
 
-        lines = [f"# AI Chat Export — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"]
-        lines.append(f"**Model:** {self._current_model}\n")
-
-        for msg in session.messages:
-            role = msg["role"].capitalize()
-            content = msg["content"]
-            if role == "User":
-                lines.append(f"## You\n\n{content}\n")
-            elif role == "Assistant":
-                lines.append(f"## AI\n\n{content}\n")
-
         try:
             with open(filepath, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines))
+                f.write(
+                    build_export_markdown(
+                        session.messages,
+                        model_name=self._current_model,
+                        context_label=self.context_label.text(),
+                        runtime_context=self._runtime_context_snapshot,
+                    )
+                )
             self.status_label.setText(
                 f"Exported to {os.path.basename(filepath)}"
             )
+            logger.info("Exported chat session to %s", filepath)
         except OSError as e:
             session.display.append_error(f"Export failed: {e}")
 
@@ -682,6 +684,20 @@ class ChatWidget(PluginMainWidget):
         """
         self.context_label.setText(context_str)
 
+    def update_runtime_context(self, runtime_context):
+        """Update the runtime toolbar label from a public runtime snapshot."""
+        self._runtime_context_snapshot = dict(runtime_context or {})
+        status = self._runtime_context_snapshot.get("status", "unavailable") or "unavailable"
+        detail = self._runtime_context_snapshot.get("status_detail", "")
+        label = f"Kernel: {status}"
+        if status == "errored":
+            label = "Kernel: error"
+        self.runtime_label.setText(label)
+        self.runtime_label.setToolTip(
+            self._build_runtime_tooltip(detail=detail)
+        )
+        logger.debug("Updated runtime toolbar status: %s", label)
+
     def update_ollama_host(self, host):
         """Update the chat worker host and refresh the model list."""
         self.status_label.setText("Connecting...")
@@ -698,8 +714,7 @@ class ChatWidget(PluginMainWidget):
         Args:
             prompt: The full prompt text to send.
         """
-        self.chat_input.setPlainText(prompt)
-        self._send_message()
+        self._send_prompt_text(prompt)
 
     # --- Internal helpers ---
 
@@ -734,6 +749,151 @@ class ChatWidget(PluginMainWidget):
                     self._tab_widget.setTabText(index, short)
                 break
 
+    def _send_prompt_text(self, text):
+        """Append one user prompt to the active session and dispatch it."""
+        if self._generating:
+            return False
+
+        session = self._active_session
+        if session is None:
+            return False
+
+        prompt_text = (text or "").strip()
+        if not prompt_text:
+            return False
+
+        if not self._current_model:
+            session.display.append_error(
+                "No model selected. Is Ollama running? "
+                "Try 'Refresh Models' from the options menu."
+            )
+            return False
+
+        self.chat_input.clear_text()
+        session.display.append_user_message(prompt_text)
+        session.messages.append({"role": "user", "content": prompt_text})
+        self._maybe_rename_tab(session)
+        return self._dispatch_messages(
+            session,
+            self._build_request_messages(session),
+        )
+
+    def _dispatch_messages(self, session, request_messages, tool_calls=0):
+        """Start one assistant turn for a session using prepared messages."""
+        if not self._current_model:
+            session.display.append_error(
+                "No model selected. Is Ollama running? "
+                "Try 'Refresh Models' from the options menu."
+            )
+            return False
+
+        self._generating_session = session
+        self._pending_turn = ChatTurnState(
+            session=session,
+            request_messages=list(request_messages),
+            tool_calls=tool_calls,
+        )
+        session.display.start_assistant_message()
+        self._set_generating(True)
+        self.sig_send_chat.emit(
+            self._current_model,
+            list(request_messages),
+            self._chat_options(),
+        )
+        return True
+
+    def _build_request_messages(self, session):
+        """Build the full request payload for the current chat session."""
+        return (
+            [{"role": "system", "content": self._build_system_prompt()}]
+            + session.messages
+        )
+
+    def _build_system_prompt(self):
+        """Build the system prompt plus the current editor/project context."""
+        system_prompt = self.get_conf(
+            "chat_system_prompt",
+            default=(
+                "You are a helpful AI coding assistant working inside "
+                "the Spyder IDE. Be concise and provide code examples "
+                "when relevant."
+            ),
+        )
+        system_prompt = (
+            f"{system_prompt}\n\n"
+            f"{build_runtime_bridge_instructions()}"
+        )
+
+        if self._context_provider:
+            full_context = self._context_provider()
+            context_block = build_system_context_block(
+                context=full_context.get("context", {}),
+                open_files=full_context.get("open_files"),
+                project=full_context.get("project"),
+                console=full_context.get("console"),
+            )
+            if context_block:
+                system_prompt = f"{system_prompt}\n\n{context_block}"
+
+        return system_prompt
+
+    def _chat_options(self):
+        """Return the current Ollama generation options for chat."""
+        return {
+            "temperature": _normalize_chat_temperature(
+                self.get_conf("chat_temperature", default=0.5)
+            ),
+            "num_predict": self.get_conf("max_tokens", default=1024),
+        }
+
+    def _regenerate_last_turn(self):
+        """Re-run the last user turn on the active session."""
+        if self._generating:
+            return
+
+        session = self._active_session
+        if session is None or not session.messages:
+            if session:
+                session.display.append_error("No conversation is available to regenerate.")
+            return
+
+        if session.messages and session.messages[-1].get("role") == "assistant":
+            session.messages.pop()
+
+        if not session.messages or session.messages[-1].get("role") != "user":
+            session.display.append_error(
+                "Regenerate needs a previous user message on this tab."
+            )
+            return
+
+        session.display.rebuild_from_messages(session.messages)
+        logger.info("Regenerating the last assistant answer for the active chat tab")
+        self._dispatch_messages(
+            session,
+            self._build_request_messages(session),
+        )
+
+    def _build_runtime_tooltip(self, detail=""):
+        """Build the runtime-status tooltip from the cached snapshot."""
+        runtime_context = self._runtime_context_snapshot or {}
+        lines = []
+        status = runtime_context.get("status", "unavailable")
+        lines.append(f"Status: {status}")
+        if detail:
+            lines.append(f"Detail: {detail}")
+        cwd = runtime_context.get("working_directory", "")
+        if cwd:
+            lines.append(f"CWD: {cwd}")
+        refreshed = runtime_context.get("last_refreshed_at", "")
+        if refreshed:
+            lines.append(f"Last refreshed: {refreshed}")
+        variables = runtime_context.get("variables") or []
+        if variables:
+            lines.append(f"Tracked variables: {len(variables)}")
+        if runtime_context.get("latest_error"):
+            lines.append("Latest error: available")
+        return "\n".join(lines)
+
     @staticmethod
     def _strip_thinking(text):
         """Remove <think>...</think> blocks from text.
@@ -758,6 +918,11 @@ class ChatWidget(PluginMainWidget):
         self.send_btn.setEnabled(not generating)
         self.stop_btn.setEnabled(generating)
         self.chat_input.setEnabled(not generating)
+        self.explain_error_btn.setEnabled(not generating)
+        self.fix_traceback_btn.setEnabled(not generating)
+        self.use_variables_btn.setEnabled(not generating)
+        self.use_console_btn.setEnabled(not generating)
+        self.regenerate_btn.setEnabled(not generating)
         if generating:
             self.start_spinner()
         else:
@@ -926,19 +1091,11 @@ class ChatWidget(PluginMainWidget):
                 "content": observation,
             },
         ])
-        session.display.start_assistant_message()
-        options = {
-            "temperature": _normalize_chat_temperature(
-                self.get_conf("chat_temperature", default=0.5)
-            ),
-            "num_predict": self.get_conf("max_tokens", default=1024),
-        }
-        self.sig_send_chat.emit(
-            self._current_model,
-            list(self._pending_turn.request_messages),
-            options,
+        return self._dispatch_messages(
+            session,
+            self._pending_turn.request_messages,
+            tool_calls=self._pending_turn.tool_calls,
         )
-        return True
 
     # --- Cleanup ---
 

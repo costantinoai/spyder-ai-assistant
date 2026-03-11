@@ -18,7 +18,7 @@ import logging
 import re
 from datetime import datetime
 
-from qtpy.QtCore import QObject
+from qtpy.QtCore import QObject, Signal
 
 from spyder.config.base import CHECK_ALL, EXCLUDED_NAMES
 
@@ -178,6 +178,11 @@ def build_runtime_context_blocks(runtime_context):
 class RuntimeContextService(QObject):
     """Cache live runtime snapshots for Spyder shellwidgets."""
 
+    # Emitted when the current shell's public runtime snapshot changes.
+    # Carries a copy of the public runtime context so UI layers can update
+    # status indicators without reaching into internal snapshot storage.
+    sig_current_context_changed = Signal(dict)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._ipython_console_plugin = None
@@ -244,6 +249,12 @@ class RuntimeContextService(QObject):
         self._current_shell_id = None
         self._tracked_shell_ids.clear()
         self._snapshots.clear()
+        self.sig_current_context_changed.emit(
+            make_empty_runtime_context(
+                status="unavailable",
+                detail="No active IPython console is available.",
+            )
+        )
 
     def cleanup(self):
         """Release all signal connections owned by this service."""
@@ -283,25 +294,7 @@ class RuntimeContextService(QObject):
         self._track_shellwidget(shellwidget)
         self._switch_current_shellwidget(shellwidget)
         self._refresh_console_snapshot(shellwidget, reason="context-request")
-
-        snapshot = self._snapshots.get(self._shell_id(shellwidget))
-        runtime_context = clone_runtime_context(snapshot)
-
-        if self._is_shell_busy(shellwidget):
-            runtime_context["status"] = "busy"
-            runtime_context["stale"] = True
-            runtime_context["status_detail"] = (
-                "Using the last cached runtime snapshot while the kernel is busy."
-            )
-        elif not getattr(shellwidget, "spyder_kernel_ready", False):
-            runtime_context["status"] = "starting"
-            runtime_context["status_detail"] = (
-                "The current kernel is not ready yet."
-            )
-        elif runtime_context["status"] != "errored":
-            runtime_context["status"] = "ready"
-
-        return runtime_context
+        return self._build_public_context(shellwidget)
 
     def execute_request(self, request):
         """Execute one read-only runtime inspection request."""
@@ -382,6 +375,7 @@ class RuntimeContextService(QObject):
         self._snapshots.pop(shell_id, None)
         if self._current_shell_id == shell_id:
             self._current_shell_id = None
+        self._emit_current_context_changed()
 
     def _on_shellwidget_changed(self, shellwidget):
         self._track_shellwidget(shellwidget)
@@ -394,6 +388,7 @@ class RuntimeContextService(QObject):
         snapshot["collection_error"] = "Shellwidget startup failed."
         snapshot["stale"] = True
         logger.warning("Runtime context shell errored: %s", snapshot["shell_id"])
+        self._emit_current_context_changed(shellwidget)
 
     def _on_prompt_ready(self):
         shellwidget = self.sender()
@@ -425,6 +420,7 @@ class RuntimeContextService(QObject):
             snapshot["shell_id"],
             len(snapshot["variables"]),
         )
+        self._emit_current_context_changed(shellwidget)
 
     # --- Shell tracking -----------------------------------------------------
 
@@ -459,6 +455,7 @@ class RuntimeContextService(QObject):
     def _switch_current_shellwidget(self, shellwidget):
         if shellwidget is None:
             self._current_shell_id = None
+            self._emit_current_context_changed()
             return
 
         shell_id = self._shell_id(shellwidget)
@@ -539,6 +536,7 @@ class RuntimeContextService(QObject):
             snapshot["shell_id"],
             reason,
         )
+        self._emit_current_context_changed(shellwidget)
 
     # --- Internal helpers ---------------------------------------------------
 
@@ -560,6 +558,44 @@ class RuntimeContextService(QObject):
         else:
             snapshot["_shellwidget"] = shellwidget
         return snapshot
+
+    def _build_public_context(self, shellwidget):
+        """Return the normalized public runtime context for a shellwidget."""
+        if shellwidget is None:
+            return make_empty_runtime_context(
+                status="unavailable",
+                detail="No active IPython console is available.",
+            )
+
+        snapshot = self._snapshots.get(self._shell_id(shellwidget))
+        runtime_context = clone_runtime_context(snapshot)
+
+        if self._is_shell_busy(shellwidget):
+            runtime_context["status"] = "busy"
+            runtime_context["stale"] = True
+            runtime_context["status_detail"] = (
+                "Using the last cached runtime snapshot while the kernel is busy."
+            )
+        elif not getattr(shellwidget, "spyder_kernel_ready", False):
+            runtime_context["status"] = "starting"
+            runtime_context["status_detail"] = (
+                "The current kernel is not ready yet."
+            )
+        elif runtime_context["status"] != "errored":
+            runtime_context["status"] = "ready"
+
+        return runtime_context
+
+    def _emit_current_context_changed(self, shellwidget=None):
+        """Emit the current shell's public runtime context for UI consumers."""
+        current_shell = shellwidget
+        if current_shell is None and self._current_shell_id is not None:
+            snapshot = self._snapshots.get(self._current_shell_id)
+            current_shell = snapshot.get("_shellwidget") if snapshot else None
+
+        self.sig_current_context_changed.emit(
+            self._build_public_context(current_shell)
+        )
 
     def _safe_get_current_shellwidget(self):
         if self._ipython_console_plugin is None:
