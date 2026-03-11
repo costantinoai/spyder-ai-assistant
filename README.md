@@ -283,6 +283,15 @@ spyder
 
 Planned features and improvements, roughly in priority order.
 
+### Deep Terminal & Kernel Integration *(top priority)*
+
+- **Live kernel variable access** — The AI can inspect variables in the running Spyder/IPython kernel: types, shapes, values, dtypes. Ask "what's in `df`?" and get a real answer, not a guess.
+- **Runtime-aware suggestions** — Completions and chat responses informed by the actual state of the session: loaded modules, defined functions, DataFrame columns, tensor shapes, fitted model parameters.
+- **Error diagnosis from terminal output** — AI reads tracebacks and stderr from the IPython console and proactively suggests fixes, with one-click "apply fix" actions.
+- **Command execution** — Let the AI run commands in the IPython console on your behalf (with confirmation), e.g., "show me the first 5 rows of `df`" → executes `df.head()` and feeds the result back into the conversation.
+- **Variable explorer integration** — Bridge with Spyder's Variable Explorer so the AI knows what's in your workspace without you having to describe it.
+- **Session context in chat** — Automatically include recent console history, errors, and key variable summaries in the system prompt so the AI has full situational awareness.
+
 ### Multi-Provider Support
 
 - **OpenAI and Anthropic API integration** — Use GPT-4, Claude, or other cloud models alongside local Ollama models. Bring your own API key.
@@ -319,7 +328,6 @@ Planned features and improvements, roughly in priority order.
 ### Agent & Workflow Features
 
 - **Multi-step task execution** — Let the AI plan and execute multi-file changes autonomously (with approval gates), similar to agentic coding assistants.
-- **Terminal integration** — AI can read terminal output and suggest fixes for errors, failed tests, or build issues.
 - **Git-aware context** — Include recent diffs, commit messages, and branch context in the AI's awareness for more relevant suggestions.
 
 ---
