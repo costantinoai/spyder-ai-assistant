@@ -319,6 +319,16 @@ Planned features and improvements, roughly in priority order.
 - **Inline diff preview** — Show a side-by-side or inline diff before applying any AI-generated change to the editor.
 - **Undo integration** — Group all AI-applied changes into a single undo step so Ctrl+Z reverts the entire suggestion cleanly.
 
+### Comprehensive Settings Pane
+
+- **All settings in one place** — Every configurable aspect of the plugin exposed through Spyder's Preferences dialog, organized into clear sections.
+- **Completion tuning** — Context window size (prefix/suffix chars), debounce delay, max tokens, temperature, stop sequences, and whether to suppress Spyder's built-in LSP suggestion popup when AI completions are active.
+- **Chat tuning** — System prompt, action prompt templates ({filename}, {code} placeholders), context budget limits (max file chars, max open files, tree depth), and conversation history length.
+- **Ollama management** — Server URL, custom Ollama binary/data directory path, model pull progress, and connection health indicator.
+- **Provider settings** — API keys and endpoints for cloud providers (OpenAI, Anthropic) when multi-provider support lands.
+- **Keyboard shortcuts** — Configurable keybindings for manual completion trigger, accept/reject, and chat panel toggle.
+- **Defaults and reset** — One-click restore to defaults per section.
+
 ### UI & Experience
 
 - **Redesigned chat panel** — Modern, polished UI with better typography, avatars, and smoother streaming animations.

@@ -9,6 +9,33 @@ description = "AI chat and code completion plugin for Spyder IDE using local Oll
 readme = "README.md"
 license = {text = "CC-BY-NC-4.0"}
 requires-python = ">=3.11"
+authors = [
+    {name = "Andrea Ivan Costantino"},
+]
+keywords = [
+    "Spyder",
+    "Plugin",
+    "AI",
+    "Ollama",
+    "LLM",
+    "Code Completion",
+    "Chat",
+    "Copilot",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Intended Audience :: Science/Research",
+    "License :: Other/Proprietary License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Text Editors :: Integrated Development Environments (IDE)",
+]
 dependencies = [
     "spyder>=6.0.0",
     "ollama>=0.4.0",
@@ -18,7 +45,14 @@ dependencies = [
 dev = [
     "pytest",
     "pytest-qt",
+    "build",
+    "twine",
 ]
+
+[project.urls]
+Homepage = "https://github.com/andreaivancostantino/spyder-ai-chat"
+Repository = "https://github.com/andreaivancostantino/spyder-ai-chat"
+Issues = "https://github.com/andreaivancostantino/spyder-ai-chat/issues"
 
 # Register the dockable chat panel plugin with Spyder.
 [project.entry-points."spyder.plugins"]
