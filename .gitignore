@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Env
+.env
+.venv/
+
+# Working files (never commit)
+tasks/scratchpad.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Private working files
+CLAUDE.md
+/tasks
+.claude/

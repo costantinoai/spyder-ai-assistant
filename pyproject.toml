@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spyder-ai-chat"
+version = "0.1.0"
+description = "AI chat and code completion plugin for Spyder IDE using local Ollama models"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+dependencies = [
+    "spyder>=6.0.0",
+    "ollama>=0.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-qt",
+]
+
+# Register the dockable chat panel plugin with Spyder.
+[project.entry-points."spyder.plugins"]
+ai_chat = "spyder_ai_chat.plugin:AIChatPlugin"
+
+# Register the AI completion provider with Spyder's completion system.
+# This is separate from the chat plugin — it handles inline code completions
+# via Ollama's FIM API and shows up in Completion and Linting preferences.
+[project.entry-points."spyder.completions"]
+ai_chat = "spyder_ai_chat.completion_provider:AIChatCompletionProvider"
+
+[tool.setuptools.packages.find]
+where = ["src"]
