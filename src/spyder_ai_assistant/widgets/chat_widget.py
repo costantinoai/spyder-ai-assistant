@@ -1033,14 +1033,36 @@ class ChatWidget(PluginMainWidget):
         self._current_model = payload.get("name", "")
         if payload:
             self.model_combo.setToolTip(self._format_model_tooltip(payload))
-            self.set_conf("chat_model", self._current_model)
-            self.set_conf("chat_provider_profile_id", self._current_provider_profile_id)
+            if self.get_conf("chat_model", default="") != self._current_model:
+                self.set_conf("chat_model", self._current_model)
+            if (
+                self.get_conf("chat_provider_profile_id", default="")
+                != self._current_provider_profile_id
+            ):
+                self.set_conf(
+                    "chat_provider_profile_id",
+                    self._current_provider_profile_id,
+                )
             preferred_kind = payload.get(
                 "provider_kind",
                 self.get_conf("chat_provider", default="ollama"),
             )
             if preferred_kind != self.get_conf("chat_provider", default="ollama"):
                 self.set_conf("chat_provider", preferred_kind)
+
+    def sync_model_selection_from_conf(self):
+        """Apply the configured provider/model preference without relisting."""
+        if self.model_combo.count() <= 0:
+            self.update_chat_provider_settings()
+            return False
+
+        self.model_combo.blockSignals(True)
+        try:
+            self._select_default_model("")
+        finally:
+            self.model_combo.blockSignals(False)
+        self._on_model_changed(self.model_combo.currentIndex())
+        return True
 
     def _on_prompt_preset_changed(self, index):
         """Persist the selected prompt preset on the active session."""
@@ -1071,12 +1093,24 @@ class ChatWidget(PluginMainWidget):
         """Return the normalized global chat defaults from preferences."""
         return {
             "temperature": normalize_chat_temperature(
-                self.get_conf("chat_temperature", default=0.5)
+                self._chat_temperature_conf_value()
             ),
             "num_predict": normalize_chat_max_tokens(
                 self.get_conf("max_tokens", default=1024)
             ),
         }
+
+    def _chat_temperature_conf_value(self):
+        """Return one safe config-backed chat temperature source value."""
+        try:
+            return self.get_conf("chat_temperature", default=5)
+        except (TypeError, ValueError) as error:
+            logger.warning(
+                "Invalid chat_temperature config value; resetting to 5 (0.5): %s",
+                error,
+            )
+            self.set_conf("chat_temperature", 5)
+            return 5
 
     def _chat_option_metadata(self, session=None):
         """Return resolved request options plus source metadata for one tab."""

@@ -250,9 +250,27 @@ class AIChatPlugin(SpyderDockablePlugin):
 
     def _refresh_chat_provider_settings(self):
         """Push provider settings to the widget and refresh model listing."""
-        self.get_widget().update_chat_provider_settings(
+        try:
+            widget = self.get_widget()
+        except Exception:
+            logger.debug(
+                "Skipping provider refresh because the chat widget is not ready yet"
+            )
+            return
+        widget.update_chat_provider_settings(
             self._build_chat_provider_settings()
         )
+
+    def _sync_chat_model_selection_from_conf(self):
+        """Apply configured provider/model preferences when the widget exists."""
+        try:
+            widget = self.get_widget()
+        except Exception:
+            logger.debug(
+                "Skipping model-selection sync because the chat widget is not ready yet"
+            )
+            return
+        widget.sync_model_selection_from_conf()
 
     def on_close(self, cancellable=True):
         """Called during Spyder shutdown.
@@ -933,13 +951,13 @@ class AIChatPlugin(SpyderDockablePlugin):
     def on_chat_provider_changed(self, value):
         """Refresh model selection after the default provider changes."""
         del value
-        self._refresh_chat_provider_settings()
+        self._sync_chat_model_selection_from_conf()
 
     @on_conf_change(option="chat_model")
     def on_chat_model_changed(self, value):
         """Refresh model selection after the default chat model changes."""
         del value
-        self._refresh_chat_provider_settings()
+        self._sync_chat_model_selection_from_conf()
 
     @on_plugin_teardown(plugin=Plugins.Preferences)
     def on_preferences_teardown(self):
