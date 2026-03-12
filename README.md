@@ -43,7 +43,7 @@ The plugin registers automatically. After restart:
 
 That's it. Everything runs locally and works offline.
 
-> **Optional:** to use a cloud or self-hosted chat endpoint, configure the base URL and API key under **Preferences > AI Chat**.
+> **Optional:** to use cloud or self-hosted chat endpoints, open **AI Chat > More > Provider Profiles...** and add one or more OpenAI-compatible profiles.
 
 ---
 
@@ -123,7 +123,14 @@ The **History** button lets you browse, reopen, duplicate, or delete saved sessi
 
 ### Multi-provider support
 
-By default, everything runs through Ollama. For chat, you can also configure an OpenAI-compatible endpoint (base URL + API key) in **Preferences > AI Chat**. The model selector groups entries by provider (`[Ollama]`, `[OpenAI-compatible]`). Inline completions stay Ollama-backed for low latency.
+By default, everything runs through Ollama. For chat, you can also manage multiple named OpenAI-compatible profiles from **AI Chat > More > Provider Profiles...**.
+
+- each profile has its own label, endpoint, API key, and enabled state
+- the shared model selector groups entries by provider/profile and keeps endpoint details in the tooltip
+- the status label reports provider issues without hiding working models
+- removing a stale profile falls back cleanly to another available model
+
+Inline completions stay Ollama-backed for low latency.
 
 ---
 
@@ -167,8 +174,10 @@ Running chat and completions simultaneously keeps both models in VRAM. A 7B chat
 
 All settings live in **Preferences**:
 
-- **Preferences > AI Chat** — chat provider, Ollama server URL, OpenAI-compatible base URL and API key, model names, temperature, max tokens, keyboard shortcuts, system prompt, and action prompt templates (with `{filename}` and `{code}` placeholders)
+- **Preferences > AI Chat** — default chat provider, Ollama server URL, model names, temperature, max tokens, keyboard shortcuts, system prompt, and action prompt templates (with `{filename}` and `{code}` placeholders)
 - **Preferences > Completion and linting > AI Chat** — completion toggle, model, temperature, max tokens, debounce delay
+
+OpenAI-compatible chat endpoints are managed directly from the chat pane through **More > Provider Profiles...**. Existing single-endpoint settings are imported automatically the first time you open that dialog.
 
 Per-tab chat modes and inference overrides are set directly in the chat pane and persist with the session.
 
@@ -176,7 +185,7 @@ Per-tab chat modes and inference overrides are set directly in the chat pane and
 
 ## Troubleshooting
 
-**"No models found" in the dropdown** — Run `curl http://localhost:11434/api/tags` to check Ollama, or pull a model with `ollama pull qwen2.5:7b`. For OpenAI-compatible endpoints, confirm the base URL responds on `/v1/models`.
+**"No models found" in the dropdown** — Run `curl http://localhost:11434/api/tags` to check Ollama, or pull a model with `ollama pull qwen2.5:7b`. For OpenAI-compatible profiles, open **More > Provider Profiles...** and confirm the endpoint responds on `/v1/models`.
 
 **Completions aren't appearing** — Enable them in Preferences > Completion and linting > AI Chat. The status bar should show `AI: model-name`. If it says `AI: offline`, Ollama isn't reachable.
 
@@ -195,7 +204,7 @@ Per-tab chat modes and inference overrides are set directly in the chat pane and
 Active development. Rough priority order:
 
 - **Session management** — search across sessions, pinning, labeling, bulk operations
-- **More providers** — named provider profiles, better diagnostics, adapters beyond OpenAI-compatible
+- **More providers** — adapters beyond OpenAI-compatible, profile import/export, provider health checks
 - **Smart setup** — one-click Ollama install, guided model downloads, hardware-aware recommendations
 - **Smarter completions** — scope-aware truncation, rename-aware suggestions, multi-site edits
 - **Polish the apply workflow further** — richer inline diff rendering, smarter multi-block edit handling

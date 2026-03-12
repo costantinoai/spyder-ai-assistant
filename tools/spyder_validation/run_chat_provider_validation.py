@@ -132,8 +132,12 @@ def run_validation(window):
             compatible_ready = wait_for(
                 lambda: any(
                     isinstance(widget.model_combo.itemData(index), dict)
-                    and widget.model_combo.itemData(index).get("provider_id")
-                    == "openai_compatible"
+                    and (
+                        widget.model_combo.itemData(index).get("provider_id")
+                        == "openai_compatible"
+                        or widget.model_combo.itemData(index).get("provider_kind")
+                        == "openai_compatible"
+                    )
                     for index in range(widget.model_combo.count())
                 ),
                 timeout_ms=20000,

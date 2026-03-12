@@ -49,6 +49,12 @@ from spyder_ai_assistant.utils.chat_persistence import (
     remove_chat_session_from_history,
 )
 from spyder_ai_assistant.utils.context import build_system_context_block
+from spyder_ai_assistant.utils.provider_profiles import (
+    PROVIDER_KIND_OPENAI_COMPATIBLE,
+    resolve_preferred_profile,
+    serialize_provider_profiles,
+    normalize_provider_profiles,
+)
 from spyder_ai_assistant.utils.prompt_library import (
     build_chat_prompt_preset_block,
     get_chat_prompt_preset,
@@ -69,6 +75,9 @@ from spyder_ai_assistant.utils.chat_workflows import (
 from spyder_ai_assistant.widgets.chat_input import ChatInput
 from spyder_ai_assistant.widgets.chat_settings_dialog import ChatSettingsDialog
 from spyder_ai_assistant.widgets.exchange_delete_dialog import ExchangeDeleteDialog
+from spyder_ai_assistant.widgets.provider_profiles_dialog import (
+    ProviderProfilesDialog,
+)
 from spyder_ai_assistant.widgets.session_history_dialog import SessionHistoryDialog
 from spyder_ai_assistant.widgets.chat_display import ChatDisplay
 
@@ -237,6 +246,10 @@ class ChatWidget(PluginMainWidget):
         # Currently selected provider-aware model entry from the combo box.
         self._current_provider = self.get_conf("chat_provider", default="ollama")
         self._current_provider_label = ""
+        self._current_provider_kind = self._current_provider
+        self._current_provider_profile_id = self.get_conf(
+            "chat_provider_profile_id", default=""
+        )
         self._current_model = ""
 
         # Callable that returns editor context dict (set by plugin).
@@ -266,6 +279,8 @@ class ChatWidget(PluginMainWidget):
         self._session_scope_provider = None
         # Cached saved-session history for the current project/global scope.
         self._history_sessions = []
+        # Latest provider diagnostics emitted by the worker after model refresh.
+        self._provider_diagnostics = []
 
     # --- PluginMainWidget interface ---
 
@@ -368,9 +383,15 @@ class ChatWidget(PluginMainWidget):
             text="Chat History...",
             triggered=self._open_history_browser,
         )
+        self._provider_profiles_action = self.create_action(
+            "ai_chat_provider_profiles",
+            text="Provider Profiles...",
+            triggered=self._open_provider_profiles_dialog,
+        )
         options_menu = self.get_options_menu()
         self.add_item_to_menu(refresh_action, menu=options_menu)
         self.add_item_to_menu(self._new_tab_action, menu=options_menu)
+        self.add_item_to_menu(self._provider_profiles_action, menu=options_menu)
         self.add_item_to_menu(self._chat_settings_action, menu=options_menu)
         self.add_item_to_menu(self._delete_exchange_action, menu=options_menu)
         self.add_item_to_menu(self._history_action, menu=options_menu)
@@ -463,6 +484,7 @@ class ChatWidget(PluginMainWidget):
         )
         more_menu = QMenu(self.more_btn)
         more_menu.addAction(self._new_tab_action)
+        more_menu.addAction(self._provider_profiles_action)
         more_menu.addAction(self._delete_exchange_action)
         more_menu.addAction(self._export_action)
         self.more_btn.setMenu(more_menu)
@@ -502,6 +524,9 @@ class ChatWidget(PluginMainWidget):
         self._worker.chunk_received.connect(self._on_chunk)
         self._worker.response_ready.connect(self._on_response)
         self._worker.models_listed.connect(self._on_models_listed)
+        self._worker.provider_diagnostics_ready.connect(
+            self._on_provider_diagnostics
+        )
         self._worker.error_occurred.connect(self._on_error)
         self._worker.status_changed.connect(self._on_status_changed)
 
@@ -611,16 +636,6 @@ class ChatWidget(PluginMainWidget):
         return {}
 
     @staticmethod
-    def _model_matches(payload, provider_id, model_name):
-        """Return True when one combo payload matches provider and model."""
-        if not isinstance(payload, dict):
-            return False
-        return (
-            payload.get("provider_id") == provider_id
-            and payload.get("name") == model_name
-        )
-
-    @staticmethod
     def _format_model_display(payload):
         """Return the provider-aware combo-box label for one model."""
         provider_label = payload.get("provider_label", "Provider")
@@ -640,22 +655,24 @@ class ChatWidget(PluginMainWidget):
     @staticmethod
     def _format_model_tooltip(payload):
         """Return the detailed tooltip for one provider-aware model entry."""
-        return "\n".join(
-            [
-                f"Provider: {payload.get('provider_label', 'unknown')}",
-                f"Model: {payload.get('name', '')}",
-                f"Family: {payload.get('family', 'unknown') or 'unknown'}",
-                (
-                    "Parameters: "
-                    f"{payload.get('parameter_size', 'unknown') or 'unknown'}"
-                ),
-                (
-                    "Quantization: "
-                    f"{payload.get('quantization', 'unknown') or 'unknown'}"
-                ),
-                f"Size: {payload.get('size_gb', 0) or 0} GB",
-            ]
-        )
+        lines = [
+            f"Provider: {payload.get('provider_label', 'unknown')}",
+            f"Kind: {payload.get('provider_kind', payload.get('provider_id', 'unknown'))}",
+            f"Model: {payload.get('name', '')}",
+            f"Family: {payload.get('family', 'unknown') or 'unknown'}",
+            (
+                "Parameters: "
+                f"{payload.get('parameter_size', 'unknown') or 'unknown'}"
+            ),
+            (
+                "Quantization: "
+                f"{payload.get('quantization', 'unknown') or 'unknown'}"
+            ),
+            f"Size: {payload.get('size_gb', 0) or 0} GB",
+        ]
+        if payload.get("endpoint"):
+            lines.append(f"Endpoint: {payload.get('endpoint', '')}")
+        return "\n".join(lines)
 
     def _current_model_export_name(self):
         """Return the provider-aware model label used in exports/logging."""
@@ -673,6 +690,58 @@ class ChatWidget(PluginMainWidget):
         if debug_action is None:
             raise KeyError(f"Unknown debug action: {action}")
         debug_action.trigger()
+
+    def _provider_profiles(self):
+        """Return normalized provider profiles from config."""
+        return normalize_provider_profiles(
+            self.get_conf("provider_profiles", default="[]"),
+            legacy_base_url=self.get_conf(
+                "openai_compatible_base_url",
+                default="",
+            ),
+            legacy_api_key=self.get_conf(
+                "openai_compatible_api_key",
+                default="",
+            ),
+        )
+
+    def _build_provider_diagnostics_tooltip(self):
+        """Render the latest provider diagnostics as a tooltip block."""
+        if not self._provider_diagnostics:
+            return "No provider diagnostics collected yet."
+
+        lines = []
+        for record in self._provider_diagnostics:
+            label = record.get("provider_label", record.get("provider_id", "Provider"))
+            status = record.get("status", "unknown")
+            message = record.get("message", "")
+            endpoint = record.get("endpoint", "")
+            segment = f"{label} [{status}]"
+            if endpoint:
+                segment += f" {endpoint}"
+            if message:
+                segment += f" — {message}"
+            lines.append(segment)
+        return "\n".join(lines)
+
+    def _sync_provider_status_label(self, models_available=None):
+        """Refresh the status-label summary from provider diagnostics."""
+        if models_available is None:
+            models_available = self.model_combo.count() > 0
+        diagnostics = list(self._provider_diagnostics)
+        error_count = sum(
+            1 for record in diagnostics if record.get("status") == "error"
+        )
+        if models_available:
+            if error_count:
+                self.status_label.setText(f"Ready ({error_count} provider issue)")
+            else:
+                self.status_label.setText("Ready")
+        elif error_count:
+            self.status_label.setText("Provider issue")
+        else:
+            self.status_label.setText("No models available")
+        self.status_label.setToolTip(self._build_provider_diagnostics_tooltip())
 
     # --- Tab management ---
 
@@ -820,11 +889,12 @@ class ChatWidget(PluginMainWidget):
         self.model_combo.blockSignals(False)
 
         self._on_model_changed(self.model_combo.currentIndex())
+        self._sync_provider_status_label(models_available=bool(models))
 
-        if models:
-            self.status_label.setText("Ready")
-        else:
-            self.status_label.setText("No models available")
+    def _on_provider_diagnostics(self, diagnostics):
+        """Store provider diagnostics emitted after a model refresh."""
+        self._provider_diagnostics = list(diagnostics or [])
+        self.status_label.setToolTip(self._build_provider_diagnostics_tooltip())
 
     def _on_error(self, message):
         """Handle an error from the worker.
@@ -838,6 +908,7 @@ class ChatWidget(PluginMainWidget):
         self._pending_turn = None
         self._set_generating(False)
         self.status_label.setText("Error")
+        self.status_label.setToolTip(self._build_provider_diagnostics_tooltip())
 
     def _on_status_changed(self, status):
         """Update the status label for active worker states."""
@@ -940,9 +1011,22 @@ class ChatWidget(PluginMainWidget):
             self.get_conf("chat_provider", default="ollama"),
         )
         self._current_provider_label = payload.get("provider_label", "")
+        self._current_provider_kind = payload.get(
+            "provider_kind",
+            self.get_conf("chat_provider", default="ollama"),
+        )
+        self._current_provider_profile_id = payload.get("profile_id", "")
         self._current_model = payload.get("name", "")
         if payload:
             self.model_combo.setToolTip(self._format_model_tooltip(payload))
+            self.set_conf("chat_model", self._current_model)
+            self.set_conf("chat_provider_profile_id", self._current_provider_profile_id)
+            preferred_kind = payload.get(
+                "provider_kind",
+                self.get_conf("chat_provider", default="ollama"),
+            )
+            if preferred_kind != self.get_conf("chat_provider", default="ollama"):
+                self.set_conf("chat_provider", preferred_kind)
 
     def _on_prompt_preset_changed(self, index):
         """Persist the selected prompt preset on the active session."""
@@ -1153,6 +1237,7 @@ class ChatWidget(PluginMainWidget):
             "ollama_host": self.get_conf(
                 "ollama_host", default="http://localhost:11434"
             ),
+            "provider_profiles": self._provider_profiles(),
             "openai_compatible_base_url": self.get_conf(
                 "openai_compatible_base_url",
                 default="",
@@ -1171,10 +1256,50 @@ class ChatWidget(PluginMainWidget):
     def update_chat_provider_settings(self, settings=None):
         """Refresh the worker's provider settings and reload chat models."""
         self.status_label.setText("Connecting...")
+        self.status_label.setToolTip(self._build_provider_diagnostics_tooltip())
         self.sig_update_provider_settings.emit(
             dict(settings or self._chat_provider_settings())
         )
         self.sig_list_models.emit()
+
+    def _open_provider_profiles_dialog(self):
+        """Open the provider-profile manager and save any accepted changes."""
+        dialog = ProviderProfilesDialog(
+            profiles=self._provider_profiles(),
+            diagnostics=self._provider_diagnostics,
+            parent=self,
+        )
+        if dialog.exec_() != dialog.Accepted:
+            return False
+
+        profiles = dialog.selected_profiles()
+        previous_profile_id = self.get_conf(
+            "chat_provider_profile_id",
+            default="",
+        )
+        self.set_conf("provider_profiles", serialize_provider_profiles(profiles))
+        # Once the profile manager is used, migrate away from the legacy
+        # single-endpoint settings so deleted profiles do not reappear.
+        self.set_conf("openai_compatible_base_url", "")
+        self.set_conf("openai_compatible_api_key", "")
+        if self.get_conf("chat_provider", default="ollama") == PROVIDER_KIND_OPENAI_COMPATIBLE:
+            preferred = resolve_preferred_profile(
+                profiles,
+                previous_profile_id,
+            )
+            self.set_conf("chat_provider_profile_id", preferred.get("profile_id", ""))
+            if (
+                previous_profile_id
+                and preferred.get("profile_id", "") != previous_profile_id
+            ):
+                logger.info(
+                    "Provider profile selection fell back from %s to %s",
+                    previous_profile_id,
+                    preferred.get("profile_id", "<none>"),
+                )
+        logger.info("Saved %d provider profile(s)", len(profiles))
+        self.update_chat_provider_settings()
+        return True
 
     def send_with_prompt(self, prompt):
         """Inject a prompt into the input and send it immediately.
@@ -1763,14 +1888,40 @@ class ChatWidget(PluginMainWidget):
                     return
 
         default_provider = self.get_conf("chat_provider", default="ollama")
+        default_profile_id = self.get_conf(
+            "chat_provider_profile_id",
+            default="",
+        )
         default = self.get_conf(
             "chat_model", default="gpt-oss-20b-abliterated"
         )
         for i in range(self.model_combo.count()):
-            if self._model_matches(
-                    self.model_combo.itemData(i),
-                    default_provider,
-                    default):
+            payload = self.model_combo.itemData(i)
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("name") != default:
+                continue
+            provider_kind = payload.get("provider_kind", payload.get("provider_id", ""))
+            if provider_kind != default_provider:
+                continue
+            if (
+                provider_kind == PROVIDER_KIND_OPENAI_COMPATIBLE
+                and default_profile_id
+                and payload.get("profile_id") != default_profile_id
+            ):
+                continue
+            self.model_combo.setCurrentIndex(i)
+            return
+
+        if default_provider == PROVIDER_KIND_OPENAI_COMPATIBLE and default_profile_id:
+            for i in range(self.model_combo.count()):
+                payload = self.model_combo.itemData(i)
+                if not isinstance(payload, dict):
+                    continue
+                if payload.get("provider_kind") != PROVIDER_KIND_OPENAI_COMPATIBLE:
+                    continue
+                if payload.get("profile_id") != default_profile_id:
+                    continue
                 self.model_combo.setCurrentIndex(i)
                 return
 

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Phase 12: Provider ergonomics
+
+- replaced the single OpenAI-compatible endpoint flow with named compatible
+  provider profiles managed from the chat pane
+- added a profile manager dialog for create, duplicate, edit, enable/disable,
+  and delete actions without leaving the main chat workflow
+- expanded provider diagnostics so the status label and model tooltip report
+  per-profile readiness, endpoint identity, and failure details
+- preserved working providers when one profile fails, including clean fallback
+  when a selected profile is removed
+- migrated legacy single-endpoint settings into the profile store the first
+  time the new dialog is used
+- added tracked unit coverage and a live Spyder validation harness for
+  multi-profile selection, auth-header routing, diagnostics, and stale-profile
+  fallback behavior
+
 ### Phase 10: Deeper terminal and kernel integration
 
 - added explicit multi-console runtime targeting in the chat toolbar with

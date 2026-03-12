@@ -51,10 +51,12 @@ large row of equally prominent buttons.
 The model selector is provider-aware. The same dropdown can list:
 
 - local Ollama chat models
-- models discovered from one configured OpenAI-compatible endpoint
+- models discovered from multiple named OpenAI-compatible profiles
 
 Each entry keeps provider metadata in the tooltip so it is clear where the
-next request will go before you send it.
+next request will go before you send it. If one compatible profile fails,
+working profiles stay usable and the status label reports the issue count
+without collapsing the entire selector to an error state.
 
 ## Prompt presets
 
@@ -105,8 +107,12 @@ Chat transport is intentionally broader than the completion transport.
 Behavior:
 
 - chat can target Ollama or an OpenAI-compatible endpoint
+- multiple named OpenAI-compatible profiles can coexist
 - the provider switch happens in the same dock widget with no restart required
 - provider-specific connection failures identify the failing endpoint
+- provider profiles are managed from `More > Provider Profiles...`
+- saving the profile dialog migrates any legacy single-endpoint config into the
+  profile store so removed profiles stay removed
 - completions remain Ollama-backed in the current shipped design
 
 ## Session persistence and history
@@ -255,8 +261,10 @@ Useful log lines include:
 - `Chat prompt preset set to Debugging for session ...`
 - `Chat prompt preset set to Documentation for session ...`
 - `Updated chat settings for session ...: temperature=0.2 (tab override), max_tokens=128 (tab override)`
-- `Chat worker provider settings updated: ollama=..., openai_compatible=...`
+- `Chat worker provider settings updated: ollama=..., profile_count=...`
 - `Chat worker discovered 4 chat model(s)`
+- `Provider diagnostic: id=openai_compatible:alpha kind=openai_compatible label=Alpha Lab status=ready models=1 endpoint=http://... message=`
+- `Provider profile selection fell back from beta to alpha`
 - `Building chat system prompt with preset debugging for session ...`
 - `Built chat history browser with 2 saved session(s)`
 - `Built exchange delete browser with 3 exchange(s) for session ...`

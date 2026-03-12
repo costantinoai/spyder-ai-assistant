@@ -40,6 +40,7 @@ from spyder_ai_assistant.utils.code_apply import (
     APPLY_MODE_INSERT,
     APPLY_MODE_REPLACE,
 )
+from spyder_ai_assistant.utils.provider_profiles import normalize_provider_profiles
 from spyder_ai_assistant.utils.runtime_context import RuntimeContextService
 from spyder_ai_assistant.widgets.chat_widget import ChatWidget
 from spyder_ai_assistant.widgets.config_page import AIChatConfigPage
@@ -93,7 +94,9 @@ class AIChatPlugin(SpyderDockablePlugin):
         ("ai_chat", {
             "ollama_host": "http://localhost:11434",
             "chat_provider": "ollama",
+            "chat_provider_profile_id": "",
             "chat_model": "gpt-oss-20b-abliterated",
+            "provider_profiles": "[]",
             "openai_compatible_base_url": "",
             "openai_compatible_api_key": "",
             "completion_model":
@@ -220,6 +223,20 @@ class AIChatPlugin(SpyderDockablePlugin):
         return {
             "ollama_host": self.get_conf(
                 "ollama_host", default="http://localhost:11434"
+            ),
+            "provider_profiles": normalize_provider_profiles(
+                self.get_conf(
+                    "provider_profiles",
+                    default="[]",
+                ),
+                legacy_base_url=self.get_conf(
+                    "openai_compatible_base_url",
+                    default="",
+                ),
+                legacy_api_key=self.get_conf(
+                    "openai_compatible_api_key",
+                    default="",
+                ),
             ),
             "openai_compatible_base_url": self.get_conf(
                 "openai_compatible_base_url",
@@ -903,6 +920,12 @@ class AIChatPlugin(SpyderDockablePlugin):
     @on_conf_change(option="openai_compatible_api_key")
     def on_openai_compatible_api_key_changed(self, value):
         """Refresh chat providers after the compatible API key changes."""
+        del value
+        self._refresh_chat_provider_settings()
+
+    @on_conf_change(option="provider_profiles")
+    def on_provider_profiles_changed(self, value):
+        """Refresh chat providers after profile definitions change."""
         del value
         self._refresh_chat_provider_settings()
 

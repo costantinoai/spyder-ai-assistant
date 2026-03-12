@@ -25,6 +25,7 @@ class ChatWorker(QObject):
     chunk_received = Signal(str)
     response_ready = Signal(str, dict)
     models_listed = Signal(list)
+    provider_diagnostics_ready = Signal(list)
     error_occurred = Signal(str)
     status_changed = Signal(str)
 
@@ -40,9 +41,9 @@ class ChatWorker(QObject):
         self._settings = dict(settings or {})
         self._registry = ChatProviderRegistry(self._settings)
         logger.info(
-            "Chat worker provider settings updated: ollama=%s, openai_compatible=%s",
+            "Chat worker provider settings updated: ollama=%s, profile_count=%d",
             self._settings.get("ollama_host", ""),
-            self._settings.get("openai_compatible_base_url", ""),
+            len(self._settings.get("provider_profiles", []) or []),
         )
 
     def send_chat(self, provider_id, model, messages, options):
@@ -122,8 +123,20 @@ class ChatWorker(QObject):
         self.status_changed.emit("loading_models")
         try:
             self._ensure_registry()
-            models = self._registry.list_models()
+            models, diagnostics = self._registry.list_models_with_diagnostics()
             logger.info("Chat worker discovered %d chat model(s)", len(models))
+            for diagnostic in diagnostics:
+                logger.info(
+                    "Provider diagnostic: id=%s kind=%s label=%s status=%s models=%d endpoint=%s message=%s",
+                    diagnostic.get("provider_id", ""),
+                    diagnostic.get("provider_kind", ""),
+                    diagnostic.get("provider_label", ""),
+                    diagnostic.get("status", ""),
+                    diagnostic.get("model_count", 0),
+                    diagnostic.get("endpoint", ""),
+                    diagnostic.get("message", ""),
+                )
+            self.provider_diagnostics_ready.emit(diagnostics)
             self.models_listed.emit(models)
         except Exception as error:  # pragma: no cover - threaded guard
             logger.warning("Chat worker failed to list models: %s", error)
@@ -178,12 +191,20 @@ class ChatWorker(QObject):
 
     def _provider_label(self, provider_id):
         """Return one user-facing provider label for errors."""
+        self._ensure_registry()
+        record = self._registry.describe_provider(provider_id)
+        if record.get("provider_label"):
+            return record["provider_label"]
         if provider_id == "openai_compatible":
             return "OpenAI-compatible provider"
         return "Ollama"
 
     def _provider_endpoint(self, provider_id):
         """Return the configured endpoint for one provider."""
+        self._ensure_registry()
+        record = self._registry.describe_provider(provider_id)
+        if record.get("endpoint"):
+            return record["endpoint"]
         if provider_id == "openai_compatible":
             return self._settings.get("openai_compatible_base_url", "<unset>")
         return self._settings.get("ollama_host", "http://localhost:11434")

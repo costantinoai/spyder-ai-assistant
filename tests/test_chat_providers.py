@@ -167,15 +167,23 @@ def test_chat_provider_registry_aggregates_models_from_multiple_providers(monkey
         registry = ChatProviderRegistry(
             {
                 "ollama_host": "http://localhost:11434",
-                "openai_compatible_base_url": server.base_url,
-                "openai_compatible_api_key": "",
+                "provider_profiles": [
+                    {
+                        "profile_id": "research",
+                        "label": "Research API",
+                        "provider_kind": "openai_compatible",
+                        "base_url": server.base_url,
+                        "api_key": "",
+                        "enabled": True,
+                    }
+                ],
             }
         )
 
-        models = registry.list_models()
+        models, diagnostics = registry.list_models_with_diagnostics()
         openai_reply = list(
             registry.chat_stream(
-                "openai_compatible",
+                "openai_compatible:research",
                 "fake-chat-1",
                 [{"role": "user", "content": "Hi"}],
                 {},
@@ -192,8 +200,14 @@ def test_chat_provider_registry_aggregates_models_from_multiple_providers(monkey
 
     assert {(item["provider_id"], item["name"]) for item in models} == {
         ("ollama", "ollama-chat"),
-        ("openai_compatible", "fake-chat-1"),
-        ("openai_compatible", "fake-chat-2"),
+        ("openai_compatible:research", "fake-chat-1"),
+        ("openai_compatible:research", "fake-chat-2"),
     }
+    compatible_diag = next(
+        record for record in diagnostics
+        if record["provider_id"] == "openai_compatible:research"
+    )
+    assert compatible_diag["status"] == "ready"
+    assert compatible_diag["model_count"] == 2
     assert openai_reply[-1]["done"] is True
     assert ollama_reply[-1]["content"] == "ollama reply"

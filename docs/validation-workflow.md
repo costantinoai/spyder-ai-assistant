@@ -49,6 +49,7 @@ The main entry points are:
 - `python -m tools.spyder_validation.run_chat_use_console_smoke`
 - `python -m tools.spyder_validation.run_phase10_runtime_validation`
 - `python -m tools.spyder_validation.run_phase11_apply_preview_validation`
+- `python -m tools.spyder_validation.run_phase12_provider_profiles_validation`
 
 ## Typical full validation pass
 
@@ -71,6 +72,7 @@ DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_history_bro
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_use_console_smoke
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_phase10_runtime_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_phase11_apply_preview_validation
+DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_phase12_provider_profiles_validation
 ```
 
 `python -m tools.release.build_dist` is the preferred packaging check because
@@ -207,6 +209,16 @@ it clears stale local build artifacts before rebuilding the sdist and wheel.
 - confirm one undo restores the prior editor text after each apply
 - capture the preview diff text in the JSON artifact and terminal log
 
+### Phase 12 provider-profiles validation
+
+- open the real `Provider Profiles...` dialog from the chat pane
+- save multiple named compatible profiles through the dialog
+- verify diagnostics for ready and failing profiles in the live status tooltip
+- verify provider-specific API keys are sent to the matching endpoint
+- switch between multiple compatible profiles in the shared model selector
+- remove one compatible profile and confirm stale selection falls back cleanly
+- confirm a failing profile does not prevent working profiles from answering
+
 ## Artifact locations
 
 The harnesses write JSON results and log files under:
@@ -246,6 +258,9 @@ For example:
   the shell-target map and the final pinned-console chat answer
 - Phase 11 apply-preview validation should show insert/replace preview diffs and
   the undo checkpoints in both the JSON artifact and terminal log
+- Phase 12 provider-profile validation should show provider diagnostics, two
+  distinct compatible answers, profile-specific auth headers, and a clean stale
+  profile fallback in both the JSON artifact and terminal log
 - prompt-preset tests should show preset selection log lines and restored
   preset ids in the JSON artifact
 - inference-control tests should show per-tab resolved options, reset behavior,

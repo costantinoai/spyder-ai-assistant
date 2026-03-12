@@ -26,6 +26,9 @@ from spyder_ai_assistant.utils.prompt_library import (
 from spyder_ai_assistant.widgets.code_apply_dialog import CodeApplyDialog
 from spyder_ai_assistant.widgets.exchange_delete_dialog import ExchangeDeleteDialog
 from spyder_ai_assistant.widgets.chat_settings_dialog import ChatSettingsDialog
+from spyder_ai_assistant.widgets.provider_profiles_dialog import (
+    ProviderProfilesDialog,
+)
 
 
 ARTIFACT_ROOT = Path("/tmp/spyder-ai-assistant-validation")
@@ -251,7 +254,12 @@ def select_first_provider_model(widget, provider_id):
 
     for index in range(widget.model_combo.count()):
         payload = widget.model_combo.itemData(index)
-        if isinstance(payload, dict) and payload.get("provider_id") == provider_id:
+        if not isinstance(payload, dict):
+            continue
+        if (
+            payload.get("provider_id") == provider_id
+            or payload.get("provider_kind") == provider_id
+        ):
             widget.model_combo.setCurrentIndex(index)
             QApplication.instance().processEvents()
             return dict(payload)
@@ -444,6 +452,49 @@ def apply_chat_code_via_dialog(widget, code, mode, accept=True):
         raise RuntimeError(state["error"])
     if not closed:
         raise RuntimeError("Code apply dialog did not close")
+    QApplication.instance().processEvents()
+    return state
+
+
+def save_provider_profiles_via_dialog(widget, profiles):
+    """Open the real provider-profiles dialog and save one full profile set."""
+    state = {"error": None, "saved_profiles": []}
+
+    def _configure_dialog(attempt=0):
+        dialog = next(
+            (
+                top_level for top_level in QApplication.topLevelWidgets()
+                if isinstance(top_level, ProviderProfilesDialog)
+                and top_level.isVisible()
+            ),
+            None,
+        )
+        if dialog is None:
+            if attempt < 40:
+                QTimer.singleShot(50, lambda: _configure_dialog(attempt + 1))
+            else:
+                state["error"] = "Provider profiles dialog did not open"
+            return
+
+        dialog.replace_profiles(profiles)
+        state["saved_profiles"] = dialog.selected_profiles()
+        dialog.button_box.button(QDialogButtonBox.Save).click()
+
+    QTimer.singleShot(50, _configure_dialog)
+    widget._provider_profiles_action.trigger()
+    closed = wait_for(
+        lambda: not any(
+            isinstance(top_level, ProviderProfilesDialog)
+            and top_level.isVisible()
+            for top_level in QApplication.topLevelWidgets()
+        ),
+        timeout_ms=5000,
+        step_ms=50,
+    )
+    if state["error"] is not None:
+        raise RuntimeError(state["error"])
+    if not closed:
+        raise RuntimeError("Provider profiles dialog did not close")
     QApplication.instance().processEvents()
     return state
 

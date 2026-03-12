@@ -10,7 +10,7 @@ via the create_* widget factories from PluginConfigPage.
 """
 
 from qtpy.QtCore import Qt
-from qtpy.QtWidgets import QGroupBox, QVBoxLayout
+from qtpy.QtWidgets import QGroupBox, QLabel, QVBoxLayout
 
 from spyder.api.preferences import PluginConfigPage
 
@@ -53,29 +53,16 @@ class AIChatConfigPage(PluginConfigPage):
             tip="Base URL for the local Ollama server",
             alignment=Qt.Horizontal,
         )
-        compatible_base_url_edit = self.create_lineedit(
-            "OpenAI-compatible base URL:",
-            "openai_compatible_base_url",
-            default="",
-            tip=(
-                "Optional OpenAI-compatible chat endpoint, for example "
-                "http://localhost:8000 or https://your-host.example.com"
-            ),
-            alignment=Qt.Horizontal,
+        compatible_profiles_note = QLabel(
+            "OpenAI-compatible chat endpoints are managed from the AI Chat pane: "
+            "More > Provider Profiles.... Existing single-endpoint settings are "
+            "imported automatically the first time you open that dialog."
         )
-        compatible_api_key_edit = self.create_lineedit(
-            "OpenAI-compatible API key:",
-            "openai_compatible_api_key",
-            default="",
-            tip="Optional bearer token for the OpenAI-compatible endpoint.",
-            alignment=Qt.Horizontal,
-            password=True,
-        )
+        compatible_profiles_note.setWordWrap(True)
         connection_layout = QVBoxLayout()
         connection_layout.addWidget(chat_provider_combo)
         connection_layout.addWidget(host_edit)
-        connection_layout.addWidget(compatible_base_url_edit)
-        connection_layout.addWidget(compatible_api_key_edit)
+        connection_layout.addWidget(compatible_profiles_note)
         connection_group.setLayout(connection_layout)
 
         # --- Model settings ---
