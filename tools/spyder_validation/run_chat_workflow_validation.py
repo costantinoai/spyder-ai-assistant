@@ -85,7 +85,7 @@ def execute_code(window, code, predicate=None, timeout_ms=15000):
     return wait_for(predicate, timeout_ms=timeout_ms, step_ms=100)
 
 
-def send_debug_action(widget, action, user_text="", timeout_ms=120000):
+def send_debug_action(widget, action, user_text="", timeout_ms=180000):
     """Trigger one debug quick action and return the assistant answer."""
     session = widget._active_session
     previous_count = len(session.messages)

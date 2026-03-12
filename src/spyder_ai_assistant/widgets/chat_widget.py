@@ -1033,8 +1033,10 @@ class ChatWidget(PluginMainWidget):
         self._current_model = payload.get("name", "")
         if payload:
             self.model_combo.setToolTip(self._format_model_tooltip(payload))
-            if self.get_conf("chat_model", default="") != self._current_model:
-                self.set_conf("chat_model", self._current_model)
+            preferred_kind = payload.get(
+                "provider_kind",
+                self.get_conf("chat_provider", default="ollama"),
+            )
             if (
                 self.get_conf("chat_provider_profile_id", default="")
                 != self._current_provider_profile_id
@@ -1043,12 +1045,10 @@ class ChatWidget(PluginMainWidget):
                     "chat_provider_profile_id",
                     self._current_provider_profile_id,
                 )
-            preferred_kind = payload.get(
-                "provider_kind",
-                self.get_conf("chat_provider", default="ollama"),
-            )
             if preferred_kind != self.get_conf("chat_provider", default="ollama"):
                 self.set_conf("chat_provider", preferred_kind)
+            if self.get_conf("chat_model", default="") != self._current_model:
+                self.set_conf("chat_model", self._current_model)
 
     def sync_model_selection_from_conf(self):
         """Apply the configured provider/model preference without relisting."""

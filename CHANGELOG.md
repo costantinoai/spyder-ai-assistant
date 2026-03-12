@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.4.0 - 2026-03-12
+
+### Integration fixes
+
+- fixed Spyder startup against legacy `chat_temperature = 0.5` configs by
+  resetting invalid stored values to the current integer-backed preference
+  format automatically
+- guarded provider/model sync callbacks during early startup so config-change
+  notifications do not touch the dock widget before it exists
+
 ### Phase 13: UX polish and discovery
 
 - reduced chat-pane control clutter again by replacing separate `History` and
