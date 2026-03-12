@@ -55,7 +55,7 @@ class AIChatConfigPage(PluginConfigPage):
         )
         compatible_profiles_note = QLabel(
             "OpenAI-compatible chat endpoints are managed from the AI Chat pane: "
-            "More > Provider Profiles.... Existing single-endpoint settings are "
+            "Sessions > Provider Profiles.... Existing single-endpoint settings are "
             "imported automatically the first time you open that dialog."
         )
         compatible_profiles_note.setWordWrap(True)
