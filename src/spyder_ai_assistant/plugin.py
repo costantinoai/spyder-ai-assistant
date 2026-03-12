@@ -190,10 +190,15 @@ class AIChatPlugin(SpyderDockablePlugin):
         self._runtime_context = RuntimeContextService(self)
         self._completion_provider_instance = None
         widget.set_runtime_request_executor(self._runtime_context.execute_request)
+        widget.set_runtime_target_handler(self._runtime_context.set_target_shell_id)
         self._runtime_context.sig_current_context_changed.connect(
             widget.update_runtime_context
         )
+        self._runtime_context.sig_shell_targets_changed.connect(
+            widget.update_runtime_shell_targets
+        )
         widget.update_runtime_context(self._runtime_context.get_current_context())
+        widget.update_runtime_shell_targets([], "")
         widget.set_session_state_changed_callback(
             self._schedule_chat_session_save
         )
@@ -660,6 +665,11 @@ class AIChatPlugin(SpyderDockablePlugin):
 
         variable_explorer = self.get_plugin(Plugins.VariableExplorer, error=False)
         self._runtime_context.set_variable_explorer_plugin(variable_explorer)
+        shell_targets, selected_shell_id = self._runtime_context.get_shell_targets()
+        self.get_widget().update_runtime_shell_targets(
+            shell_targets,
+            selected_shell_id,
+        )
 
     @on_plugin_teardown(plugin=Plugins.IPythonConsole)
     def on_ipython_console_teardown(self):

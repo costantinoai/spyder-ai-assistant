@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Phase 10: Deeper terminal and kernel integration
+
+- added explicit multi-console runtime targeting in the chat toolbar with
+  `Follow Active Console` and pinned-shell inspection
+- added `runtime.list_shells` to the runtime bridge so chat can reason about
+  available consoles and their active/target/error state
+- expanded runtime inspection summaries for list-backed arrays, images,
+  pandas objects, and bounded nested containers
+- normalized traceback summaries for both file-backed Python frames and
+  IPython `Cell In[...]` frames
+- tightened runtime request metadata so results carry shell, active-shell, and
+  target-shell identity consistently
+- added a tracked live Spyder validation harness for multi-console runtime
+  targeting, richer variable inspection, and frame-aware traceback inspection
+
 ### Phase 7: Completion polish
 
 - added partial ghost acceptance for the next word-like segment and next line

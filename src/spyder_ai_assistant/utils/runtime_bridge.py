@@ -10,12 +10,16 @@ from __future__ import annotations
 import json
 import re
 
-from spyder_ai_assistant.utils.runtime_context import format_runtime_variable
+from spyder_ai_assistant.utils.runtime_context import (
+    format_runtime_shell,
+    format_runtime_variable,
+)
 
 RUNTIME_REQUEST_TAG = "spyder-runtime-request"
 MAX_RUNTIME_TOOL_CALLS_PER_TURN = 4
 RUNTIME_TOOL_NAMES = (
     "runtime.status",
+    "runtime.list_shells",
     "runtime.get_latest_error",
     "runtime.get_console_tail",
     "runtime.list_variables",
@@ -56,6 +60,7 @@ def build_runtime_bridge_instructions():
         "Tool selection guidance:\n"
         "- Use `runtime.inspect_variable` for a named variable.\n"
         "- Use `runtime.list_variables` when you need to discover what exists.\n"
+        "- Use `runtime.list_shells` when multiple Spyder consoles may matter.\n"
         "- Use `runtime.get_latest_error` for the current traceback/error.\n"
         "- Use `runtime.get_console_tail` for recent console output.\n"
         "- Use `runtime.status` when availability or freshness is the question.\n"
@@ -153,6 +158,22 @@ def format_runtime_observation(request, result):
     if shell_status:
         lines.append(f"shell status: {shell_status}")
 
+    shell_label = result.get("shell_label")
+    if shell_label:
+        lines.append(f"shell: {shell_label}")
+
+    shell_id = result.get("shell_id")
+    if shell_id:
+        lines.append(f"shell id: {shell_id}")
+
+    active_shell_label = result.get("active_shell_label")
+    if active_shell_label:
+        lines.append(f"active shell: {active_shell_label}")
+
+    target_shell_label = result.get("target_shell_label")
+    if target_shell_label:
+        lines.append(f"target shell: {target_shell_label}")
+
     shell_detail = result.get("shell_detail")
     if shell_detail:
         lines.append(f"shell detail: {shell_detail}")
@@ -191,11 +212,33 @@ def _format_payload(tool, payload):
     if tool == "runtime.status":
         return _format_simple_mapping(payload, ("stale",))
 
+    if tool == "runtime.list_shells":
+        return _format_shells_payload(payload)
+
     if tool == "runtime.get_latest_error":
         latest_error = payload.get("latest_error", "")
+        summary = payload.get("summary") or {}
+        lines = []
+        exception_type = summary.get("exception_type", "")
+        exception_message = summary.get("exception_message", "")
+        if exception_type:
+            if exception_message:
+                lines.append(f"exception: {exception_type}: {exception_message}")
+            else:
+                lines.append(f"exception: {exception_type}")
+        for frame in summary.get("frames", [])[:3]:
+            lines.append(
+                "frame: "
+                f"{frame.get('file', '?')}:{frame.get('line', '?')} "
+                f"in {frame.get('function', '?')}"
+            )
+            if frame.get("code"):
+                lines.append(f"code: {frame['code']}")
         if not latest_error:
-            return ["No latest error is available."]
-        return [latest_error]
+            lines.append("No latest error is available.")
+            return lines
+        lines.append(latest_error)
+        return lines
 
     if tool == "runtime.get_console_tail":
         console_output = payload.get("console_output", "")
@@ -218,6 +261,18 @@ def _format_variables_payload(payload):
         return ["No variables are currently available."]
 
     lines = [format_runtime_variable(variable) for variable in variables]
+    total_count = payload.get("count")
+    if total_count not in ("", None):
+        lines.insert(0, f"count: {total_count}")
+    return lines
+
+
+def _format_shells_payload(payload):
+    shells = payload.get("shells", [])
+    if not shells:
+        return ["No Spyder IPython consoles are currently tracked."]
+
+    lines = [format_runtime_shell(shell) for shell in shells]
     total_count = payload.get("count")
     if total_count not in ("", None):
         lines.insert(0, f"count: {total_count}")

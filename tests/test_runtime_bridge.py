@@ -15,6 +15,7 @@ def test_runtime_bridge_instructions_advertise_protocol_and_tools():
 
     assert "Live Spyder runtime access is available when needed." in instructions
     assert RUNTIME_REQUEST_TAG in instructions
+    assert "runtime.list_shells" in instructions
     assert "runtime.inspect_variable" in instructions
     assert "runtime.get_latest_error" in instructions
 
@@ -73,6 +74,10 @@ def test_format_runtime_observation_renders_payload_and_metadata():
         "tool": "runtime.inspect_variable",
         "source": "live",
         "shell_status": "ready",
+        "shell_label": "Console 2/A",
+        "shell_id": "0xabc",
+        "active_shell_label": "Console 1/A",
+        "target_shell_label": "Console 2/A",
         "shell_detail": "Kernel ready.",
         "working_directory": "/tmp/project",
         "last_refreshed_at": "2026-03-11T12:00:00",
@@ -94,8 +99,50 @@ def test_format_runtime_observation_renders_payload_and_metadata():
     assert "[Spyder Runtime Observation]" in observation
     assert "tool: runtime.inspect_variable" in observation
     assert "source: live" in observation
+    assert "shell: Console 2/A" in observation
+    assert "shell id: 0xabc" in observation
     assert "df [dataframe]; type=DataFrame; shape=(3, 2); columns=a, b" in observation
     assert observation.rstrip().endswith("Otherwise answer normally.")
+
+
+def test_format_runtime_observation_renders_shell_listing():
+    request = {"tool": "runtime.list_shells", "args": {}}
+    result = {
+        "ok": True,
+        "tool": "runtime.list_shells",
+        "payload": {
+            "count": 2,
+            "shells": [
+                {
+                    "shell_id": "0x1",
+                    "label": "Console 1/A",
+                    "status": "ready",
+                    "working_directory": "/tmp/a",
+                    "is_active": True,
+                    "is_target": False,
+                    "has_error": False,
+                },
+                {
+                    "shell_id": "0x2",
+                    "label": "Console 2/A",
+                    "status": "busy",
+                    "working_directory": "/tmp/b",
+                    "is_active": False,
+                    "is_target": True,
+                    "has_error": True,
+                },
+            ],
+        },
+    }
+
+    observation = format_runtime_observation(request, result)
+
+    assert "count: 2" in observation
+    assert "Console 1/A; id=0x1; status=ready; cwd=/tmp/a; flags=active" in observation
+    assert (
+        "Console 2/A; id=0x2; status=busy; cwd=/tmp/b; flags=target,error"
+        in observation
+    )
 
 
 def test_format_runtime_observation_renders_missing_error_data():

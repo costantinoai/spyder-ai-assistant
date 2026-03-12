@@ -34,14 +34,15 @@ def build_debug_prompt(action, user_text="", context_label=""):
     base_prompts = {
         "explain_error": (
             "Inspect the latest traceback or error from the active Spyder "
-            "IPython console, explain the root cause clearly, and point to "
-            "the most likely fix."
+            "IPython console, use the most relevant frame context, explain "
+            "the root cause clearly, and point to the most likely fix."
         ),
         "fix_traceback": (
             "Inspect the latest traceback or error from the active Spyder "
-            "IPython console, identify the root cause, and propose a concrete "
-            "code fix. If the traceback alone is not enough, inspect the most "
-            "relevant live variables before answering."
+            "IPython console, use the most relevant frame context, identify "
+            "the root cause, and propose a concrete code fix. If the traceback "
+            "alone is not enough, inspect the most relevant live variables "
+            "before answering."
         ),
         "use_variables": (
             "Inspect the current live variables in the active Spyder IPython "

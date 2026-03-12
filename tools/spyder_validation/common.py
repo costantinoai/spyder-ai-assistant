@@ -170,6 +170,57 @@ def get_current_shell(window):
     return shell
 
 
+def get_console_clients(window):
+    """Return the current IPython console client list."""
+    clients = list(get_ipython_plugin(window).get_clients() or [])
+    if not clients:
+        raise RuntimeError("No IPython console clients are available")
+    return clients
+
+
+def create_console_client(window, give_focus=False):
+    """Create one new IPython console client and wait for it to appear."""
+    ipython = get_ipython_plugin(window)
+    before = len(ipython.get_clients() or [])
+    ipython.create_new_client(give_focus=give_focus)
+    clients = wait_for(
+        lambda: ipython.get_clients()
+        if len(ipython.get_clients() or []) >= before + 1 else None,
+        timeout_ms=30000,
+        step_ms=100,
+    )
+    if not clients:
+        raise RuntimeError("Timed out waiting for a new IPython console client")
+    return list(clients)[-1]
+
+
+def set_current_shell(window, shellwidget):
+    """Switch the active IPython console shellwidget."""
+    ipython = get_ipython_plugin(window)
+    ipython.set_current_shellwidget(shellwidget)
+    QApplication.instance().processEvents()
+
+
+def wait_for_runtime_shell_targets(widget, expected_count, timeout_ms=15000):
+    """Wait until the runtime target combo lists the requested shell count."""
+    return wait_for(
+        lambda: len(widget._runtime_shells) >= expected_count,
+        timeout_ms=timeout_ms,
+        step_ms=100,
+    )
+
+
+def select_runtime_target(widget, shell_id):
+    """Select one explicit runtime shell target in the chat toolbar."""
+    normalized = str(shell_id or "").strip()
+    for index in range(widget.runtime_target_combo.count()):
+        if str(widget.runtime_target_combo.itemData(index) or "").strip() == normalized:
+            widget.runtime_target_combo.setCurrentIndex(index)
+            QApplication.instance().processEvents()
+            return True
+    raise RuntimeError(f"Runtime target shell not found: {normalized}")
+
+
 def select_model(widget, model_name, provider_id=None):
     """Select one chat model from the widget dropdown."""
     if not wait_for(lambda: widget.model_combo.count() > 0, timeout_ms=20000):

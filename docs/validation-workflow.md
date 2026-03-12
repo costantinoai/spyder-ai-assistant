@@ -47,6 +47,7 @@ The main entry points are:
 - `python -m tools.spyder_validation.run_chat_history_browser_validation`
 - `python -m tools.spyder_validation.run_chat_history_browser_restore_validation`
 - `python -m tools.spyder_validation.run_chat_use_console_smoke`
+- `python -m tools.spyder_validation.run_phase10_runtime_validation`
 
 ## Typical full validation pass
 
@@ -67,6 +68,7 @@ DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_exchange_de
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_history_browser_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_history_browser_restore_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_use_console_smoke
+DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_phase10_runtime_validation
 ```
 
 `python -m tools.release.build_dist` is the preferred packaging check because
@@ -182,6 +184,18 @@ it clears stale local build artifacts before rebuilding the sdist and wheel.
 - focused verification that the console quick action inspects the visible
   console tail and answers using the actual marker printed in the current run
 
+### Phase 10 runtime validation
+
+- create a second live IPython console in the same Spyder session
+- seed distinct runtime state into both consoles
+- pin the chat runtime selector to the non-active console
+- verify shell listing and target flags
+- verify DataFrame inspection
+- verify array shape, dtype, and numeric range
+- verify traceback summary with at least one parsed frame
+- send one real chat request against the pinned console and confirm the answer
+  uses that console's runtime data
+
 ## Artifact locations
 
 The harnesses write JSON results and log files under:
@@ -217,6 +231,8 @@ For example:
   the JSON artifact and terminal log
 - history-browser tests should show dialog creation plus reopen, duplicate,
   and delete log lines
+- Phase 10 runtime validation should show array and traceback summary lines plus
+  the shell-target map and the final pinned-console chat answer
 - prompt-preset tests should show preset selection log lines and restored
   preset ids in the JSON artifact
 - inference-control tests should show per-tab resolved options, reset behavior,

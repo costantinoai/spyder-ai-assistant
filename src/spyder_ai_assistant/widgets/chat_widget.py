@@ -247,6 +247,8 @@ class ChatWidget(PluginMainWidget):
         self._context_provider = None
         # Callable that executes one runtime inspection request.
         self._runtime_request_executor = None
+        # Callable that changes the explicit runtime target shell.
+        self._runtime_target_handler = None
 
         # The session that initiated the current generation.
         # Streaming tokens and the final response are routed here,
@@ -256,6 +258,8 @@ class ChatWidget(PluginMainWidget):
         self._pending_turn = None
         # Cached public runtime snapshot for toolbar status and exports.
         self._runtime_context_snapshot = {}
+        # Cached runtime shell-target records used by the toolbar selector.
+        self._runtime_shells = []
         # Optional callback invoked when chat-session state changes and
         # should be persisted by the plugin layer.
         self._session_state_changed_callback = None
@@ -307,6 +311,14 @@ class ChatWidget(PluginMainWidget):
         self.runtime_label.setMinimumWidth(130)
         self.runtime_label.setToolTip("Active IPython console runtime status")
 
+        self.runtime_target_combo = QComboBox(self)
+        self.runtime_target_combo.setMinimumWidth(190)
+        self.runtime_target_combo.setToolTip(
+            "Choose which Spyder IPython console the runtime bridge should inspect"
+        )
+        self.runtime_target_combo.ID = "ai_chat_runtime_target_selector"
+        self.runtime_target_combo.addItem("Follow Active Console", "")
+
         toolbar = self.get_main_toolbar()
         self.add_item_to_toolbar(
             self.model_combo, toolbar=toolbar, section="main",
@@ -319,6 +331,9 @@ class ChatWidget(PluginMainWidget):
         )
         self.add_item_to_toolbar(
             self.runtime_label, toolbar=toolbar, section="runtime",
+        )
+        self.add_item_to_toolbar(
+            self.runtime_target_combo, toolbar=toolbar, section="runtime_target",
         )
         self.add_item_to_toolbar(
             self.status_label, toolbar=toolbar, section="status",
@@ -497,6 +512,9 @@ class ChatWidget(PluginMainWidget):
         self.delete_turn_btn.clicked.connect(self._open_exchange_delete_dialog)
         self.model_combo.currentIndexChanged.connect(
             self._on_model_changed
+        )
+        self.runtime_target_combo.currentIndexChanged.connect(
+            self._on_runtime_target_changed
         )
         self.prompt_preset_combo.currentIndexChanged.connect(
             self._on_prompt_preset_changed
@@ -1064,6 +1082,10 @@ class ChatWidget(PluginMainWidget):
         """Set the callable that executes one runtime inspection request."""
         self._runtime_request_executor = executor
 
+    def set_runtime_target_handler(self, handler):
+        """Set the callable that changes the explicit runtime target shell."""
+        self._runtime_target_handler = handler
+
     def set_session_state_changed_callback(self, callback):
         """Set the callback invoked when chat session state changes."""
         self._session_state_changed_callback = callback
@@ -1093,6 +1115,37 @@ class ChatWidget(PluginMainWidget):
             self._build_runtime_tooltip(detail=detail)
         )
         logger.debug("Updated runtime toolbar status: %s", label)
+
+    def update_runtime_shell_targets(self, shell_records, selected_shell_id=""):
+        """Refresh the runtime-target combo from the runtime service."""
+        self._runtime_shells = list(shell_records or [])
+        selected_shell_id = str(selected_shell_id or "").strip()
+
+        self.runtime_target_combo.blockSignals(True)
+        self.runtime_target_combo.clear()
+        self.runtime_target_combo.addItem("Follow Active Console", "")
+        for record in self._runtime_shells:
+            label = record.get("label", "Console")
+            suffix = []
+            if record.get("is_active"):
+                suffix.append("active")
+            if record.get("has_error"):
+                suffix.append("error")
+            if suffix:
+                label = f"{label} ({', '.join(suffix)})"
+            self.runtime_target_combo.addItem(label, record.get("shell_id", ""))
+        target_index = 0
+        for index in range(self.runtime_target_combo.count()):
+            if self.runtime_target_combo.itemData(index) == selected_shell_id:
+                target_index = index
+                break
+        self.runtime_target_combo.setCurrentIndex(target_index)
+        self.runtime_target_combo.blockSignals(False)
+        logger.debug(
+            "Updated runtime shell targets with %d option(s); selected=%s",
+            len(self._runtime_shells),
+            selected_shell_id or "<follow-active>",
+        )
 
     def _chat_provider_settings(self):
         """Return one snapshot of provider settings for the worker."""
@@ -1629,6 +1682,15 @@ class ChatWidget(PluginMainWidget):
         lines = []
         status = runtime_context.get("status", "unavailable")
         lines.append(f"Status: {status}")
+        shell_label = runtime_context.get("shell_label", "")
+        if shell_label:
+            lines.append(f"Inspecting: {shell_label}")
+        target_label = runtime_context.get("target_shell_label", "")
+        active_label = runtime_context.get("active_shell_label", "")
+        if target_label and target_label != active_label:
+            lines.append(f"Target: {target_label}")
+        if active_label:
+            lines.append(f"Active console: {active_label}")
         if detail:
             lines.append(f"Detail: {detail}")
         cwd = runtime_context.get("working_directory", "")
@@ -1643,6 +1705,18 @@ class ChatWidget(PluginMainWidget):
         if runtime_context.get("latest_error"):
             lines.append("Latest error: available")
         return "\n".join(lines)
+
+    def _on_runtime_target_changed(self, index):
+        """Apply one explicit runtime target selection from the toolbar."""
+        del index
+        if self._runtime_target_handler is None:
+            return
+        shell_id = str(self.runtime_target_combo.currentData() or "").strip()
+        logger.info(
+            "Chat widget runtime target changed to %s",
+            shell_id or "<follow-active>",
+        )
+        self._runtime_target_handler(shell_id)
 
     @staticmethod
     def _strip_thinking(text):

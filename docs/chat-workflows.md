@@ -8,15 +8,22 @@ The chat toolbar exposes two lightweight context indicators:
 
 - the current editor context label (`filename.py:line`)
 - the current kernel label (`Kernel: unavailable`, `starting`, `busy`, `ready`, or `error`)
+- the current runtime target selector (`Follow Active Console` or one pinned console)
 
 The kernel label tooltip adds:
 
+- active console label
+- current inspection target label
 - cwd
 - last refresh time
 - tracked variable count
 - whether a latest error is available
 
 This keeps runtime visibility in the UI without attaching live state to every prompt.
+
+When multiple IPython consoles are open, the runtime selector lets the user pin
+debugging work to one console without changing the active editor or active
+console tab elsewhere in Spyder.
 
 The toolbar also exposes the per-tab chat mode selector. Each tab can choose
 its own working mode:
@@ -148,6 +155,9 @@ The first four actions reuse the runtime bridge described in [runtime-inspection
 
 If the input box already contains text, that text is folded into the quick action prompt instead of being discarded.
 
+These runtime-aware actions follow the pinned runtime target when one is
+selected. Otherwise they follow the active Spyder IPython console.
+
 ## Completion intelligence
 
 Inline completions remain separate from the chat worker, but the shipped
@@ -238,7 +248,7 @@ Useful log lines include:
 - `Deleted chat session from history: ...`
 - `Dispatching debug quick action: explain_error`
 - `Intercepted runtime request from model: runtime.get_latest_error`
-- `Runtime request runtime.get_latest_error completed (ok=True, source=snapshot)`
+- `Runtime request completed: tool=runtime.get_latest_error ok=True source=snapshot shell=... active=... target=... error=`
 - `Applied chat code at the current cursor position`
 - `Applied chat code by replacing the current editor selection`
 - `Regenerating the last assistant answer for the active chat tab`
@@ -258,6 +268,7 @@ Useful log lines include:
 9. Set one tab to `Debugging`, open a second tab, set it to `Documentation`, then switch between tabs and confirm the toolbar selector follows the active tab.
 10. Open `Settings` on one tab, set a low temperature and low max-token override, then confirm the button changes to `Settings*` and its tooltip shows the overridden values.
 11. Open `Settings` on another tab, set custom values, then click `Use Global Defaults` and confirm the button returns to `Settings`.
+12. Open a second console, pin the runtime target to it, and confirm `Explain Error` / `Use Variables` follow the pinned console rather than the active one.
 12. Click `History`, confirm the browser shows the current scope, reopen a saved session, duplicate another one, and delete a saved session.
 13. Open `Delete Turn`, remove one middle exchange from the active tab, and confirm the visible conversation rebuilds without that exchange.
 14. Click `Regenerate` after deleting a middle exchange and confirm the remaining last user turn still reruns correctly.

@@ -87,7 +87,9 @@ The chat panel has read-only access to your active Spyder IPython session. It ca
 - **Tracebacks and errors** — the latest exception from your kernel
 - **Console output** — recent visible output from your IPython session
 - **Live variables** — the current variable list and targeted inspection of specific variables by name
+- **Structured runtime values** — arrays, images, DataFrames, Series, and bounded nested-container previews
 - **Kernel state** — shown in the chat toolbar so you always know what's running
+- **Multiple consoles** — the toolbar can follow the active console or pin runtime inspection to a different open console
 
 This is **on-demand, not automatic** — ordinary questions stay file-focused and lean. The AI only pulls runtime state when the question actually depends on it, and it never executes code on your behalf.
 
@@ -100,6 +102,8 @@ This is **on-demand, not automatic** — ordinary questions stay file-focused an
 | **Use Variables** | Asks the model to inspect current variable state |
 | **Use Console** | Feeds recent console output into the conversation |
 | **Regenerate** | Reruns the last turn on the active tab |
+
+When more than one IPython console is open, the runtime target selector in the chat toolbar lets you choose **Follow Active Console** or pin the debugging context to a specific console. The runtime tooltip shows which console is currently active and which one is actually being inspected.
 
 ### Editor integration
 
@@ -193,7 +197,6 @@ Per-tab chat modes and inference overrides are set directly in the chat pane and
 
 Active development. Rough priority order:
 
-- **Deeper kernel integration** — richer variable renderers, traceback-specific workflows, optional approved kernel actions, tighter Variable Explorer integration
 - **Session management** — search across sessions, pinning, labeling, bulk operations
 - **More providers** — named provider profiles, better diagnostics, adapters beyond OpenAI-compatible
 - **Smart setup** — one-click Ollama install, guided model downloads, hardware-aware recommendations
