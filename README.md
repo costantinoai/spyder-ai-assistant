@@ -43,7 +43,7 @@ The plugin registers automatically. After restart:
 
 That's it. Everything runs locally and works offline.
 
-> **Optional:** to use cloud or self-hosted chat endpoints, open **AI Chat > More > Provider Profiles...** and add one or more OpenAI-compatible profiles.
+> **Optional:** to use cloud or self-hosted chat endpoints, open **AI Chat > Sessions > Provider Profiles...** and add one or more OpenAI-compatible profiles.
 
 ---
 
@@ -123,7 +123,7 @@ The **Sessions** button keeps session actions in one place. Its history browser 
 
 ### Multi-provider support
 
-By default, everything runs through Ollama. For chat, you can also manage multiple named OpenAI-compatible profiles from **AI Chat > More > Provider Profiles...**.
+By default, everything runs through Ollama. For chat, you can also manage multiple named OpenAI-compatible profiles from **AI Chat > Sessions > Provider Profiles...**.
 
 - each profile has its own label, endpoint, API key, and enabled state
 - the shared model selector groups entries by provider/profile and keeps endpoint details in the tooltip
@@ -177,7 +177,7 @@ All settings live in **Preferences**:
 - **Preferences > AI Chat** — default chat provider, Ollama server URL, model names, temperature, max tokens, keyboard shortcuts, system prompt, and action prompt templates (with `{filename}` and `{code}` placeholders)
 - **Preferences > Completion and linting > AI Chat** — completion toggle, model, temperature, max tokens, debounce delay
 
-OpenAI-compatible chat endpoints are managed directly from the chat pane through **More > Provider Profiles...**. Existing single-endpoint settings are imported automatically the first time you open that dialog.
+OpenAI-compatible chat endpoints are managed directly from the chat pane through **Sessions > Provider Profiles...**. Existing single-endpoint settings are imported automatically the first time you open that dialog.
 
 Per-tab chat modes and inference overrides are set directly in the chat pane and persist with the session.
 
@@ -185,7 +185,7 @@ Per-tab chat modes and inference overrides are set directly in the chat pane and
 
 ## Troubleshooting
 
-**"No models found" in the dropdown** — Run `curl http://localhost:11434/api/tags` to check Ollama, or pull a model with `ollama pull qwen2.5:7b`. For OpenAI-compatible profiles, open **More > Provider Profiles...** and confirm the endpoint responds on `/v1/models`.
+**"No models found" in the dropdown** — Run `curl http://localhost:11434/api/tags` to check Ollama, or pull a model with `ollama pull qwen2.5:7b`. For OpenAI-compatible profiles, open **Sessions > Provider Profiles...** and confirm the endpoint responds on `/v1/models`.
 
 **Completions aren't appearing** — Enable them in Preferences > Completion and linting > AI Chat. The status bar should show `AI: model-name`. If it says `AI: offline`, Ollama isn't reachable.
 

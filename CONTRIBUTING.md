@@ -46,24 +46,29 @@ src/spyder_ai_assistant/
 │   ├── chat_providers.py     # Provider registry + OpenAI-compatible chat backend
 │   └── worker.py             # ChatWorker: QThread bridge for provider-aware chat
 ├── utils/
+│   ├── chat_exchanges.py     # Exchange browsing and deletion helpers
+│   ├── chat_inference.py     # Per-tab chat option normalization/resolution
+│   ├── chat_persistence.py   # Project/global chat session storage
+│   ├── chat_workflows.py     # Quick-action dispatch helpers (Debug menu)
+│   ├── code_apply.py         # Code apply diff/preview helpers
 │   ├── completion_context.py # Neighbor-file snippet selection + candidate scoring
 │   ├── context.py            # Editor/project context + prompt assembly
-│   ├── chat_inference.py     # Per-tab chat option normalization/resolution
-│   ├── chat_exchanges.py     # Exchange browsing and deletion helpers
-│   ├── chat_persistence.py   # Project/global chat session storage
 │   ├── prompt_library.py     # Built-in per-tab chat modes
+│   ├── provider_profiles.py  # Named provider profile storage
 │   ├── runtime_bridge.py     # Read-only runtime inspection protocol
 │   └── runtime_context.py    # Live shell snapshot service
 ├── widgets/
 │   ├── chat_widget.py        # Chat pane: tabs, toolbar, input
 │   ├── chat_display.py       # Message rendering: Markdown, highlighting
 │   ├── chat_input.py         # Auto-resizing input text area
-│   ├── chat_settings_dialog.py  # Per-tab chat settings UI
-│   ├── config_page.py        # Preferences page
+│   ├── chat_settings_dialog.py    # Per-tab chat settings UI
+│   ├── code_apply_dialog.py       # Code apply preview dialog (diff + accept/cancel)
+│   ├── config_page.py             # Preferences page
 │   ├── exchange_delete_dialog.py  # Per-session exchange deletion UI
-│   ├── ghost_text.py         # Ghost text overlay for completions
+│   ├── ghost_text.py              # Ghost text overlay for completions
+│   ├── provider_profiles_dialog.py # Provider profile manager dialog
 │   ├── session_history_dialog.py  # Saved-session browser UI
-│   └── status.py             # Status bar widget
+│   └── status.py                  # Status bar widget
 ```
 
 ## Validation workflow

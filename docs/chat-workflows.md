@@ -30,6 +30,8 @@ its own working mode:
 
 - `Coding`
 - `Debugging`
+- `Review`
+- `Data Analysis`
 - `Explanation`
 - `Documentation`
 
@@ -112,7 +114,7 @@ Behavior:
 - multiple named OpenAI-compatible profiles can coexist
 - the provider switch happens in the same dock widget with no restart required
 - provider-specific connection failures identify the failing endpoint
-- provider profiles are managed from `More > Provider Profiles...`
+- provider profiles are managed from `Sessions > Provider Profiles...`
 - saving the profile dialog migrates any legacy single-endpoint config into the
   profile store so removed profiles stay removed
 - completions remain Ollama-backed in the current shipped design
@@ -222,7 +224,7 @@ This is intentionally safer than mutating the editor immediately from the chat t
 
 The active chat tab exposes two entry points for exchange deletion:
 
-- `Delete Turn` button in the quick-action row
+- `Delete Exchange...` action in the `Sessions` menu
 - `Delete Exchange...` action in the pane options menu
 
 Behavior:
