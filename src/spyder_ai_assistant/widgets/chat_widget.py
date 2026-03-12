@@ -303,7 +303,7 @@ class ChatWidget(PluginMainWidget):
         self.model_combo.ID = "ai_chat_model_selector"
 
         self.prompt_preset_combo = QComboBox(self)
-        self.prompt_preset_combo.setMinimumWidth(150)
+        self.prompt_preset_combo.setMinimumWidth(170)
         self.prompt_preset_combo.setToolTip("Select the active chat mode for this tab")
         self.prompt_preset_combo.ID = "ai_chat_prompt_preset_selector"
         self._populate_prompt_preset_combo()
@@ -472,31 +472,29 @@ class ChatWidget(PluginMainWidget):
         self.chat_settings_btn.setToolTip(
             "Adjust inference settings for the active chat tab"
         )
-        self.history_btn = QToolButton(self)
-        self.history_btn.setText("History")
-        self.history_btn.setToolTip("Browse saved chat sessions for the current scope")
-
-        self.more_btn = QToolButton(self)
-        self.more_btn.setText("More")
-        self.more_btn.setPopupMode(QToolButton.InstantPopup)
-        self.more_btn.setToolTip(
-            "Additional chat actions for the active session"
+        self.session_btn = QToolButton(self)
+        self.session_btn.setText("Sessions")
+        self.session_btn.setPopupMode(QToolButton.MenuButtonPopup)
+        self.session_btn.setToolTip(
+            "Browse saved chats and open other session actions"
         )
-        more_menu = QMenu(self.more_btn)
-        more_menu.addAction(self._new_tab_action)
-        more_menu.addAction(self._provider_profiles_action)
-        more_menu.addAction(self._delete_exchange_action)
-        more_menu.addAction(self._export_action)
-        self.more_btn.setMenu(more_menu)
+        session_menu = QMenu(self.session_btn)
+        session_menu.addAction(self._history_action)
+        session_menu.addAction(self._new_tab_action)
+        session_menu.addAction(self._provider_profiles_action)
+        session_menu.addAction(self._delete_exchange_action)
+        session_menu.addAction(self._export_action)
+        self.session_btn.setMenu(session_menu)
+        # Backward-compatible alias used by older harnesses.
+        self.history_btn = self.session_btn
 
         self.stop_btn = QPushButton("Stop")
         self.send_btn = QPushButton("Send")
         self.stop_btn.setEnabled(False)
         controls_layout.addWidget(self.debug_menu_btn)
         controls_layout.addWidget(self.regenerate_btn)
-        controls_layout.addWidget(self.history_btn)
+        controls_layout.addWidget(self.session_btn)
         controls_layout.addWidget(self.chat_settings_btn)
-        controls_layout.addWidget(self.more_btn)
         controls_layout.addStretch()
         controls_layout.addWidget(self.stop_btn)
         controls_layout.addWidget(self.send_btn)
@@ -535,7 +533,7 @@ class ChatWidget(PluginMainWidget):
         self.send_btn.clicked.connect(self._send_message)
         self.stop_btn.clicked.connect(self._stop_generation)
         self.chat_settings_btn.clicked.connect(self._open_chat_settings_dialog)
-        self.history_btn.clicked.connect(self._open_history_browser)
+        self.session_btn.clicked.connect(self._open_history_browser)
         self.regenerate_btn.clicked.connect(self._regenerate_last_turn)
         self.model_combo.currentIndexChanged.connect(
             self._on_model_changed
@@ -618,10 +616,26 @@ class ChatWidget(PluginMainWidget):
             self._build_chat_settings_tooltip(metadata)
         )
 
+    def _sync_session_menu_button(self, session=None):
+        """Refresh the session-menu tooltip from the active session/scope."""
+        if session is None:
+            session = self._active_session
+
+        scope = self._session_scope_info()
+        scope_label = scope.get("scope_label", "Global")
+        active_title = session.title if session else "No active session"
+        self.session_btn.setToolTip(
+            "Open chat history and session actions.\n"
+            f"Scope: {scope_label}\n"
+            f"Active tab: {active_title}\n"
+            f"Saved sessions: {len(self._history_sessions or [])}"
+        )
+
     def _sync_session_controls(self, session=None):
         """Refresh the shared per-tab controls from the active session."""
         self._sync_prompt_preset_combo(session=session)
         self._sync_chat_settings_button(session=session)
+        self._sync_session_menu_button(session=session)
 
     def _on_current_tab_changed(self, index):
         """Update shared tab-scoped controls when the active tab changes."""
@@ -1864,10 +1878,9 @@ class ChatWidget(PluginMainWidget):
         self.send_btn.setEnabled(not generating)
         self.stop_btn.setEnabled(generating)
         self.chat_input.setEnabled(not generating)
-        self.history_btn.setEnabled(not generating)
+        self.session_btn.setEnabled(not generating)
         self.chat_settings_btn.setEnabled(not generating)
         self.debug_menu_btn.setEnabled(not generating)
-        self.more_btn.setEnabled(not generating)
         self.regenerate_btn.setEnabled(not generating)
         if generating:
             self.start_spinner()

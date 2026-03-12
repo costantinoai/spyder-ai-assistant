@@ -195,9 +195,8 @@ def run_runtime_debug_checks(window, results):
         "debug_controls": [
             widget.debug_menu_btn.text(),
             widget.regenerate_btn.text(),
-            widget.history_btn.text(),
+            widget.session_btn.text(),
             widget.chat_settings_btn.text(),
-            widget.more_btn.text(),
         ],
         "debug_actions": [
             widget._debug_actions["explain_error"].text(),

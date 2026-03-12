@@ -73,7 +73,7 @@ A dockable pane for talking to a model about your code. Open it from **View > Pa
 - **Streaming responses** — tokens arrive in real time
 - **Syntax-highlighted code blocks** — with copy, insert-at-cursor, and replace-selection actions
 - **Thinking/reasoning display** — models that emit `<think>` blocks (QwQ, DeepSeek-R1, etc.) show their reasoning in a dimmed section
-- **Per-tab chat modes** — switch between Coding, Debugging, Explanation, or Documentation presets
+- **Per-tab chat modes** — switch between Coding, Debugging, Review, Data Analysis, Explanation, or Documentation presets
 - **Per-tab inference settings** — override temperature and max tokens for individual tabs
 - **Mid-conversation model switching** — change models from the toolbar without losing context
 - **Stop and regenerate** — cancel a response mid-stream, or rerun the last turn
@@ -119,7 +119,7 @@ Code blocks in chat responses now expose **Copy** and **Apply...**. `Apply...` o
 
 Chat sessions save automatically. When a Spyder project is open, conversations persist in `.spyproject/ai-assistant/chat-sessions.json` and restore when the project reopens. Without a project, sessions fall back to a global store.
 
-The **History** button lets you browse, reopen, duplicate, or delete saved sessions. Per-tab chat modes and inference overrides persist with each session.
+The **Sessions** button keeps session actions in one place. Its history browser lets you search, filter, sort, reopen, duplicate, or delete saved sessions. Per-tab chat modes and inference overrides persist with each session.
 
 ### Multi-provider support
 
@@ -203,7 +203,7 @@ Per-tab chat modes and inference overrides are set directly in the chat pane and
 
 Active development. Rough priority order:
 
-- **Session management** — search across sessions, pinning, labeling, bulk operations
+- **Session management** — pinning, labeling, bulk operations
 - **More providers** — adapters beyond OpenAI-compatible, profile import/export, provider health checks
 - **Smart setup** — one-click Ollama install, guided model downloads, hardware-aware recommendations
 - **Smarter completions** — scope-aware truncation, rename-aware suggestions, multi-site edits

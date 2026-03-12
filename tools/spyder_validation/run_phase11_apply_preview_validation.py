@@ -70,9 +70,8 @@ def run_validation(window):
         results["controls"] = [
             widget.debug_menu_btn.text(),
             widget.regenerate_btn.text(),
-            widget.history_btn.text(),
+            widget.session_btn.text(),
             widget.chat_settings_btn.text(),
-            widget.more_btn.text(),
             widget.stop_btn.text(),
             widget.send_btn.text(),
         ]

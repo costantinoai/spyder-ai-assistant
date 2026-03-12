@@ -71,7 +71,8 @@ def _extract_browser_rows(dialog):
         rows.append({
             "title": dialog.table.item(row_index, 0).text(),
             "session_id": dialog.table.item(row_index, 0).data(0x0100),
-            "status": dialog.table.item(row_index, 3).text(),
+            "mode": dialog.table.item(row_index, 1).text(),
+            "status": dialog.table.item(row_index, 4).text(),
         })
     return rows
 
@@ -149,6 +150,7 @@ def run_validation(window):
         ensure_project_open(window)
         plugin = get_ai_plugin(window)
         widget = get_chat_widget(window)
+        print("[validation] history browser: resetting chat state", flush=True)
 
         widget._clear_all_tabs()
         widget._history_sessions = []
@@ -172,6 +174,7 @@ def run_validation(window):
         widget._close_tab(beta_index)
         plugin._flush_chat_session_state()
 
+        print("[validation] history browser: reopening closed session", flush=True)
         open_results = run_history_action(widget, beta.session_id, "open")
         state_after_open = widget.serialize_session_state()
 
@@ -179,6 +182,7 @@ def run_validation(window):
         if reopened is None or reopened.session_id != beta.session_id:
             raise RuntimeError("Reopened session did not become the active tab")
 
+        print("[validation] history browser: duplicating alpha session", flush=True)
         duplicate_results = run_history_action(
             widget,
             alpha.session_id,
@@ -200,6 +204,7 @@ def run_validation(window):
         if duplicate is None or duplicate.session_id == alpha.session_id:
             raise RuntimeError("Duplicated session did not get a fresh session id")
 
+        print("[validation] history browser: deleting reopened beta session", flush=True)
         delete_results = run_history_action(widget, beta.session_id, "delete")
         deleted = wait_for(
             lambda: (

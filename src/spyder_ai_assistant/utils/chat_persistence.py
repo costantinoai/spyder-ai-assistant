@@ -25,6 +25,7 @@ from spyder_ai_assistant.utils.chat_inference import (
     make_chat_inference_record,
 )
 from spyder_ai_assistant.utils.prompt_library import (
+    get_chat_prompt_preset,
     normalize_chat_prompt_preset,
 )
 
@@ -120,17 +121,75 @@ def build_chat_session_history_rows(history_sessions, open_session_ids=None):
             continue
 
         preview = _build_session_preview(session["messages"])
+        preset = get_chat_prompt_preset(session.get("prompt_preset_id"))
         rows.append({
             "session_id": session["session_id"],
             "title": session["title"] or preview or "Untitled chat",
             "preview": preview,
             "message_count": len(session["messages"]),
+            "prompt_preset_id": preset["id"],
+            "prompt_preset_label": preset["label"],
             "updated_at": session["updated_at"],
             "updated_label": _format_timestamp_label(session["updated_at"]),
             "is_open": session["session_id"] in open_ids,
         })
 
     return rows
+
+
+def filter_chat_session_history_rows(rows, search_text="", status_filter="all",
+                                     sort_key="updated_desc"):
+    """Filter and sort session-history rows for the browser UI."""
+    normalized_rows = [dict(row) for row in (rows or []) if isinstance(row, dict)]
+    normalized_search = str(search_text or "").strip().lower()
+    normalized_status = str(status_filter or "all").strip().lower()
+    normalized_sort = str(sort_key or "updated_desc").strip().lower()
+
+    filtered = []
+    for row in normalized_rows:
+        if normalized_status == "open" and not row.get("is_open"):
+            continue
+        if normalized_status == "saved" and row.get("is_open"):
+            continue
+
+        if normalized_search:
+            haystack = "\n".join(
+                [
+                    str(row.get("title", "")),
+                    str(row.get("preview", "")),
+                    str(row.get("prompt_preset_label", "")),
+                    "open" if row.get("is_open") else "saved",
+                ]
+            ).lower()
+            if normalized_search not in haystack:
+                continue
+
+        filtered.append(row)
+
+    if normalized_sort == "updated_asc":
+        return sorted(filtered, key=lambda row: row.get("updated_at", ""))
+    if normalized_sort == "title_asc":
+        return sorted(
+            filtered,
+            key=lambda row: (
+                str(row.get("title", "")).lower(),
+                str(row.get("updated_at", "")),
+            ),
+        )
+    if normalized_sort == "messages_desc":
+        return sorted(
+            filtered,
+            key=lambda row: (
+                int(row.get("message_count", 0) or 0),
+                str(row.get("updated_at", "")),
+            ),
+            reverse=True,
+        )
+    return sorted(
+        filtered,
+        key=lambda row: str(row.get("updated_at", "")),
+        reverse=True,
+    )
 
 
 def load_chat_session_state(storage_path):

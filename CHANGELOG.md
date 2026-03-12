@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Phase 13: UX polish and discovery
+
+- reduced chat-pane control clutter again by replacing separate `History` and
+  `More` buttons with one `Sessions` button that opens history on click and
+  exposes lower-frequency actions from its menu
+- expanded the built-in prompt-mode library with `Review` and `Data Analysis`
+  presets aimed at real code-review and scientific/debugging workflows
+- upgraded the history browser with prompt-mode metadata, free-text search,
+  open-vs-saved filtering, and multiple sort modes
+- added tracked unit coverage for prompt/library and history filtering plus a
+  live Spyder validation harness for searchable session discovery
+
 ### Phase 12: Provider ergonomics
 
 - replaced the single OpenAI-compatible endpoint flow with named compatible

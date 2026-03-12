@@ -62,6 +62,35 @@ _PROMPT_PRESETS = {
             "examples when helpful."
         ),
     },
+    "review": {
+        "id": "review",
+        "label": "Review",
+        "description": (
+            "Code-review help focused on risks, regressions, missing tests, "
+            "and maintainability issues."
+        ),
+        "instructions": (
+            "Active chat mode: Review.\n"
+            "Prioritize bugs, regressions, edge cases, missing validation, "
+            "and maintainability risks. Favor concrete findings and proposed "
+            "fixes over general praise."
+        ),
+    },
+    "analysis": {
+        "id": "analysis",
+        "label": "Data Analysis",
+        "description": (
+            "Scientific and data-oriented help for arrays, tables, plots, "
+            "and exploratory workflows."
+        ),
+        "instructions": (
+            "Active chat mode: Data Analysis.\n"
+            "Prioritize data shape, units, transformations, statistical "
+            "sanity checks, plotting clarity, and reproducible analysis steps. "
+            "When runtime state matters, inspect the smallest useful live "
+            "subset before answering."
+        ),
+    },
 }
 
 
@@ -70,6 +99,8 @@ def list_chat_prompt_presets():
     return [
         _PROMPT_PRESETS["coding"],
         _PROMPT_PRESETS["debugging"],
+        _PROMPT_PRESETS["review"],
+        _PROMPT_PRESETS["analysis"],
         _PROMPT_PRESETS["explanation"],
         _PROMPT_PRESETS["documentation"],
     ]

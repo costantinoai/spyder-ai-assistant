@@ -7,6 +7,7 @@ import json
 from spyder_ai_assistant.utils.chat_persistence import (
     CHAT_SESSION_STATE_VERSION,
     build_chat_session_history_rows,
+    filter_chat_session_history_rows,
     load_chat_session_state,
     merge_chat_session_history,
     remove_chat_session_from_history,
@@ -251,6 +252,7 @@ def test_build_chat_session_history_rows_marks_open_sessions():
     assert rows[0]["session_id"] == "open-session"
     assert rows[0]["is_open"] is True
     assert rows[0]["preview"] == "open preview"
+    assert rows[0]["prompt_preset_label"] == "Debugging"
 
 
 def test_build_chat_session_history_rows_sorts_newest_first():
@@ -279,6 +281,63 @@ def test_build_chat_session_history_rows_sorts_newest_first():
         "newer-session",
         "older-session",
     ]
+
+
+def test_filter_chat_session_history_rows_matches_search_and_status():
+    rows = filter_chat_session_history_rows(
+        [
+            {
+                "session_id": "alpha",
+                "title": "Debug alpha",
+                "preview": "Inspect array values",
+                "message_count": 3,
+                "prompt_preset_label": "Debugging",
+                "updated_at": "2026-03-11T12:10:00Z",
+                "is_open": True,
+            },
+            {
+                "session_id": "beta",
+                "title": "Docs beta",
+                "preview": "Write API docs",
+                "message_count": 2,
+                "prompt_preset_label": "Documentation",
+                "updated_at": "2026-03-10T12:10:00Z",
+                "is_open": False,
+            },
+        ],
+        search_text="array",
+        status_filter="open",
+    )
+
+    assert [row["session_id"] for row in rows] == ["alpha"]
+
+
+def test_filter_chat_session_history_rows_supports_message_sort():
+    rows = filter_chat_session_history_rows(
+        [
+            {
+                "session_id": "alpha",
+                "title": "Alpha",
+                "preview": "",
+                "message_count": 2,
+                "prompt_preset_label": "Coding",
+                "updated_at": "2026-03-11T12:10:00Z",
+                "is_open": False,
+            },
+            {
+                "session_id": "beta",
+                "title": "Beta",
+                "preview": "",
+                "message_count": 5,
+                "prompt_preset_label": "Review",
+                "updated_at": "2026-03-10T12:10:00Z",
+                "is_open": False,
+            },
+        ],
+        sort_key="messages_desc",
+    )
+
+    assert [row["session_id"] for row in rows] == ["beta", "alpha"]
 
 
 def test_load_chat_session_state_normalizes_invalid_prompt_preset(tmp_path):

@@ -63,21 +63,21 @@ def run_validation(window):
         widget._history_sessions = []
         first_session = widget._add_new_tab(notify=False)
 
-        print("[validation] selecting debugging preset on first tab", flush=True)
+        print("[validation] selecting review preset on first tab", flush=True)
         default_preset = widget._active_session.prompt_preset_id
-        debug_preset = select_prompt_preset(widget, "debugging")
-        debug_prompt = widget._build_system_prompt(widget._active_session)
+        review_preset = select_prompt_preset(widget, "review")
+        review_prompt = widget._build_system_prompt(widget._active_session)
         first_session = widget._active_session
 
-        print("[validation] opening second tab and selecting documentation preset", flush=True)
+        print("[validation] opening second tab and selecting data-analysis preset", flush=True)
         second_session = widget._add_new_tab()
-        docs_preset = select_prompt_preset(widget, "documentation")
-        docs_prompt = widget._build_system_prompt(second_session)
+        analysis_preset = select_prompt_preset(widget, "analysis")
+        analysis_prompt = widget._build_system_prompt(second_session)
 
         print("[validation] switching tabs to verify toolbar preset sync", flush=True)
         widget._tab_widget.setCurrentIndex(0)
         wait_for(
-            lambda: widget.prompt_preset_combo.currentData() == debug_preset,
+            lambda: widget.prompt_preset_combo.currentData() == review_preset,
             timeout_ms=2000,
             step_ms=50,
         )
@@ -85,7 +85,7 @@ def run_validation(window):
 
         widget._tab_widget.setCurrentIndex(1)
         wait_for(
-            lambda: widget.prompt_preset_combo.currentData() == docs_preset,
+            lambda: widget.prompt_preset_combo.currentData() == analysis_preset,
             timeout_ms=2000,
             step_ms=50,
         )
@@ -103,11 +103,11 @@ def run_validation(window):
         results["second_preset"] = second_session.prompt_preset_id
         results["first_combo_after_switch"] = first_combo_after_switch
         results["second_combo_after_switch"] = second_combo_after_switch
-        results["first_prompt_contains_debugging"] = (
-            "Active chat mode: Debugging." in debug_prompt
+        results["first_prompt_contains_review"] = (
+            "Active chat mode: Review." in review_prompt
         )
-        results["second_prompt_contains_documentation"] = (
-            "Active chat mode: Documentation." in docs_prompt
+        results["second_prompt_contains_analysis"] = (
+            "Active chat mode: Data Analysis." in analysis_prompt
         )
         results["serialized_state"] = serialized
         results["persisted_state"] = persisted

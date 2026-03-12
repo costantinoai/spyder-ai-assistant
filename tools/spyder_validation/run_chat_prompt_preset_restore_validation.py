@@ -58,7 +58,7 @@ def run_validation(window):
         print("[validation] switching to first restored tab", flush=True)
         widget._tab_widget.setCurrentIndex(0)
         wait_for(
-            lambda: widget.prompt_preset_combo.currentData() == "debugging",
+            lambda: widget.prompt_preset_combo.currentData() == "review",
             timeout_ms=2000,
             step_ms=50,
         )
@@ -67,7 +67,7 @@ def run_validation(window):
         print("[validation] switching to second restored tab", flush=True)
         widget._tab_widget.setCurrentIndex(1)
         wait_for(
-            lambda: widget.prompt_preset_combo.currentData() == "documentation",
+            lambda: widget.prompt_preset_combo.currentData() == "analysis",
             timeout_ms=2000,
             step_ms=50,
         )

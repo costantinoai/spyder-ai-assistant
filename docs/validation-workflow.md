@@ -50,6 +50,7 @@ The main entry points are:
 - `python -m tools.spyder_validation.run_phase10_runtime_validation`
 - `python -m tools.spyder_validation.run_phase11_apply_preview_validation`
 - `python -m tools.spyder_validation.run_phase12_provider_profiles_validation`
+- `python -m tools.spyder_validation.run_phase13_history_discovery_validation`
 
 ## Typical full validation pass
 
@@ -73,6 +74,7 @@ DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_use_console
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_phase10_runtime_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_phase11_apply_preview_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_phase12_provider_profiles_validation
+DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_phase13_history_discovery_validation
 ```
 
 `python -m tools.release.build_dist` is the preferred packaging check because
@@ -219,6 +221,16 @@ it clears stale local build artifacts before rebuilding the sdist and wheel.
 - remove one compatible profile and confirm stale selection falls back cleanly
 - confirm a failing profile does not prevent working profiles from answering
 
+### Phase 13 history-discovery validation
+
+- open the real `Sessions` button path from the chat pane
+- verify the compact session menu labels in the live toolbar
+- search the history browser by title and by prompt mode
+- filter rows to `Saved only`
+- sort saved rows alphabetically
+- reopen one saved session from a filtered view
+- confirm the active session switches to the reopened row
+
 ## Artifact locations
 
 The harnesses write JSON results and log files under:
@@ -261,6 +273,9 @@ For example:
 - Phase 12 provider-profile validation should show provider diagnostics, two
   distinct compatible answers, profile-specific auth headers, and a clean stale
   profile fallback in both the JSON artifact and terminal log
+- Phase 13 history-discovery validation should show the filtered row sets, sort
+  order, session-menu actions, and the final reopened session in both the JSON
+  artifact and terminal log
 - prompt-preset tests should show preset selection log lines and restored
   preset ids in the JSON artifact
 - inference-control tests should show per-tab resolved options, reset behavior,

@@ -15,6 +15,8 @@ def test_list_chat_prompt_presets_returns_expected_ids():
     assert [preset["id"] for preset in list_chat_prompt_presets()] == [
         "coding",
         "debugging",
+        "review",
+        "analysis",
         "explanation",
         "documentation",
     ]
@@ -37,3 +39,17 @@ def test_build_chat_prompt_preset_block_contains_mode_label():
     block = build_chat_prompt_preset_block("documentation")
 
     assert "Active chat mode: Documentation." in block
+
+
+def test_review_prompt_preset_mentions_findings():
+    preset = get_chat_prompt_preset("review")
+
+    assert preset["label"] == "Review"
+    assert "regressions" in preset["instructions"]
+
+
+def test_analysis_prompt_preset_mentions_runtime_subset():
+    preset = get_chat_prompt_preset("analysis")
+
+    assert preset["label"] == "Data Analysis"
+    assert "smallest useful live subset" in preset["instructions"]

@@ -40,13 +40,13 @@ Below the input, the visible controls are intentionally compact:
 
 - `Debug` menu for runtime-aware quick actions
 - `Regenerate`
-- `History`
+- `Sessions`
 - `Settings`
-- `More` for lower-frequency actions such as new tab, delete exchange, and export
 - `Stop` / `Send`
 
 This keeps the common actions one click away without filling the pane with a
-large row of equally prominent buttons.
+large row of equally prominent buttons. The `Sessions` button opens history on
+click and exposes lower-frequency session actions from its menu.
 
 The model selector is provider-aware. The same dropdown can list:
 
@@ -74,6 +74,8 @@ The shipped presets are:
 
 - `Coding` for implementation, refactoring, and code changes
 - `Debugging` for root-cause analysis and concrete fixes
+- `Review` for bugs, regressions, missing tests, and maintainability issues
+- `Data Analysis` for arrays, tables, plots, and scientific/debugging workflows
 - `Explanation` for teaching and understanding code
 - `Documentation` for docstrings, usage notes, and polished written guidance
 
@@ -138,7 +140,7 @@ Hidden runtime tool requests are not written into saved history.
 
 The chat pane also exposes a session history browser through:
 
-- the `History` button in the pane
+- the `Sessions` button in the pane
 - the `Chat History...` action in the pane options menu
 
 The history browser works within the current persistence scope:
@@ -149,9 +151,16 @@ The history browser works within the current persistence scope:
 Each saved row shows:
 
 - title
+- prompt mode
 - last updated timestamp
 - message count
 - whether the session is currently open in a tab
+
+The browser also supports:
+
+- free-text search across title, preview, and prompt mode
+- status filtering for `All sessions`, `Open tabs`, or `Saved only`
+- sorting by update time, title, or message count
 
 Available actions:
 
@@ -267,6 +276,7 @@ Useful log lines include:
 - `Provider profile selection fell back from beta to alpha`
 - `Building chat system prompt with preset debugging for session ...`
 - `Built chat history browser with 2 saved session(s)`
+- `Opened chat history browser for Project scope`
 - `Built exchange delete browser with 3 exchange(s) for session ...`
 - `Opened chat code apply preview for ...`
 - `Accepted chat code apply preview in insert mode`
