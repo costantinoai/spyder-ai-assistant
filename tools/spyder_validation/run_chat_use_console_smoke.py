@@ -48,7 +48,7 @@ def run_validation(window):
         session = widget._active_session
         previous_count = len(session.messages)
         set_input_text(widget, "What marker was just printed?")
-        widget.use_console_btn.click()
+        widget.trigger_debug_action("use_console")
         completed = wait_for_assistant_turn(
             widget,
             session,

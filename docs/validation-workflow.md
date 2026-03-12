@@ -48,6 +48,7 @@ The main entry points are:
 - `python -m tools.spyder_validation.run_chat_history_browser_restore_validation`
 - `python -m tools.spyder_validation.run_chat_use_console_smoke`
 - `python -m tools.spyder_validation.run_phase10_runtime_validation`
+- `python -m tools.spyder_validation.run_phase11_apply_preview_validation`
 
 ## Typical full validation pass
 
@@ -69,6 +70,7 @@ DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_history_bro
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_history_browser_restore_validation
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_use_console_smoke
 DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_phase10_runtime_validation
+DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_phase11_apply_preview_validation
 ```
 
 `python -m tools.release.build_dist` is the preferred packaging check because
@@ -196,6 +198,15 @@ it clears stale local build artifacts before rebuilding the sdist and wheel.
 - send one real chat request against the pinned console and confirm the answer
   uses that console's runtime data
 
+### Phase 11 apply-preview validation
+
+- validate the compact control row in the live chat pane
+- open the real apply-preview dialog from a code block signal path
+- confirm cancel leaves the editor unchanged for insert and replace flows
+- confirm apply mutates the editor correctly for insert and replace flows
+- confirm one undo restores the prior editor text after each apply
+- capture the preview diff text in the JSON artifact and terminal log
+
 ## Artifact locations
 
 The harnesses write JSON results and log files under:
@@ -233,6 +244,8 @@ For example:
   and delete log lines
 - Phase 10 runtime validation should show array and traceback summary lines plus
   the shell-target map and the final pinned-console chat answer
+- Phase 11 apply-preview validation should show insert/replace preview diffs and
+  the undo checkpoints in both the JSON artifact and terminal log
 - prompt-preset tests should show preset selection log lines and restored
   preset ids in the JSON artifact
 - inference-control tests should show per-tab resolved options, reset behavior,

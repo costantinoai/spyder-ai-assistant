@@ -24,7 +24,7 @@ from datetime import datetime
 from qtpy.QtCore import Qt, Signal, QThread
 from qtpy.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QSplitter, QPushButton, QComboBox, QLabel,
-    QFileDialog, QTabWidget, QToolButton,
+    QFileDialog, QMenu, QTabWidget, QToolButton,
 )
 
 from spyder.api.widgets.main_widget import PluginMainWidget
@@ -205,7 +205,7 @@ class ChatWidget(PluginMainWidget):
     - Multiple chat sessions (tabs) with independent conversation histories
     - Model selection dropdown in the toolbar
     - Shared text input with Enter-to-send behavior
-    - Stop/New/Export/Send controls
+    - Compact runtime/session controls plus Stop/Send
     - Status indicator showing generation state and speed
 
     All chat-provider communication happens on a background QThread to keep
@@ -221,11 +221,9 @@ class ChatWidget(PluginMainWidget):
     # Signal to update chat-provider settings on the worker thread
     sig_update_provider_settings = Signal(dict)
 
-    # Emitted when the user clicks "Insert at cursor" on a code block.
-    # Bubbles up from ChatDisplay so the plugin can handle insertion.
-    sig_insert_code = Signal(str)
-    # Emitted when the user clicks "Replace selection" on a code block.
-    sig_replace_code = Signal(str)
+    # Emitted when the user clicks "Apply..." on a code block.
+    # Bubbles up from ChatDisplay so the plugin can open the apply preview.
+    sig_apply_code = Signal(str)
 
     # Enable the built-in loading spinner in the corner toolbar
     ENABLE_SPINNER = True
@@ -345,38 +343,38 @@ class ChatWidget(PluginMainWidget):
             text="Refresh Models",
             triggered=self._refresh_models,
         )
-        new_tab_action = self.create_action(
+        self._new_tab_action = self.create_action(
             "ai_chat_new_tab",
             text="New Chat Tab",
             triggered=self._add_new_tab,
         )
-        export_action = self.create_action(
+        self._export_action = self.create_action(
             "ai_chat_export",
             text="Export Chat...",
             triggered=self._export_chat,
         )
-        delete_exchange_action = self.create_action(
+        self._delete_exchange_action = self.create_action(
             "ai_chat_delete_exchange",
             text="Delete Exchange...",
             triggered=self._open_exchange_delete_dialog,
         )
-        chat_settings_action = self.create_action(
+        self._chat_settings_action = self.create_action(
             "ai_chat_tab_settings",
             text="Chat Settings...",
             triggered=self._open_chat_settings_dialog,
         )
-        history_action = self.create_action(
+        self._history_action = self.create_action(
             "ai_chat_history",
             text="Chat History...",
             triggered=self._open_history_browser,
         )
         options_menu = self.get_options_menu()
         self.add_item_to_menu(refresh_action, menu=options_menu)
-        self.add_item_to_menu(new_tab_action, menu=options_menu)
-        self.add_item_to_menu(chat_settings_action, menu=options_menu)
-        self.add_item_to_menu(delete_exchange_action, menu=options_menu)
-        self.add_item_to_menu(history_action, menu=options_menu)
-        self.add_item_to_menu(export_action, menu=options_menu)
+        self.add_item_to_menu(self._new_tab_action, menu=options_menu)
+        self.add_item_to_menu(self._chat_settings_action, menu=options_menu)
+        self.add_item_to_menu(self._delete_exchange_action, menu=options_menu)
+        self.add_item_to_menu(self._history_action, menu=options_menu)
+        self.add_item_to_menu(self._export_action, menu=options_menu)
 
         # --- Tab widget for multiple chat sessions ---
         self._tab_widget = QTabWidget(self)
@@ -412,60 +410,79 @@ class ChatWidget(PluginMainWidget):
         splitter.setStretchFactor(0, 4)  # Tabs get ~80% of space
         splitter.setStretchFactor(1, 1)  # Input gets ~20% of space
 
-        # Quick actions for the highest-frequency debugging workflows.
-        # These are explicit runtime-aware entry points, not hidden prompt
-        # tricks, so users can steer the model toward live debugging tasks.
-        debug_layout = QHBoxLayout()
-        self.explain_error_btn = self._create_debug_button("explain_error")
-        self.fix_traceback_btn = self._create_debug_button("fix_traceback")
-        self.use_variables_btn = self._create_debug_button("use_variables")
-        self.use_console_btn = self._create_debug_button("use_console")
-        self.regenerate_btn = QPushButton("Regenerate")
-        self.delete_turn_btn = QPushButton("Delete Turn")
-        self.delete_turn_btn.setToolTip(
-            "Delete one saved exchange from the active chat tab"
+        # Compact action row: keep the common actions visible while moving
+        # the lower-frequency debug variants behind a small menu button.
+        controls_layout = QHBoxLayout()
+        self._debug_actions = {
+            action: self.create_action(
+                f"ai_chat_debug_{action}",
+                text=DEBUG_ACTION_LABELS.get(action, action),
+                triggered=lambda checked=False, action=action: self._send_debug_prompt(action),
+            )
+            for action in (
+                "explain_error",
+                "fix_traceback",
+                "use_variables",
+                "use_console",
+            )
+        }
+        self.debug_menu_btn = QToolButton(self)
+        self.debug_menu_btn.setText("Debug")
+        self.debug_menu_btn.setPopupMode(QToolButton.InstantPopup)
+        self.debug_menu_btn.setToolTip(
+            "Runtime-aware debugging actions for the active chat tab"
         )
+        debug_menu = QMenu(self.debug_menu_btn)
+        for action in (
+                "explain_error",
+                "fix_traceback",
+                "use_variables",
+                "use_console"):
+            debug_menu.addAction(self._debug_actions[action])
+        self.debug_menu_btn.setMenu(debug_menu)
+
+        self.regenerate_btn = QToolButton(self)
+        self.regenerate_btn.setText("Regenerate")
         self.regenerate_btn.setToolTip(
             "Remove the last assistant answer on this tab and ask again"
         )
-        for button in (
-                self.explain_error_btn,
-                self.fix_traceback_btn,
-                self.use_variables_btn,
-                self.use_console_btn,
-                self.regenerate_btn,
-                self.delete_turn_btn):
-            debug_layout.addWidget(button)
-        debug_layout.addStretch()
-
-        # Button bar: [New] [Export] ----stretch---- [Stop] [Send]
-        button_layout = QHBoxLayout()
-        self.new_btn = QPushButton("New")
-        self.new_btn.setToolTip("Open a new chat tab")
-        self.chat_settings_btn = QPushButton("Settings")
+        self.chat_settings_btn = QToolButton(self)
+        self.chat_settings_btn.setText("Settings")
         self.chat_settings_btn.setToolTip(
             "Adjust inference settings for the active chat tab"
         )
-        self.history_btn = QPushButton("History")
+        self.history_btn = QToolButton(self)
+        self.history_btn.setText("History")
         self.history_btn.setToolTip("Browse saved chat sessions for the current scope")
-        self.export_btn = QPushButton("Export")
-        self.export_btn.setToolTip("Export the current conversation to a file")
+
+        self.more_btn = QToolButton(self)
+        self.more_btn.setText("More")
+        self.more_btn.setPopupMode(QToolButton.InstantPopup)
+        self.more_btn.setToolTip(
+            "Additional chat actions for the active session"
+        )
+        more_menu = QMenu(self.more_btn)
+        more_menu.addAction(self._new_tab_action)
+        more_menu.addAction(self._delete_exchange_action)
+        more_menu.addAction(self._export_action)
+        self.more_btn.setMenu(more_menu)
+
         self.stop_btn = QPushButton("Stop")
         self.send_btn = QPushButton("Send")
         self.stop_btn.setEnabled(False)
-        button_layout.addWidget(self.new_btn)
-        button_layout.addWidget(self.chat_settings_btn)
-        button_layout.addWidget(self.history_btn)
-        button_layout.addWidget(self.export_btn)
-        button_layout.addStretch()
-        button_layout.addWidget(self.stop_btn)
-        button_layout.addWidget(self.send_btn)
+        controls_layout.addWidget(self.debug_menu_btn)
+        controls_layout.addWidget(self.regenerate_btn)
+        controls_layout.addWidget(self.history_btn)
+        controls_layout.addWidget(self.chat_settings_btn)
+        controls_layout.addWidget(self.more_btn)
+        controls_layout.addStretch()
+        controls_layout.addWidget(self.stop_btn)
+        controls_layout.addWidget(self.send_btn)
 
-        # Assemble the content layout (splitter + buttons)
+        # Assemble the content layout (splitter + compact controls)
         content_layout = QVBoxLayout()
         content_layout.addWidget(splitter)
-        content_layout.addLayout(debug_layout)
-        content_layout.addLayout(button_layout)
+        content_layout.addLayout(controls_layout)
 
         self.setLayout(content_layout)
 
@@ -492,24 +509,9 @@ class ChatWidget(PluginMainWidget):
         self.chat_input.submit_requested.connect(self._send_message)
         self.send_btn.clicked.connect(self._send_message)
         self.stop_btn.clicked.connect(self._stop_generation)
-        self.new_btn.clicked.connect(self._add_new_tab)
         self.chat_settings_btn.clicked.connect(self._open_chat_settings_dialog)
         self.history_btn.clicked.connect(self._open_history_browser)
-        self.export_btn.clicked.connect(self._export_chat)
-        self.explain_error_btn.clicked.connect(
-            lambda: self._send_debug_prompt("explain_error")
-        )
-        self.fix_traceback_btn.clicked.connect(
-            lambda: self._send_debug_prompt("fix_traceback")
-        )
-        self.use_variables_btn.clicked.connect(
-            lambda: self._send_debug_prompt("use_variables")
-        )
-        self.use_console_btn.clicked.connect(
-            lambda: self._send_debug_prompt("use_console")
-        )
         self.regenerate_btn.clicked.connect(self._regenerate_last_turn)
-        self.delete_turn_btn.clicked.connect(self._open_exchange_delete_dialog)
         self.model_combo.currentIndexChanged.connect(
             self._on_model_changed
         )
@@ -533,15 +535,6 @@ class ChatWidget(PluginMainWidget):
         actions to update.
         """
         pass
-
-    def _create_debug_button(self, action):
-        """Create one small quick-action button for a debug workflow."""
-        label = DEBUG_ACTION_LABELS.get(action, action)
-        button = QPushButton(label)
-        button.setToolTip(
-            f"Send a runtime-aware chat request for: {label.lower()}"
-        )
-        return button
 
     def _populate_prompt_preset_combo(self):
         """Fill the shared preset selector with built-in prompt presets."""
@@ -673,6 +666,13 @@ class ChatWidget(PluginMainWidget):
         if provider_label:
             return f"{provider_label}: {payload.get('name', '')}"
         return payload.get("name", self._current_model)
+
+    def trigger_debug_action(self, action):
+        """Trigger one runtime-aware debug action programmatically."""
+        debug_action = self._debug_actions.get(action)
+        if debug_action is None:
+            raise KeyError(f"Unknown debug action: {action}")
+        debug_action.trigger()
 
     # --- Tab management ---
 
@@ -1267,11 +1267,8 @@ class ChatWidget(PluginMainWidget):
 
     def _add_session(self, session, notify=True):
         """Insert one chat session into the tab widget."""
-        session.display.sig_insert_code_requested.connect(
-            self.sig_insert_code
-        )
-        session.display.sig_replace_code_requested.connect(
-            self.sig_replace_code
+        session.display.sig_apply_code_requested.connect(
+            self.sig_apply_code
         )
 
         idx = self._tab_widget.addTab(session.display, session.title)
@@ -1743,10 +1740,9 @@ class ChatWidget(PluginMainWidget):
         self.stop_btn.setEnabled(generating)
         self.chat_input.setEnabled(not generating)
         self.history_btn.setEnabled(not generating)
-        self.explain_error_btn.setEnabled(not generating)
-        self.fix_traceback_btn.setEnabled(not generating)
-        self.use_variables_btn.setEnabled(not generating)
-        self.use_console_btn.setEnabled(not generating)
+        self.chat_settings_btn.setEnabled(not generating)
+        self.debug_menu_btn.setEnabled(not generating)
+        self.more_btn.setEnabled(not generating)
         self.regenerate_btn.setEnabled(not generating)
         if generating:
             self.start_spinner()

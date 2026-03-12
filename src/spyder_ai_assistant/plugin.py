@@ -16,6 +16,7 @@ import logging
 from functools import partial
 
 from qtpy.QtCore import QTimer
+from qtpy.QtGui import QTextCursor
 
 from spyder.api.config.decorators import on_conf_change
 from spyder.api.plugins import Plugins, SpyderDockablePlugin
@@ -35,9 +36,14 @@ from spyder_ai_assistant.utils.chat_persistence import (
     load_chat_session_state,
     save_chat_session_state,
 )
+from spyder_ai_assistant.utils.code_apply import (
+    APPLY_MODE_INSERT,
+    APPLY_MODE_REPLACE,
+)
 from spyder_ai_assistant.utils.runtime_context import RuntimeContextService
 from spyder_ai_assistant.widgets.chat_widget import ChatWidget
 from spyder_ai_assistant.widgets.config_page import AIChatConfigPage
+from spyder_ai_assistant.widgets.code_apply_dialog import CodeApplyDialog
 from spyder_ai_assistant.widgets.ghost_text import GhostTextManager
 
 logger = logging.getLogger(__name__)
@@ -162,18 +168,13 @@ class AIChatPlugin(SpyderDockablePlugin):
     def on_initialize(self):
         """Called after the plugin and widget are created.
 
-        Connects the widget's insert-code signal to our handler,
+        Connects the widget's code-apply preview signal to our handler,
         sets up the context provider, and initializes ghost text tracking.
         """
         widget = self.get_widget()
 
-        # Connect code-apply signals from chat code blocks
-        widget.sig_insert_code.connect(
-            partial(self._apply_code_into_editor, mode="insert")
-        )
-        widget.sig_replace_code.connect(
-            partial(self._apply_code_into_editor, mode="replace")
-        )
+        # Connect code-apply preview signals from chat code blocks
+        widget.sig_apply_code.connect(self._preview_apply_code_into_editor)
 
         # Provide the widget with a callable that returns the current
         # editor context (file, selection, cursor). The widget calls
@@ -689,57 +690,76 @@ class AIChatPlugin(SpyderDockablePlugin):
 
     # --- Insert code into editor ---
 
-    def _apply_code_into_editor(self, code, mode="insert"):
-        """Apply code from a chat response into the active editor.
-
-        Args:
-            code: The code text to insert.
-            mode: Either ``insert`` to insert at the caret without
-                deleting the current selection, or ``replace`` to
-                replace the current selection when one exists.
-        """
+    def _preview_apply_code_into_editor(self, code):
+        """Open a preview dialog before applying chat-generated code."""
         editor_plugin = self.get_plugin(Plugins.Editor)
         if editor_plugin is None:
             logger.warning(
-                "Cannot apply chat code (%s): Editor plugin not available",
-                mode,
+                "Cannot preview chat code apply: Editor plugin not available",
             )
             return
 
         editor = editor_plugin.get_current_editor()
         if editor is None:
-            logger.warning("Cannot apply chat code (%s): No active editor", mode)
+            logger.warning("Cannot preview chat code apply: No active editor")
             return
 
-        if mode == "replace" and editor.get_selected_text():
-            cursor = editor.textCursor()
-            cursor.insertText(code)
-            logger.info(
-                "Applied chat code by replacing the current editor selection"
-            )
+        cursor = editor.textCursor()
+        dialog = CodeApplyDialog(
+            filename=editor_plugin.get_current_filename() or "Untitled",
+            document_text=editor.toPlainText(),
+            code=code,
+            cursor_position=cursor.position(),
+            selection_start=cursor.selectionStart(),
+            selection_end=cursor.selectionEnd(),
+            default_mode=(
+                APPLY_MODE_REPLACE if cursor.hasSelection() else APPLY_MODE_INSERT
+            ),
+            parent=self.get_widget(),
+        )
+        logger.info(
+            "Opened chat code apply preview for %s (selection=%s, cursor=%d)",
+            editor_plugin.get_current_filename() or "Untitled",
+            cursor.hasSelection(),
+            cursor.position(),
+        )
+        if dialog.exec_() != dialog.Accepted:
+            logger.info("Cancelled chat code apply preview")
             return
 
-        if mode == "insert" and editor.get_selected_text():
-            cursor = editor.textCursor()
-            insert_position = cursor.position()
-            cursor.clearSelection()
-            cursor.setPosition(insert_position)
+        plan = dialog.selected_plan()
+        logger.info(
+            "Accepted chat code apply preview in %s mode",
+            plan["effective_mode"],
+        )
+        self._apply_code_into_editor(editor, code, plan)
+
+    def _apply_code_into_editor(self, editor, code, plan):
+        """Apply one reviewed code change into the current editor."""
+        cursor = editor.textCursor()
+        cursor.beginEditBlock()
+        try:
+            if plan["effective_mode"] == APPLY_MODE_REPLACE and plan["has_selection"]:
+                cursor.setPosition(plan["selection_start"])
+                cursor.setPosition(
+                    plan["selection_end"],
+                    QTextCursor.KeepAnchor,
+                )
+                cursor.insertText(code)
+                logger.info(
+                    "Applied chat code after preview by replacing the current selection"
+                )
+            else:
+                cursor.clearSelection()
+                cursor.setPosition(plan["cursor_position"])
+                editor.setTextCursor(cursor)
+                cursor.insertText(code)
+                logger.info(
+                    "Applied chat code after preview at the current cursor position"
+                )
+        finally:
+            cursor.endEditBlock()
             editor.setTextCursor(cursor)
-            cursor.insertText(code)
-            logger.info(
-                "Applied chat code at the current cursor position without replacing the selection"
-            )
-            return
-
-        editor.insert_text(code)
-        if mode == "replace":
-            logger.info(
-                "Applied chat code in replace-selection mode with no active selection; inserted at the current cursor position instead"
-            )
-        else:
-            logger.info(
-                "Applied chat code at the current cursor position"
-            )
 
     # --- Ghost text routing ---
 

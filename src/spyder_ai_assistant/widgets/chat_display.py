@@ -11,8 +11,8 @@ The thinking block shows the model's reasoning process (like Cursor's
 "Show reasoning" feature).
 
 Code blocks in assistant messages include apply links that emit signals
-when clicked, allowing the plugin to insert code at the cursor position
-or replace the current selection in the active editor.
+when clicked, allowing the plugin to open a preview dialog before
+mutating the active editor.
 
 HTML structure note: Qt's QTextEdit HTML renderer cannot properly contain
 block-level elements (<pre>, <table>) inside <div> tags — they break out
@@ -38,12 +38,9 @@ class ChatDisplay(QTextEdit):
     assistant message is re-rendered on each chunk.
 
     Signals:
-        sig_insert_code_requested(str): Emitted when the user clicks an
-            "Insert at cursor" link on a code block. The str argument
-            is the raw code content to insert.
-        sig_replace_code_requested(str): Emitted when the user clicks a
-            "Replace selection" link on a code block. The str argument
-            is the raw code content to insert.
+        sig_apply_code_requested(str): Emitted when the user clicks an
+            "Apply..." link on a code block. The str argument is the raw
+            code content to preview and optionally apply.
 
     Usage:
         display.append_user_message("Hello")
@@ -53,11 +50,9 @@ class ChatDisplay(QTextEdit):
         display.finish_assistant_message()
     """
 
-    # Emitted when the user clicks "Insert at cursor" on a code block.
-    # Carries the raw code text to be inserted into the active editor.
-    sig_insert_code_requested = Signal(str)
-    # Emitted when the user clicks "Replace selection" on a code block.
-    sig_replace_code_requested = Signal(str)
+    # Emitted when the user clicks "Apply..." on a code block.
+    # Carries the raw code text to preview in the active editor.
+    sig_apply_code_requested = Signal(str)
 
     # Theme color presets for light and dark Spyder themes.
     # Selected at runtime based on the widget's background luminance.
@@ -482,19 +477,15 @@ class ChatDisplay(QTextEdit):
                 # actions. Uses the unescaped version so insertions are clean.
                 index = len(self._code_blocks)
                 self._code_blocks.append(raw_code)
-                # Action links below the code block: Copy + Insert/Replace
+                # Action links below the code block: Copy + Apply preview
                 block_html += (
                     f'<a href="copy://{index}" style="color:{link_color};'
                     f' font-size:0.85em; text-decoration:none;">'
                     f'Copy</a>'
                     f'&nbsp;&nbsp;'
-                    f'<a href="insert://{index}" style="color:{link_color};'
+                    f'<a href="apply://{index}" style="color:{link_color};'
                      f' font-size:0.85em; text-decoration:none;">'
-                    f'Insert at cursor</a>'
-                    f'&nbsp;&nbsp;'
-                    f'<a href="replace://{index}" style="color:{link_color};'
-                    f' font-size:0.85em; text-decoration:none;">'
-                    f'Replace selection</a>'
+                    f'Apply...</a>'
                 )
 
             return block_html
@@ -601,8 +592,7 @@ class ChatDisplay(QTextEdit):
         """Handle clicks on code block action links.
 
         Detects clicks on custom URLs embedded below code blocks:
-        - insert://<index> → emit sig_insert_code_requested (insert at cursor)
-        - replace://<index> → emit sig_replace_code_requested
+        - apply://<index> → emit sig_apply_code_requested
         - copy://<index> → copy code to system clipboard
 
         Falls through to default behavior for all other clicks.
@@ -613,10 +603,8 @@ class ChatDisplay(QTextEdit):
             return
 
         # Parse the action and code block index from the URL
-        if anchor.startswith("insert://"):
-            prefix = "insert://"
-        elif anchor.startswith("replace://"):
-            prefix = "replace://"
+        if anchor.startswith("apply://"):
+            prefix = "apply://"
         elif anchor.startswith("copy://"):
             prefix = "copy://"
         else:
@@ -632,11 +620,8 @@ class ChatDisplay(QTextEdit):
 
         code = self._code_blocks[index]
 
-        if prefix == "insert://":
-            # Send code to the active editor via the plugin
-            self.sig_insert_code_requested.emit(code)
-        elif prefix == "replace://":
-            self.sig_replace_code_requested.emit(code)
+        if prefix == "apply://":
+            self.sig_apply_code_requested.emit(code)
         elif prefix == "copy://":
             # Copy code to the system clipboard
             clipboard = QApplication.clipboard()

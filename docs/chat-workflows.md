@@ -36,6 +36,18 @@ its own working mode:
 The selector is shared in the toolbar, but the chosen mode is stored on the
 active chat session rather than globally.
 
+Below the input, the visible controls are intentionally compact:
+
+- `Debug` menu for runtime-aware quick actions
+- `Regenerate`
+- `History`
+- `Settings`
+- `More` for lower-frequency actions such as new tab, delete exchange, and export
+- `Stop` / `Send`
+
+This keeps the common actions one click away without filling the pane with a
+large row of equally prominent buttons.
+
 The model selector is provider-aware. The same dropdown can list:
 
 - local Ollama chat models
@@ -143,13 +155,16 @@ Available actions:
 
 ## Quick actions
 
-The chat pane exposes one-click actions for the highest-frequency debugging flows:
+The chat pane exposes a compact `Debug` menu for the highest-frequency
+runtime-aware workflows:
 
 - `Explain Error`
 - `Fix Traceback`
 - `Use Variables`
 - `Use Console`
-- `Regenerate`
+
+`Regenerate` remains visible beside the debug menu because it is used often
+but does not require extra runtime inspection scaffolding.
 
 The first four actions reuse the runtime bridge described in [runtime-inspection.md](runtime-inspection.md). They do not inject console or variable dumps directly. Instead, they steer the model to request live runtime data only when needed.
 
@@ -173,13 +188,20 @@ Behavior:
 
 ## Code apply actions
 
-Assistant code blocks expose three actions:
+Assistant code blocks now expose two actions:
 
 - `Copy`
-- `Insert at cursor`
-- `Replace selection`
+- `Apply...`
 
-`Insert at cursor` preserves any selected text and inserts at the active caret position. `Replace selection` replaces the current selection when one exists, and falls back to inserting at the caret when there is no selection.
+`Apply...` opens a preview dialog that:
+
+- defaults to `Replace selection` when an editor selection exists
+- otherwise defaults to `Insert at cursor`
+- shows a unified diff preview before any mutation
+- lets the user cancel safely
+- groups the final edit into one undo step
+
+This is intentionally safer than mutating the editor immediately from the chat transcript.
 
 ## Exchange deletion
 
@@ -238,6 +260,10 @@ Useful log lines include:
 - `Building chat system prompt with preset debugging for session ...`
 - `Built chat history browser with 2 saved session(s)`
 - `Built exchange delete browser with 3 exchange(s) for session ...`
+- `Opened chat code apply preview for ...`
+- `Accepted chat code apply preview in insert mode`
+- `Accepted chat code apply preview in replace mode`
+- `Cancelled chat code apply preview`
 - `History browser selected action 'open' for session ...`
 - `History browser selected action 'duplicate' for session ...`
 - `History browser selected action 'delete' for session ...`
@@ -264,11 +290,12 @@ Useful log lines include:
 5. Create `values = [1, 2, 3]`, click `Use Variables`, and confirm the answer references `values`.
 6. Print a visible marker, click `Use Console`, and confirm the answer references the marker.
 7. Send a normal prompt, click `Regenerate`, and confirm the active tab still has one user message and one assistant answer for that turn.
-8. Use the code-block apply actions in an editor and confirm `Insert at cursor` and `Replace selection` behave differently.
-9. Set one tab to `Debugging`, open a second tab, set it to `Documentation`, then switch between tabs and confirm the toolbar selector follows the active tab.
-10. Open `Settings` on one tab, set a low temperature and low max-token override, then confirm the button changes to `Settings*` and its tooltip shows the overridden values.
-11. Open `Settings` on another tab, set custom values, then click `Use Global Defaults` and confirm the button returns to `Settings`.
-12. Open a second console, pin the runtime target to it, and confirm `Explain Error` / `Use Variables` follow the pinned console rather than the active one.
+8. Use `Apply...` from a code block in an editor. Confirm the preview dialog opens, shows a diff, and that cancel leaves the editor untouched.
+9. Reopen `Apply...` with a selection active, choose `Replace selection`, apply it, then confirm one undo restores the previous text exactly.
+10. Set one tab to `Debugging`, open a second tab, set it to `Documentation`, then switch between tabs and confirm the toolbar selector follows the active tab.
+11. Open `Settings` on one tab, set a low temperature and low max-token override, then confirm the button changes to `Settings*` and its tooltip shows the overridden values.
+12. Open `Settings` on another tab, set custom values, then click `Use Global Defaults` and confirm the button returns to `Settings`.
+13. Open a second console, pin the runtime target to it, and confirm `Debug > Explain Error` / `Debug > Use Variables` follow the pinned console rather than the active one.
 12. Click `History`, confirm the browser shows the current scope, reopen a saved session, duplicate another one, and delete a saved session.
 13. Open `Delete Turn`, remove one middle exchange from the active tab, and confirm the visible conversation rebuilds without that exchange.
 14. Click `Regenerate` after deleting a middle exchange and confirm the remaining last user turn still reruns correctly.

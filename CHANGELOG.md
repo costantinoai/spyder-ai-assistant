@@ -17,6 +17,19 @@
 - added a tracked live Spyder validation harness for multi-console runtime
   targeting, richer variable inspection, and frame-aware traceback inspection
 
+### Phase 11: Edit UX and diff/apply refinement
+
+- reduced the visible chat control clutter by collapsing runtime quick actions
+  into a compact `Debug` menu and moving lower-frequency session actions into
+  `More`
+- replaced code-block `Insert at cursor` / `Replace selection` links with a
+  safer `Apply...` preview dialog
+- added unified-diff previews, explicit accept/cancel, and mode selection for
+  insert-vs-replace before mutating the editor
+- grouped previewed editor mutations into single-step undo operations
+- added a tracked live Spyder validation harness for cancel/apply/undo coverage
+  on both insert and replace workflows
+
 ### Phase 7: Completion polish
 
 - added partial ghost acceptance for the next word-like segment and next line

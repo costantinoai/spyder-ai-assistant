@@ -10,9 +10,14 @@ from qtpy.QtGui import QTextCursor
 from qtpy.QtWidgets import QApplication
 
 from spyder_ai_assistant.utils.chat_workflows import build_export_markdown
+from spyder_ai_assistant.utils.code_apply import (
+    APPLY_MODE_INSERT,
+    APPLY_MODE_REPLACE,
+)
 from spyder_ai_assistant.utils.prompt_library import get_chat_prompt_preset
 from tools.spyder_validation.common import (
     DEFAULT_CHAT_MODEL,
+    apply_chat_code_via_dialog,
     artifact_path,
     finalize,
     get_ai_plugin,
@@ -82,16 +87,10 @@ def execute_code(window, code, predicate=None, timeout_ms=15000):
 
 def send_debug_action(widget, action, user_text="", timeout_ms=120000):
     """Trigger one debug quick action and return the assistant answer."""
-    buttons = {
-        "explain_error": widget.explain_error_btn,
-        "fix_traceback": widget.fix_traceback_btn,
-        "use_variables": widget.use_variables_btn,
-        "use_console": widget.use_console_btn,
-    }
     session = widget._active_session
     previous_count = len(session.messages)
     set_input_text(widget, user_text)
-    buttons[action].click()
+    widget.trigger_debug_action(action)
     completed = wait_for_assistant_turn(
         widget,
         session,
@@ -143,7 +142,7 @@ def move_cursor_to_end(editor):
 
 
 def run_apply_action_checks(window, results):
-    """Verify insert-at-cursor and replace-selection actions."""
+    """Verify previewed insert and replace actions through the real dialog."""
     editor = get_editor_plugin(window).get_current_editor()
     if editor is None:
         raise RuntimeError("No editor available for apply checks")
@@ -155,20 +154,30 @@ def run_apply_action_checks(window, results):
     editor.set_text("alpha = 1\nbeta = 2\n")
     editor.document().setModified(False)
     move_cursor_to_end(editor)
-    session.display.sig_insert_code_requested.emit("gamma = 3\n")
-    QApplication.instance().processEvents()
+    insert_dialog = apply_chat_code_via_dialog(
+        widget,
+        "gamma = 3\n",
+        mode=APPLY_MODE_INSERT,
+        accept=True,
+    )
     after_insert = editor.toPlainText()
 
     editor.set_text("alpha = 1\nbeta = 2\n")
     editor.document().setModified(False)
     select_text(editor, "beta = 2")
-    session.display.sig_replace_code_requested.emit("beta = 99")
-    QApplication.instance().processEvents()
+    replace_dialog = apply_chat_code_via_dialog(
+        widget,
+        "beta = 99",
+        mode=APPLY_MODE_REPLACE,
+        accept=True,
+    )
     after_replace = editor.toPlainText()
 
     results["apply_actions"] = {
         "insert_text": after_insert,
         "replace_text": after_replace,
+        "insert_diff": insert_dialog["diff_text"],
+        "replace_diff": replace_dialog["diff_text"],
         "insert_ok": "alpha = 1\nbeta = 2\ngamma = 3\n" == after_insert,
         "replace_ok": "alpha = 1\nbeta = 99\n" == after_replace,
     }
@@ -183,12 +192,18 @@ def run_runtime_debug_checks(window, results):
         "context_label": widget.context_label.text(),
         "runtime_label": widget.runtime_label.text(),
         "runtime_tooltip": widget.runtime_label.toolTip(),
-        "debug_buttons": [
-            widget.explain_error_btn.text(),
-            widget.fix_traceback_btn.text(),
-            widget.use_variables_btn.text(),
-            widget.use_console_btn.text(),
+        "debug_controls": [
+            widget.debug_menu_btn.text(),
             widget.regenerate_btn.text(),
+            widget.history_btn.text(),
+            widget.chat_settings_btn.text(),
+            widget.more_btn.text(),
+        ],
+        "debug_actions": [
+            widget._debug_actions["explain_error"].text(),
+            widget._debug_actions["fix_traceback"].text(),
+            widget._debug_actions["use_variables"].text(),
+            widget._debug_actions["use_console"].text(),
         ],
     }
 

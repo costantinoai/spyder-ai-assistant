@@ -95,12 +95,9 @@ This is **on-demand, not automatic** — ordinary questions stay file-focused an
 
 **Quick-action buttons** for common debugging workflows:
 
-| Button | What it does |
+| Control | What it does |
 |--------|-------------|
-| **Explain Error** | Inspects the latest traceback and explains it |
-| **Fix Traceback** | Proposes a concrete fix based on the latest runtime failure |
-| **Use Variables** | Asks the model to inspect current variable state |
-| **Use Console** | Feeds recent console output into the conversation |
+| **Debug** | Opens runtime-aware actions such as Explain Error, Fix Traceback, Use Variables, and Use Console |
 | **Regenerate** | Reruns the last turn on the active tab |
 
 When more than one IPython console is open, the runtime target selector in the chat toolbar lets you choose **Follow Active Console** or pin the debugging context to a specific console. The runtime tooltip shows which console is currently active and which one is actually being inspected.
@@ -116,7 +113,7 @@ The AI automatically sees your current file, cursor position, selection, other o
 | **Fix** | Finds and fixes bugs in the selection |
 | **Add Docstring** | Generates a docstring for the selected function or class |
 
-Code blocks in chat responses come with **Insert at cursor** and **Replace selection** actions so you can apply suggestions directly.
+Code blocks in chat responses now expose **Copy** and **Apply...**. `Apply...` opens a preview dialog that lets you choose insert-vs-replace, inspect the diff, and confirm or cancel before the editor changes. The final mutation is grouped into a single undo step.
 
 ### Session history and persistence
 
@@ -201,7 +198,7 @@ Active development. Rough priority order:
 - **More providers** — named provider profiles, better diagnostics, adapters beyond OpenAI-compatible
 - **Smart setup** — one-click Ollama install, guided model downloads, hardware-aware recommendations
 - **Smarter completions** — scope-aware truncation, rename-aware suggestions, multi-site edits
-- **Better edit UX** — accept/reject markers, inline diff previews, proper undo integration
+- **Polish the apply workflow further** — richer inline diff rendering, smarter multi-block edit handling
 - **Agent workflows** — multi-step task execution with approval gates, git-aware context
 
 ---

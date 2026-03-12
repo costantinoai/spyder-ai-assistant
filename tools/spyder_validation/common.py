@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 from qtpy.QtCore import QTimer
-from qtpy.QtWidgets import QApplication, QMessageBox
+from qtpy.QtWidgets import QApplication, QDialogButtonBox, QMessageBox
 
 from spyder.api.plugins import Plugins
 from spyder.app.mainwindow import MainWindow
@@ -23,6 +23,7 @@ from spyder.app.mainwindow import MainWindow
 from spyder_ai_assistant.utils.prompt_library import (
     normalize_chat_prompt_preset,
 )
+from spyder_ai_assistant.widgets.code_apply_dialog import CodeApplyDialog
 from spyder_ai_assistant.widgets.exchange_delete_dialog import ExchangeDeleteDialog
 from spyder_ai_assistant.widgets.chat_settings_dialog import ChatSettingsDialog
 
@@ -377,7 +378,7 @@ def delete_chat_exchange_via_dialog(widget, exchange_index):
         dialog.request_delete()
 
     QTimer.singleShot(50, _confirm_delete)
-    widget.delete_turn_btn.click()
+    widget._delete_exchange_action.trigger()
     closed = wait_for(
         lambda: not any(
             (
@@ -395,6 +396,56 @@ def delete_chat_exchange_via_dialog(widget, exchange_index):
     if not closed:
         raise RuntimeError("Exchange delete flow did not close")
     QApplication.instance().processEvents()
+
+
+def apply_chat_code_via_dialog(widget, code, mode, accept=True):
+    """Open the real apply-preview dialog and optionally accept it."""
+    state = {"error": None, "diff_text": "", "summary": ""}
+
+    def _configure_dialog(attempt=0):
+        dialog = next(
+            (
+                top_level for top_level in QApplication.topLevelWidgets()
+                if isinstance(top_level, CodeApplyDialog)
+                and top_level.isVisible()
+            ),
+            None,
+        )
+        if dialog is None:
+            if attempt < 40:
+                QTimer.singleShot(50, lambda: _configure_dialog(attempt + 1))
+            else:
+                state["error"] = "Code apply dialog did not open"
+            return
+
+        if mode and not dialog.select_mode(mode):
+            state["error"] = f"Apply mode not available in dialog: {mode}"
+            dialog.reject()
+            return
+
+        state["diff_text"] = dialog.diff_view.toPlainText()
+        state["summary"] = dialog.summary_label.text()
+        if accept:
+            dialog.button_box.button(QDialogButtonBox.Ok).click()
+        else:
+            dialog.reject()
+
+    QTimer.singleShot(50, _configure_dialog)
+    widget._active_session.display.sig_apply_code_requested.emit(code)
+    closed = wait_for(
+        lambda: not any(
+            isinstance(top_level, CodeApplyDialog) and top_level.isVisible()
+            for top_level in QApplication.topLevelWidgets()
+        ),
+        timeout_ms=5000,
+        step_ms=50,
+    )
+    if state["error"] is not None:
+        raise RuntimeError(state["error"])
+    if not closed:
+        raise RuntimeError("Code apply dialog did not close")
+    QApplication.instance().processEvents()
+    return state
 
 
 def set_input_text(widget, text):
