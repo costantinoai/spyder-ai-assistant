@@ -825,6 +825,92 @@ def _looks_repetitive_completion(completion_text):
     return False
 
 
+def _strip_current_line_prefix_replay(completion_text, prefix):
+    """Strip one echoed current-line prefix from the start of a completion."""
+    text = str(completion_text or "")
+    prefix_text = str(prefix or "")
+    if not text or not prefix_text:
+        return text
+
+    current_line = prefix_text.rsplit("\n", 1)[-1]
+    if not current_line.strip():
+        return text
+
+    overlap = current_line
+    if text.startswith(overlap):
+        return text[len(overlap):].lstrip()
+
+    stripped_overlap = current_line.lstrip()
+    if (
+        stripped_overlap
+        and stripped_overlap != overlap
+        and text.startswith(stripped_overlap)
+    ):
+        return text[len(stripped_overlap):].lstrip()
+
+    return text
+
+
+def _strip_recent_prefix_replay(completion_text, prefix):
+    """Strip a leading block that simply replays recent prefix lines.
+
+    This catches completions like:
+        result = a + b + c + d
+        result = result * 2
+        ...
+
+    when the same contiguous block already appears immediately above the
+    cursor and the suggestion should continue from there instead.
+    """
+    text = _strip_current_line_prefix_replay(completion_text, prefix)
+    prefix_text = str(prefix or "")
+    if not text or not prefix_text:
+        return text
+
+    completion_lines = text.splitlines(True)
+    prefix_lines = prefix_text.splitlines(True)
+    if not completion_lines or not prefix_lines:
+        return text
+
+    def _normalize_line(line):
+        return str(line or "").rstrip()
+
+    normalized_completion = [_normalize_line(line) for line in completion_lines]
+    normalized_prefix = [_normalize_line(line) for line in prefix_lines]
+    max_shared = min(len(normalized_completion), len(normalized_prefix), 32)
+
+    def _significant_count(lines):
+        return sum(1 for line in lines if line.strip())
+
+    best_shared = 0
+    for shared in range(max_shared, 0, -1):
+        completion_head = normalized_completion[:shared]
+        prefix_tail = normalized_prefix[-shared:]
+        if completion_head != prefix_tail:
+            continue
+
+        significant_head = [line for line in completion_head if line.strip()]
+        if not significant_head:
+            continue
+
+        if len(significant_head) >= 2:
+            best_shared = shared
+            break
+
+        repeated_line = significant_head[0].strip()
+        remainder_significant = _significant_count(normalized_completion[shared:])
+        if len(repeated_line) >= 20 and remainder_significant >= 1:
+            best_shared = shared
+            break
+
+    if not best_shared:
+        return text
+
+    stripped = "".join(completion_lines[best_shared:])
+    stripped = stripped.lstrip("\n")
+    return stripped.rstrip()
+
+
 def _looks_like_invalid_blank_line_operator_continuation(
     text,
     target,
@@ -874,12 +960,14 @@ def _looks_like_invalid_blank_line_operator_continuation(
     return bool(_LEADING_OPERATOR_CONTINUATION_RE.match(normalized))
 
 
-def _finalize_completion_text(completion_text, suffix):
+def _finalize_completion_text(completion_text, suffix, prefix=""):
     """Apply final overlap and repetition filters before ghost display."""
-    if _completion_already_in_document(completion_text, suffix):
+    normalized = _strip_recent_prefix_replay(completion_text, prefix)
+
+    if _completion_already_in_document(normalized, suffix):
         return "", "duplicate"
 
-    trimmed = _trim_suffix_overlap(completion_text, suffix)
+    trimmed = _trim_suffix_overlap(normalized, suffix)
     if not trimmed:
         return "", "overlap"
 
@@ -2249,7 +2337,10 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             else target.offset
         )
         if state is not None and 0 <= current_offset <= len(state.text):
+            current_prefix = state.text[:current_offset]
             current_suffix = state.text[current_offset:]
+        else:
+            current_prefix = ""
 
         if source == "cache":
             final_text = completion_text or ""
@@ -2258,6 +2349,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             final_text, filter_reason = _finalize_completion_text(
                 completion_text,
                 current_suffix,
+                current_prefix,
             )
             if (
                 final_text
