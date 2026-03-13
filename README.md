@@ -8,7 +8,7 @@
 
 A local-first AI assistant for [Spyder IDE](https://www.spyder-ide.org/). Chat with a model about your code, get Copilot-style inline completions, inspect live variables and tracebacks, and browse your conversation history — all running on your own GPU through [Ollama](https://ollama.com/), with optional support for OpenAI-compatible endpoints.
 
-![Chat panel with AI explaining a Python script](docs/screenshots/chat-panel.png)
+![Chat panel debugging a ZeroDivisionError — the AI reads the console traceback and explains the fix](docs/screenshots/chat-panel.png)
 
 ---
 
@@ -54,7 +54,7 @@ That's it. Everything runs locally and works offline.
 
 Copilot-style ghost text that appears as you type, powered by Ollama's Fill-in-Middle (FIM) API.
 
-![Ghost text inline completions](docs/screenshots/ghost-completions.png)
+![Ghost text suggesting a function call as you type](docs/screenshots/ghost-completions.png)
 
 | Shortcut | Action |
 |----------|--------|
@@ -179,6 +179,10 @@ All assistant settings live in the chat pane under **Settings**:
 - **Settings > Assistant Settings...** — default chat model, default completion model, Ollama host, generation defaults, shortcuts, system prompt, and action prompt templates (with `{filename}` and `{code}` placeholders)
 - **Settings > Tab Overrides...** — per-tab temperature and max-token overrides
 - **Settings > Provider Profiles...** — named OpenAI-compatible endpoints and API keys whose discovered models populate the chat/completion selectors
+
+| Models and providers | Generation defaults | Shortcuts | Prompt templates |
+|:---:|:---:|:---:|:---:|
+| ![Models](docs/screenshots/settings-models.png) | ![Generation](docs/screenshots/settings-generation.png) | ![Shortcuts](docs/screenshots/settings-shortcuts.png) | ![Prompts](docs/screenshots/settings-prompts.png) |
 
 Existing single-endpoint settings are imported automatically the first time you open the provider-profiles dialog.
 
