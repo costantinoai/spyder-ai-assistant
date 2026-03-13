@@ -31,7 +31,16 @@ from spyder.plugins.completion.api import (
     SpyderCompletionProvider,
 )
 
-from spyder_ai_assistant.backend.client import OllamaClient
+from spyder_ai_assistant.backend.client import (
+    OllamaClient,
+    OpenAICompatibleCompletionClient,
+)
+from spyder_ai_assistant.utils.provider_profiles import (
+    PROVIDER_KIND_OLLAMA,
+    PROVIDER_KIND_OPENAI_COMPATIBLE,
+    normalize_provider_profiles,
+    resolve_preferred_profile,
+)
 from spyder_ai_assistant.utils.completion_context import (
     build_related_completion_snippets,
     extract_completion_terms,
@@ -322,6 +331,116 @@ class _CompletionCache:
         return len(self._entries)
 
 
+def _build_completion_backend_cache_id(provider_kind, endpoint, profile_id=""):
+    """Return one stable backend identifier for caching and cycling."""
+    normalized_kind = str(provider_kind or PROVIDER_KIND_OLLAMA).strip()
+    normalized_endpoint = str(endpoint or "").strip()
+    normalized_profile_id = str(profile_id or "").strip()
+    if normalized_kind == PROVIDER_KIND_OPENAI_COMPATIBLE:
+        return (
+            f"{normalized_kind}:{normalized_profile_id}"
+            if normalized_profile_id
+            else f"{normalized_kind}:{normalized_endpoint}"
+        )
+    return f"{normalized_kind}:{normalized_endpoint or 'http://localhost:11434'}"
+
+
+def _summarize_text_for_log(text, max_chars=80):
+    """Return one compact single-line text summary for logs."""
+    value = str(text or "").replace("\n", "\\n").replace("\r", "")
+    if len(value) <= max_chars:
+        return value
+    return value[: max_chars - 3] + "..."
+
+
+def _summarize_target_for_log(target):
+    """Return one compact target string for logs."""
+    if target is None:
+        return "<none>"
+    return (
+        f"{os.path.basename(target.filename)}"
+        f":v{target.version}"
+        f":L{target.line + 1}:C{target.column + 1}"
+        f":offset={target.offset}"
+        f":word={target.current_word!r}"
+    )
+
+
+def resolve_completion_backend_settings(
+    *,
+    chat_provider=PROVIDER_KIND_OLLAMA,
+    chat_provider_profile_id="",
+    provider_profiles="[]",
+    ollama_host="http://localhost:11434",
+    openai_compatible_base_url="",
+    openai_compatible_api_key="",
+):
+    """Resolve the active completion backend from plugin config values."""
+    normalized_ollama_host = (
+        str(ollama_host or "").strip() or "http://localhost:11434"
+    )
+    normalized_provider = (
+        str(chat_provider or PROVIDER_KIND_OLLAMA).strip()
+        or PROVIDER_KIND_OLLAMA
+    )
+    normalized_profile_id = str(chat_provider_profile_id or "").strip()
+    profiles = normalize_provider_profiles(
+        provider_profiles,
+        legacy_base_url=openai_compatible_base_url,
+        legacy_api_key=openai_compatible_api_key,
+    )
+
+    if normalized_provider == PROVIDER_KIND_OPENAI_COMPATIBLE:
+        preferred = resolve_preferred_profile(profiles, normalized_profile_id)
+        endpoint = str(preferred.get("base_url", "") or "").strip()
+        if endpoint:
+            profile_id = str(preferred.get("profile_id", "") or "").strip()
+            settings = {
+                "provider_kind": PROVIDER_KIND_OPENAI_COMPATIBLE,
+                "provider_label": str(
+                    preferred.get("label", "") or "OpenAI-compatible"
+                ),
+                "profile_id": profile_id,
+                "endpoint": endpoint,
+                "api_key": str(preferred.get("api_key", "") or ""),
+                "cache_id": _build_completion_backend_cache_id(
+                    PROVIDER_KIND_OPENAI_COMPATIBLE,
+                    endpoint,
+                    profile_id=profile_id,
+                ),
+            }
+            logger.info(
+                "Resolved AI completion backend: provider=%s profile_id=%s endpoint=%s",
+                settings["provider_kind"],
+                profile_id or "-",
+                settings["endpoint"],
+            )
+            return settings
+
+        logger.info(
+            "AI completions falling back to Ollama because no enabled "
+            "OpenAI-compatible profile is configured"
+        )
+
+    settings = {
+        "provider_kind": PROVIDER_KIND_OLLAMA,
+        "provider_label": "Ollama",
+        "profile_id": "",
+        "endpoint": normalized_ollama_host,
+        "api_key": "",
+        "cache_id": _build_completion_backend_cache_id(
+            PROVIDER_KIND_OLLAMA,
+            normalized_ollama_host,
+        ),
+    }
+    logger.info(
+        "Resolved AI completion backend: provider=%s endpoint=%s",
+        settings["provider_kind"],
+        settings["endpoint"],
+    )
+    return settings
+
+
 def _clean_completion(raw_text, prefix, suffix=""):
     """Clean a model's raw completion output for inline display.
 
@@ -526,6 +645,12 @@ def _looks_like_valid_middle_of_line_suffix(suffix):
 
 def _should_allow_multiline_completion(prefix):
     """Allow multiline completions only in block-like contexts."""
+    current_line = prefix.rsplit("\n", 1)[-1]
+    if current_line and not current_line.strip():
+        indentation = len(current_line) - len(current_line.lstrip(" \t"))
+        if indentation > 0:
+            return True
+
     lines = prefix.splitlines()
     for line in reversed(lines):
         stripped = line.rstrip()
@@ -619,16 +744,23 @@ class CompletionWorker(QObject):
     # Input signal: dispatched from the main thread via QTimer debounce
     # Args: (req_id, model, prefix, suffix, options)
     sig_perform_completion = Signal(int, str, str, str, dict)
-    sig_update_host = Signal(str)
+    sig_update_backend_settings = Signal(dict)
     # Output signals: consumed by the provider on the main thread
     # sig_completion_ready(req_id, completion_text, suffix) — text for ghost display
     sig_completion_ready = Signal(int, str, str)
     sig_error = Signal(int, str)
 
-    def __init__(self, host="http://localhost:11434"):
+    def __init__(self, backend_settings=None):
         super().__init__()
-        self._host = host
+        self._backend_settings = dict(
+            backend_settings or {
+                "provider_kind": PROVIDER_KIND_OLLAMA,
+                "endpoint": "http://localhost:11434",
+                "api_key": "",
+            }
+        )
         self._client = None  # Created lazily on the worker thread
+        self._client_signature = None
 
         # QThread setup: moveToThread so slots run on the worker thread
         self._thread = QThread()
@@ -637,18 +769,22 @@ class CompletionWorker(QObject):
 
         # Connect input signal to the processing slot
         self.sig_perform_completion.connect(self._handle_completion)
-        self.sig_update_host.connect(self._handle_update_host)
+        self.sig_update_backend_settings.connect(
+            self._handle_update_backend_settings
+        )
 
     # --- Thread lifecycle ---
 
     def start(self):
         """Start the background thread."""
         if not self._thread.isRunning():
+            logger.info("Starting AI completion worker thread")
             self._thread.start()
 
     def stop(self):
         """Stop the background thread and wait for it to finish."""
         if self._thread.isRunning():
+            logger.info("Stopping AI completion worker thread")
             self._thread.quit()
             self._thread.wait(5000)  # 5s timeout to avoid hanging on exit
 
@@ -660,8 +796,9 @@ class CompletionWorker(QObject):
         connection pools are thread-local and must be created on the
         thread that will use them.
         """
-        self._client = OllamaClient(host=self._host)
-        logger.debug("CompletionWorker thread started, client at %s", self._host)
+        self._client = None
+        self._client_signature = None
+        logger.info("AI completion worker thread started")
 
     # --- Completion handling ---
 
@@ -680,16 +817,42 @@ class CompletionWorker(QObject):
             suffix: Code after the cursor.
             options: Model parameters (temperature, num_predict, etc.).
         """
-        if self._client is None:
-            self.sig_error.emit(req_id, "Completion worker not initialized")
-            return
-
         try:
             client_options = dict(options or {})
             single_line = bool(client_options.pop("_single_line", False))
+            provider_kind = str(
+                client_options.pop("_provider_kind", PROVIDER_KIND_OLLAMA)
+            )
+            endpoint = str(
+                client_options.pop(
+                    "_provider_endpoint",
+                    self._backend_settings.get("endpoint", ""),
+                ) or ""
+            )
+            api_key = str(
+                client_options.pop(
+                    "_provider_api_key",
+                    self._backend_settings.get("api_key", ""),
+                ) or ""
+            )
+            logger.info(
+                "Completion worker starting req_id=%d provider=%s endpoint=%s "
+                "model=%s single_line=%s prefix_chars=%d suffix_chars=%d "
+                "temperature=%s num_predict=%s",
+                req_id,
+                provider_kind,
+                endpoint or self._backend_settings.get("endpoint", ""),
+                model,
+                single_line,
+                len(prefix or ""),
+                len(suffix or ""),
+                client_options.get("temperature"),
+                client_options.get("num_predict"),
+            )
+            client = self._get_client(provider_kind, endpoint, api_key)
 
             # Call the Ollama FIM API (blocking, but we're on a worker thread)
-            raw_text = self._client.generate_completion(
+            raw_text = client.generate_completion(
                 model=model,
                 prefix=prefix,
                 suffix=suffix,
@@ -703,9 +866,19 @@ class CompletionWorker(QObject):
             completion_text = _clean_completion(
                 raw_text or "", prefix, suffix
             )
+            logger.info(
+                "Completion worker finished req_id=%d raw_chars=%d cleaned_chars=%d",
+                req_id,
+                len(raw_text or ""),
+                len(completion_text or ""),
+            )
 
             if not completion_text:
                 # Empty completion — emit empty string so provider doesn't hang
+                logger.info(
+                    "Completion worker produced an empty completion for req_id=%d",
+                    req_id,
+                )
                 self.sig_completion_ready.emit(req_id, "", suffix)
                 return
 
@@ -718,19 +891,58 @@ class CompletionWorker(QObject):
             logger.warning("Completion request %d failed: %s", req_id, e)
             self.sig_error.emit(req_id, str(e))
 
-    def update_host(self, host):
-        """Update the Ollama server URL (called from main thread).
+    def update_backend_settings(self, settings):
+        """Update the completion backend settings from the main thread."""
+        logger.info(
+            "Queueing AI completion backend refresh on worker thread: provider=%s endpoint=%s",
+            (settings or {}).get("provider_kind", "-"),
+            (settings or {}).get("endpoint", ""),
+        )
+        self.sig_update_backend_settings.emit(dict(settings or {}))
 
-        Recreates the client on the next request. Thread-safe because
-        the actual client creation happens in the slot.
-        """
-        self.sig_update_host.emit(host)
+    @Slot(dict)
+    def _handle_update_backend_settings(self, settings):
+        """Update the worker-owned backend settings on the worker thread."""
+        self._backend_settings = dict(settings or {})
+        self._client = None
+        self._client_signature = None
+        logger.info(
+            "AI completion worker backend refreshed: provider=%s endpoint=%s",
+            self._backend_settings.get("provider_kind", "-"),
+            self._backend_settings.get("endpoint", ""),
+        )
 
-    @Slot(str)
-    def _handle_update_host(self, host):
-        """Update the worker-owned client on the worker thread."""
-        self._host = host
-        self._client = OllamaClient(host=host)
+    def _get_client(self, provider_kind, endpoint, api_key):
+        """Return a backend client matching the requested endpoint."""
+        signature = (
+            str(provider_kind or PROVIDER_KIND_OLLAMA),
+            str(endpoint or ""),
+            str(api_key or ""),
+        )
+        if self._client is not None and self._client_signature == signature:
+            logger.debug(
+                "Reusing AI completion client for provider=%s endpoint=%s",
+                provider_kind,
+                endpoint,
+            )
+            return self._client
+
+        if provider_kind == PROVIDER_KIND_OPENAI_COMPATIBLE:
+            self._client = OpenAICompatibleCompletionClient(
+                base_url=endpoint,
+                api_key=api_key,
+            )
+        else:
+            self._client = OllamaClient(
+                host=endpoint or "http://localhost:11434"
+            )
+        self._client_signature = signature
+        logger.info(
+            "Created AI completion client for provider=%s endpoint=%s",
+            provider_kind,
+            endpoint or "http://localhost:11434",
+        )
+        return self._client
 
 
 # ---------------------------------------------------------------------------
@@ -781,6 +993,11 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
     # format used by SpyderDockablePlugin).
     CONF_DEFAULTS = [
         ("ollama_host", "http://localhost:11434"),
+        ("chat_provider", PROVIDER_KIND_OLLAMA),
+        ("chat_provider_profile_id", ""),
+        ("provider_profiles", "[]"),
+        ("openai_compatible_base_url", ""),
+        ("openai_compatible_api_key", ""),
         ("completion_model", "qooba/qwen3-coder-30b-a3b-instruct:q3_k_m"),
         ("completion_temperature", 0.15),
         ("completion_max_tokens", 512),
@@ -851,8 +1068,9 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._current_status_text = "AI: idle"
 
         # --- Background worker ---
-        host = self.get_conf("ollama_host")
-        self._worker = CompletionWorker(host=host)
+        self._worker = CompletionWorker(
+            backend_settings=self._resolve_completion_backend_settings()
+        )
 
         # Connect worker output to our response handler
         self._worker.sig_completion_ready.connect(self._on_completion_ready)
@@ -891,11 +1109,21 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
         # Show the active model name in the status bar
         model = self.get_conf("completion_model")
+        backend_settings = self._resolve_completion_backend_settings()
         # Shorten long model names for the status bar (e.g., "qooba/qwen3-..." → last part)
         short_model = model.split("/")[-1].split(":")[0] if "/" in model else model
         self._update_status(f"AI: {short_model}")
 
-        logger.info("AI completion provider started")
+        logger.info(
+            "AI completion provider started: model=%s provider=%s endpoint=%s "
+            "temperature=%s max_tokens=%s debounce_ms=%s",
+            model,
+            backend_settings["provider_kind"],
+            backend_settings["endpoint"],
+            self.get_conf("completion_temperature"),
+            self.get_conf("completion_max_tokens"),
+            self.get_conf("debounce_ms"),
+        )
         self.sig_provider_ready.emit(self.COMPLETION_PROVIDER_NAME)
 
     def shutdown(self):
@@ -953,7 +1181,15 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             text = req.get("text", "")
             if filename:
                 previous = self._document_states.get(filename)
-                version = 1 if previous is None else previous.version + 1
+                if previous is not None and previous.text == text:
+                    version = previous.version
+                    logger.info(
+                        "DID_CHANGE received unchanged text for %s; preserving version=%d",
+                        filename,
+                        version,
+                    )
+                else:
+                    version = 1 if previous is None else previous.version + 1
                 self._document_states[filename] = _TrackedDocumentState(
                     text=text,
                     version=version,
@@ -974,6 +1210,15 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
         elif req_type == CompletionRequestTypes.DOCUMENT_COMPLETION:
             # Completion request — debounce to avoid spamming the model
+            logger.info(
+                "Received AI completion request req_id=%d file=%s line=%s column=%s offset=%s current_word=%r",
+                req_id,
+                req.get("file", ""),
+                req.get("line", ""),
+                req.get("column", ""),
+                req.get("offset", ""),
+                req.get("current_word", ""),
+            )
             self._handle_completion_request(req, req_id)
 
     def start_completion_services_for_language(self, language):
@@ -996,13 +1241,26 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._increment_metric("requests_received")
         target = self._build_completion_target(req)
         if target is None:
+            logger.info(
+                "Dropping AI completion req_id=%d because no filename was provided",
+                req_id,
+            )
             self._emit_empty_response(req_id)
             return
 
         self._latest_target_by_filename[target.filename] = target
+        logger.info(
+            "Queueing debounced AI completion req_id=%d target=%s",
+            req_id,
+            _summarize_target_for_log(target),
+        )
 
         # Check if completions are enabled
         if not self.get_conf("completions_enabled"):
+            logger.info(
+                "Dropping AI completion req_id=%d because completions are disabled",
+                req_id,
+            )
             self._emit_empty_response(req_id)
             return
 
@@ -1024,11 +1282,93 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         )
         if dropped is not None:
             self._increment_metric("debounced_dropped")
+            logger.info(
+                "Dropped older debounced AI completion req_id=%d in favor of req_id=%d",
+                dropped.req_id,
+                req_id,
+            )
             self._emit_empty_response(dropped.req_id)
 
         # Restart the debounce timer
         debounce_ms = self.get_conf("debounce_ms")
         self._debounce_timer.start(debounce_ms)
+        logger.info(
+            "Started AI completion debounce timer for req_id=%d (%d ms)",
+            req_id,
+            debounce_ms,
+        )
+
+    def request_manual_completion(self, req, req_id):
+        """Dispatch one explicit user-triggered completion without debounce."""
+        self._increment_metric("requests_received")
+        target = self._build_completion_target(req)
+        if target is None:
+            logger.info(
+                "Manual AI completion req_id=%d dropped because no filename was provided",
+                req_id,
+            )
+            self._emit_empty_response(req_id)
+            return
+
+        self._latest_target_by_filename[target.filename] = target
+        logger.info(
+            "Received manual AI completion req_id=%d target=%s",
+            req_id,
+            _summarize_target_for_log(target),
+        )
+
+        if not self.get_conf("completions_enabled"):
+            logger.info(
+                "Manual AI completion req_id=%d dropped because completions are disabled",
+                req_id,
+            )
+            self._emit_empty_response(req_id)
+            return
+
+        if self._try_cycle_visible_candidate(target, req_id):
+            return
+
+        alternative = self._should_request_alternative(target)
+        if alternative:
+            self._increment_metric("alternatives_requested")
+
+        request = _QueuedCompletionRequest(
+            req=req,
+            req_id=req_id,
+            target=target,
+            alternative=alternative,
+        )
+
+        self._debounce_timer.stop()
+        for dropped_req_id in self._request_queue.clear_pending():
+            if dropped_req_id != req_id:
+                self._increment_metric("debounced_dropped")
+                logger.info(
+                    "Manual AI completion req_id=%d cleared pending req_id=%d",
+                    req_id,
+                    dropped_req_id,
+                )
+                self._emit_empty_response(dropped_req_id)
+
+        if self._request_queue.active_req_id is not None:
+            dropped = self._request_queue.replace_queued(request)
+            if dropped is not None and dropped.req_id != req_id:
+                self._increment_metric("queued_dropped")
+                logger.info(
+                    "Manual AI completion req_id=%d replaced queued req_id=%d while active req_id=%s was still running",
+                    req_id,
+                    dropped.req_id,
+                    self._request_queue.active_req_id,
+                )
+                self._emit_empty_response(dropped.req_id)
+            logger.info(
+                "Manual AI completion req_id=%d queued behind active req_id=%s",
+                req_id,
+                self._request_queue.active_req_id,
+            )
+            return
+
+        self._dispatch_request(request)
 
     def _should_request_alternative(self, target):
         """Return True when the user is asking for another visible suggestion."""
@@ -1060,8 +1400,8 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             "text": next_text,
             "cycle_key": shown.get("cycle_key"),
         }
-        logger.debug(
-            "Cycled cached completion candidate for %s",
+        logger.info(
+            "Cycled cached AI completion candidate for %s",
             target.filename,
         )
         return True
@@ -1074,7 +1414,13 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         """
         request = self._request_queue.pop_debounced()
         if request is None:
+            logger.debug("AI completion debounce fired with no pending request")
             return
+        logger.info(
+            "AI completion debounce fired for req_id=%d target=%s",
+            request.req_id,
+            _summarize_target_for_log(request.target),
+        )
 
         # Do not queue arbitrary backlog behind a running request. Keep
         # only one "latest" request waiting for the active one to finish.
@@ -1082,7 +1428,19 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             dropped = self._request_queue.replace_queued(request)
             if dropped is not None:
                 self._increment_metric("queued_dropped")
+                logger.info(
+                    "Queued latest AI completion req_id=%d behind active req_id=%s and dropped older queued req_id=%d",
+                    request.req_id,
+                    self._request_queue.active_req_id,
+                    dropped.req_id,
+                )
                 self._emit_empty_response(dropped.req_id)
+            else:
+                logger.info(
+                    "Queued AI completion req_id=%d behind active req_id=%s",
+                    request.req_id,
+                    self._request_queue.active_req_id,
+                )
             return
 
         self._dispatch_request(request)
@@ -1099,15 +1457,21 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         text = state.text if state is not None else ""
 
         if not text:
-            logger.debug("No file content for %s, skipping completion", filename)
+            logger.info(
+                "Skipping AI completion req_id=%d for %s because no tracked file content is available",
+                req_id,
+                filename,
+            )
             self._emit_empty_response(req_id)
             return
 
         if state is None or state.version != target.version:
-            logger.debug(
-                "Skipping completion req_id=%d for %s because the document version changed",
+            logger.info(
+                "Skipping AI completion req_id=%d for %s because the document version changed (tracked=%s target=%s)",
                 req_id,
                 filename,
+                getattr(state, "version", None),
+                target.version,
             )
             self._emit_empty_response(req_id)
             return
@@ -1127,11 +1491,14 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         skip_reason = self._should_skip_completion(req, prefix, suffix)
         if skip_reason:
             self._increment_metric("skipped")
-            logger.debug(
-                "Skipping completion req_id=%d for %s: %s",
+            logger.info(
+                "Skipping AI completion req_id=%d for %s: %s (prefix_chars=%d suffix_chars=%d current_line=%r)",
                 req_id,
                 filename,
                 skip_reason,
+                len(prefix),
+                len(suffix),
+                _summarize_text_for_log(prefix.rsplit('\n', 1)[-1]),
             )
             self._emit_empty_response(req_id)
             self._set_ready_status()
@@ -1154,13 +1521,17 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
         # Build model options from config
         model = self.get_conf("completion_model")
+        backend_settings = self._resolve_completion_backend_settings()
         options = {
             "temperature": self.get_conf("completion_temperature"),
             "num_predict": self.get_conf("completion_max_tokens"),
             "_single_line": not allow_multiline,
+            "_provider_kind": backend_settings["provider_kind"],
+            "_provider_endpoint": backend_settings["endpoint"],
+            "_provider_api_key": backend_settings["api_key"],
         }
         cycle_key = _CompletionCycleKey(
-            host=self.get_conf("ollama_host"),
+            host=backend_settings["cache_id"],
             model=model,
             temperature=float(options["temperature"]),
             num_predict=int(options["num_predict"]),
@@ -1178,7 +1549,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             avoid_texts=avoid_texts,
         )
         cache_key = _CompletionCacheKey(
-            host=self.get_conf("ollama_host"),
+            host=backend_settings["cache_id"],
             model=model,
             temperature=float(options["temperature"]),
             num_predict=int(options["num_predict"]),
@@ -1198,8 +1569,8 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         cached_completion = self._completion_cache.get(cache_key)
         if cached_completion is not _CompletionCache._MISSING:
             self._increment_metric("cache_hits")
-            logger.debug(
-                "Cache hit for completion req_id=%d on %s",
+            logger.info(
+                "AI completion cache hit for req_id=%d on %s",
                 req_id,
                 filename,
             )
@@ -1219,18 +1590,19 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._increment_metric("dispatched")
         self._update_status("AI: generating")
 
-        logger.debug(
-            "Dispatching completion req_id=%d, model=%s, version=%d, line=%d, column=%d, single_line=%s, prefix=%d chars, suffix=%d chars, related_snippets=%d, alternative=%s",
+        logger.info(
+            "Dispatching AI completion req_id=%d target=%s provider=%s endpoint=%s model=%s single_line=%s prefix_chars=%d suffix_chars=%d related_snippets=%d alternative=%s avoid_texts=%d",
             req_id,
+            _summarize_target_for_log(target),
+            backend_settings["provider_kind"],
+            backend_settings["endpoint"],
             model,
-            target.version,
-            target.line,
-            target.column,
             not allow_multiline,
             len(prompt_prefix),
             len(suffix),
             len(related_snippets),
             request.alternative,
+            len(avoid_texts),
         )
 
         # Dispatch to the worker thread via signal
@@ -1265,7 +1637,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             req_id: The request that failed.
             error_msg: Human-readable error description.
         """
-        logger.warning("AI completion error: %s", error_msg)
+        logger.warning("AI completion error for req_id=%d: %s", req_id, error_msg)
         self._increment_metric("errors")
         self._emit_empty_response(req_id)
         restore_ready = True
@@ -1314,6 +1686,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
     def _emit_empty_response(self, req_id):
         """Emit an empty completion response for a request id."""
+        logger.debug("Emitting empty AI completion response for req_id=%d", req_id)
         self.sig_response_ready.emit(
             self.COMPLETION_PROVIDER_NAME,
             req_id,
@@ -1325,10 +1698,19 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._request_queue.finish_active(req_id)
         next_request = self._request_queue.pop_queued()
         if next_request is not None and self.get_conf("completions_enabled"):
+            logger.info(
+                "Finishing AI completion req_id=%d and dispatching queued req_id=%d",
+                req_id,
+                next_request.req_id,
+            )
             self._dispatch_request(next_request)
             return
 
         if restore_ready and self.get_conf("completions_enabled"):
+            logger.info(
+                "Finishing AI completion req_id=%d with no queued follow-up",
+                req_id,
+            )
             self._set_ready_status()
 
     @staticmethod
@@ -1343,14 +1725,83 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
     # --- Config change handlers ---
 
-    @on_conf_change(option="ollama_host")
-    def on_host_changed(self, value):
-        """Update the worker's Ollama server URL when config changes."""
-        self._worker.update_host(value)
+    def _resolve_completion_backend_settings(self):
+        """Return the provider-aware backend settings for completions."""
+        return resolve_completion_backend_settings(
+            chat_provider=self.get_conf(
+                "chat_provider",
+                default=PROVIDER_KIND_OLLAMA,
+            ),
+            chat_provider_profile_id=self.get_conf(
+                "chat_provider_profile_id",
+                default="",
+            ),
+            provider_profiles=self.get_conf("provider_profiles", default="[]"),
+            ollama_host=self.get_conf(
+                "ollama_host",
+                default="http://localhost:11434",
+            ),
+            openai_compatible_base_url=self.get_conf(
+                "openai_compatible_base_url",
+                default="",
+            ),
+            openai_compatible_api_key=self.get_conf(
+                "openai_compatible_api_key",
+                default="",
+            ),
+        )
+
+    def _on_completion_backend_changed(self):
+        """Refresh worker-owned completion backend settings and caches."""
+        backend_settings = self._resolve_completion_backend_settings()
+        logger.info(
+            "Refreshing AI completion backend: provider=%s endpoint=%s profile_id=%s",
+            backend_settings.get("provider_kind", "-"),
+            backend_settings.get("endpoint", ""),
+            backend_settings.get("profile_id", ""),
+        )
+        self._worker.update_backend_settings(backend_settings)
         self._completion_cache.clear()
         self._candidate_store.clear()
+        self._shown_candidates.clear()
         if self.get_conf("completions_enabled"):
             self._set_ready_status()
+
+    @on_conf_change(option="ollama_host")
+    def on_host_changed(self, value):
+        """Update completion backend settings when the Ollama host changes."""
+        del value
+        self._on_completion_backend_changed()
+
+    @on_conf_change(option="chat_provider")
+    def on_chat_provider_changed(self, value):
+        """Refresh completions when the active provider kind changes."""
+        del value
+        self._on_completion_backend_changed()
+
+    @on_conf_change(option="chat_provider_profile_id")
+    def on_chat_provider_profile_id_changed(self, value):
+        """Refresh completions when the selected provider profile changes."""
+        del value
+        self._on_completion_backend_changed()
+
+    @on_conf_change(option="provider_profiles")
+    def on_provider_profiles_changed(self, value):
+        """Refresh completions when provider profiles are edited."""
+        del value
+        self._on_completion_backend_changed()
+
+    @on_conf_change(option="openai_compatible_base_url")
+    def on_openai_compatible_base_url_changed(self, value):
+        """Refresh completions when the legacy compatible endpoint changes."""
+        del value
+        self._on_completion_backend_changed()
+
+    @on_conf_change(option="openai_compatible_api_key")
+    def on_openai_compatible_api_key_changed(self, value):
+        """Refresh completions when the compatible API key changes."""
+        del value
+        self._on_completion_backend_changed()
 
     @on_conf_change(option="completion_model")
     def on_completion_model_changed(self, _value):
@@ -1471,7 +1922,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         if event_name in {"dismissed", "accepted"} and filename:
             self._shown_candidates.pop(filename, None)
 
-        logger.debug(
+        logger.info(
             "Ghost lifecycle event: event=%s method=%s reason=%s payload=%s",
             event_name,
             method or "-",
@@ -1498,6 +1949,11 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         cycle_key = self._req_cycle_keys.pop(req_id, None)
         related_terms = self._req_related_terms.pop(req_id, ())
         if target is None:
+            logger.info(
+                "Dropping AI completion result req_id=%d from %s because request metadata is gone",
+                req_id,
+                source,
+            )
             self._finish_request(req_id)
             return
 
@@ -1506,8 +1962,8 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
         if not self._is_target_current(target):
             self._increment_metric("stale_discarded")
-            logger.debug(
-                "Discarded stale completion req_id=%d for %s from %s",
+            logger.info(
+                "Discarded stale AI completion req_id=%d for %s from %s",
                 req_id,
                 filename,
                 source,
@@ -1555,11 +2011,13 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
                 final_text,
                 target.to_payload(),
             )
-            logger.debug(
-                "Ghost text ready for %s from %s: %d chars",
+            logger.info(
+                "Delivering ghost text for %s from %s: %d chars score=%d preview=%r",
                 filename,
                 source,
                 len(final_text),
+                candidate_score,
+                _summarize_text_for_log(final_text, max_chars=100),
             )
         elif filter_reason:
             metric_name = {
@@ -1569,12 +2027,19 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             }.get(filter_reason)
             if metric_name:
                 self._increment_metric(metric_name)
-            logger.debug(
-                "Filtered completion req_id=%d for %s from %s: %s",
+            logger.info(
+                "Filtered AI completion req_id=%d for %s from %s: %s",
                 req_id,
                 filename,
                 source,
                 filter_reason,
+            )
+        else:
+            logger.info(
+                "AI completion req_id=%d for %s from %s produced no displayable text",
+                req_id,
+                filename,
+                source,
             )
 
         self._finish_request(req_id)
@@ -1592,8 +2057,10 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
     def _build_status_payload(self, short_text):
         """Build the status-bar payload with a metrics-rich tooltip."""
         metrics = self.get_metrics_snapshot()
+        backend_settings = self._resolve_completion_backend_settings()
+        provider_label = backend_settings.get("provider_label", "AI")
         tooltip_lines = [
-            "AI Code Completion status (Ollama)",
+            f"AI Code Completion status ({provider_label})",
             "",
             f"Requests: {metrics['requests_received']}",
             (

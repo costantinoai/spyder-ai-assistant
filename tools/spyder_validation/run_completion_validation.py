@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import time
 import traceback
 from pathlib import Path
 
 from qtpy.QtCore import QEvent, Qt
 from qtpy.QtGui import QKeyEvent
+from qtpy.QtTest import QTest
 from qtpy.QtWidgets import QApplication
 
 from spyder_ai_assistant.backend.client import OllamaClient
@@ -103,6 +106,60 @@ def send_key(editor, key, text="", modifiers=Qt.NoModifier):
         QKeyEvent(QEvent.KeyRelease, key, modifiers, text),
     )
     QApplication.instance().processEvents()
+
+
+def trigger_manual_shortcut(editor):
+    """Trigger Ctrl+Shift+Space through the best available UI path."""
+    app = QApplication.instance()
+    target = editor
+    viewport = getattr(editor, "viewport", None)
+    if callable(viewport):
+        viewport = viewport()
+    if viewport is not None:
+        target = viewport
+
+    target.setFocus()
+    app.processEvents()
+
+    if os.environ.get("SPYDER_VALIDATION_USE_XDOTOOL") == "1":
+        window = editor.window()
+        window_id = str(int(window.winId()))
+        center = target.mapToGlobal(target.rect().center())
+        subprocess.run(
+            ["xdotool", "windowactivate", "--sync", window_id],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "xdotool",
+                "mousemove",
+                "--sync",
+                str(center.x()),
+                str(center.y()),
+            ],
+            check=True,
+        )
+        subprocess.run(["xdotool", "click", "1"], check=True)
+        subprocess.run(
+            [
+                "xdotool",
+                "key",
+                "--window",
+                window_id,
+                "ctrl+shift+space",
+            ],
+            check=True,
+        )
+        app.processEvents()
+        return "xdotool"
+
+    QTest.keyClick(
+        target,
+        Qt.Key_Space,
+        Qt.ControlModifier | Qt.ShiftModifier,
+    )
+    app.processEvents()
+    return "qtest"
 
 
 def build_key_event(key, text="", modifiers=Qt.NoModifier):
@@ -224,6 +281,72 @@ def run_fake_completion_checks(window, results):
     OllamaClient.generate_completion = fake_generate_completion
 
     checks = {}
+
+    set_editor_text(editor, provider, str(TEST_FILE), "result = a + \n")
+    move_cursor_after(editor, "result = a + ")
+    ensure_clean_ghost(manager)
+    checks["manual_shortcut_setup"] = {
+        "manager_has_manual_requester": (
+            getattr(manager, "_manual_completion_requester", None) is not None
+        ),
+        "plugin_has_provider_instance": (
+            ai_plugin._get_completion_provider_instance() is not None
+        ),
+    }
+
+    clear_fake_calls()
+    editor.completion_args = None
+    keypress_method = trigger_manual_shortcut(editor)
+    wait_for(lambda: manager.has_suggestion(), timeout_ms=2500)
+    checks["manual_shortcut_keypress"] = {
+        "method": keypress_method,
+        "ghost_visible": manager.has_suggestion(),
+        "ghost_text": manager._ghost_text,
+        "fake_call_count": len(FAKE_CALLS),
+        "completion_args_untouched": editor.completion_args is None,
+        "popup_visible": bool(
+            getattr(editor.completion_widget, "isVisible", lambda: False)()
+        ),
+    }
+    ensure_clean_ghost(manager)
+
+    clear_fake_calls()
+    editor.completion_args = None
+    manager.request_completion()
+    wait_for(lambda: manager.has_suggestion(), timeout_ms=2500)
+    checks["manual_shortcut_manager_call"] = {
+        "ghost_visible": manager.has_suggestion(),
+        "ghost_text": manager._ghost_text,
+        "fake_call_count": len(FAKE_CALLS),
+        "completion_args_untouched": editor.completion_args is None,
+    }
+    ensure_clean_ghost(manager)
+
+    clear_fake_calls()
+    editor.completion_args = None
+    shortcut = getattr(editor, "_ai_chat_completion_shortcut")
+    shortcut.activated.emit()
+    wait_for(lambda: manager.has_suggestion(), timeout_ms=2500)
+    checks["manual_shortcut_signal_emit"] = {
+        "ghost_visible": manager.has_suggestion(),
+        "ghost_text": manager._ghost_text,
+        "fake_call_count": len(FAKE_CALLS),
+        "completion_args_untouched": editor.completion_args is None,
+    }
+    ensure_clean_ghost(manager)
+
+    clear_fake_calls()
+    editor.completion_args = None
+    direct_result = ai_plugin._request_manual_ai_completion(editor)
+    wait_for(lambda: manager.has_suggestion(), timeout_ms=2500)
+    checks["manual_shortcut_plugin_dispatch"] = {
+        "dispatch_result": bool(direct_result),
+        "ghost_visible": manager.has_suggestion(),
+        "ghost_text": manager._ghost_text,
+        "fake_call_count": len(FAKE_CALLS),
+        "completion_args_untouched": editor.completion_args is None,
+    }
+    ensure_clean_ghost(manager)
 
     set_editor_text(editor, provider, str(TEST_FILE), "abc")
     move_cursor_after(editor, "abc")

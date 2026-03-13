@@ -78,7 +78,7 @@ class AIChatConfigPage(PluginConfigPage):
             "Completion model:",
             "completion_model",
             default="qooba/qwen3-coder-30b-a3b-instruct:q3_k_m",
-            tip="Ollama model name for code completions",
+            tip="Model name for code completions on the active completion provider",
             alignment=Qt.Horizontal,
         )
         models_layout = QVBoxLayout()

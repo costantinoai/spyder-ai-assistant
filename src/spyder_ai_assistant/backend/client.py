@@ -1,18 +1,62 @@
-"""Thin, stateless wrapper around the ollama Python package.
+"""Thin, stateless wrappers around completion backends.
 
-This module provides the OllamaClient class, which handles all direct
-communication with the Ollama server. It has no Qt dependencies and can
-be used independently of the Spyder plugin infrastructure.
+This module provides blocking client helpers for inline completions.
+They have no Qt dependencies and must only be called from a worker thread.
 
-All methods are synchronous (blocking) and should only be called from
-a background thread — never from the Qt main thread.
+All methods are synchronous (blocking).
 """
 
 import logging
 
+import httpx
 from ollama import Client
 
 logger = logging.getLogger(__name__)
+
+
+def build_completion_system_prompt(system=None):
+    """Return the shared system prompt for completion backends."""
+    return system or (
+        "You are a code completion engine inside an IDE. "
+        "Fill in the code between the prefix (before cursor) and "
+        "suffix (after cursor). "
+        "RULES: "
+        "1) Output ONLY the new code to insert at the cursor position. "
+        "2) NEVER repeat code from the prefix (before cursor). "
+        "3) NEVER repeat code from the suffix (after cursor). "
+        "4) The inserted code must integrate seamlessly — it will be "
+        "placed between the prefix and suffix. "
+        "5) NEVER use markdown formatting — no ```, no fences. "
+        "6) Output raw code only, no explanations. "
+        "7) Write complete, well-structured code. Include docstrings, "
+        "comments, and full function bodies when appropriate."
+    )
+
+
+def build_completion_stop_sequences(single_line=False):
+    """Return default stop sequences for inline completions."""
+    if single_line:
+        return ["\n"]
+    return [
+        "\n\n\n",
+        "\nclass ",
+        "\ndef ",
+        "\n# %%",
+    ]
+
+
+def build_completion_user_prompt(prefix, suffix=""):
+    """Render one provider-agnostic prefix/suffix completion prompt."""
+    return (
+        "[PREFIX]\n"
+        f"{prefix or ''}\n"
+        "[/PREFIX]\n"
+        "[SUFFIX]\n"
+        f"{suffix or ''}\n"
+        "[/SUFFIX]\n"
+        "Return only the code that should be inserted between PREFIX and "
+        "SUFFIX. Do not wrap the answer in markdown."
+    )
 
 
 class OllamaClient:
@@ -171,36 +215,25 @@ class OllamaClient:
         """
         from ollama import ResponseError
 
-        default_system = system or (
-            "You are a code completion engine inside an IDE. "
-            "Fill in the code between the prefix (before cursor) and "
-            "suffix (after cursor). "
-            "RULES: "
-            "1) Output ONLY the new code to insert at the cursor position. "
-            "2) NEVER repeat code from the prefix (before cursor). "
-            "3) NEVER repeat code from the suffix (after cursor). "
-            "4) The inserted code must integrate seamlessly — it will be "
-            "placed between the prefix and suffix. "
-            "5) NEVER use markdown formatting — no ```, no fences. "
-            "6) Output raw code only, no explanations. "
-            "7) Write complete, well-structured code. Include docstrings, "
-            "comments, and full function bodies when appropriate."
-        )
+        default_system = build_completion_system_prompt(system=system)
         merged_options = dict(options or {})
 
         # Add stop sequences to prevent the model from generating too much.
         # Stop on patterns that indicate a new top-level definition or
         # excessive blank lines (signals the function/block is complete).
         if "stop" not in merged_options:
-            if single_line:
-                merged_options["stop"] = ["\n"]
-            else:
-                merged_options["stop"] = [
-                    "\n\n\n",      # Triple newline = end of logical block
-                    "\nclass ",    # New class definition
-                    "\ndef ",      # New top-level function
-                    "\n# %%",      # Spyder cell separator
-                ]
+            merged_options["stop"] = build_completion_stop_sequences(
+                single_line=single_line
+            )
+        logger.info(
+            "Ollama completion request: host=%s model=%s single_line=%s prefix_chars=%d suffix_chars=%d stop=%s",
+            self._host,
+            model,
+            single_line,
+            len(prefix or ""),
+            len(suffix or ""),
+            merged_options.get("stop"),
+        )
 
         # Try FIM (with suffix) first, unless we already know this model
         # doesn't support it. Fall back to prefix-only on "does not support
@@ -216,6 +249,11 @@ class OllamaClient:
                     system=default_system,
                     options=merged_options,
                     stream=False,
+                )
+                logger.info(
+                    "Ollama completion response received via FIM: model=%s chars=%d",
+                    model,
+                    len(getattr(response, "response", "") or ""),
                 )
                 return response.response
             except ResponseError as e:
@@ -237,4 +275,93 @@ class OllamaClient:
             options=merged_options,
             stream=False,
         )
+        logger.info(
+            "Ollama completion response received via prefix-only mode: model=%s chars=%d",
+            model,
+            len(getattr(response, "response", "") or ""),
+        )
         return response.response
+
+
+class OpenAICompatibleCompletionClient:
+    """Blocking OpenAI-compatible client for inline completions."""
+
+    def __init__(self, base_url, api_key=""):
+        self._base_url = str(base_url or "").rstrip("/")
+        self._api_key = str(api_key or "")
+        headers = {}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        self._client = httpx.Client(
+            base_url=f"{self._base_url}/v1",
+            headers=headers,
+            timeout=30.0,
+        )
+
+    def generate_completion(
+        self,
+        model,
+        prefix,
+        suffix="",
+        system=None,
+        options=None,
+        single_line=False,
+    ):
+        """Generate one completion through `/v1/chat/completions`."""
+        merged_options = dict(options or {})
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": build_completion_system_prompt(system=system),
+                },
+                {
+                    "role": "user",
+                    "content": build_completion_user_prompt(prefix, suffix),
+                },
+            ],
+            "stream": False,
+        }
+        if "temperature" in merged_options:
+            payload["temperature"] = merged_options["temperature"]
+        if "num_predict" in merged_options:
+            payload["max_tokens"] = merged_options["num_predict"]
+
+        stop = merged_options.get("stop")
+        if not stop:
+            stop = build_completion_stop_sequences(single_line=single_line)
+        if stop:
+            payload["stop"] = list(stop)
+        logger.info(
+            "OpenAI-compatible completion request: base_url=%s model=%s single_line=%s prefix_chars=%d suffix_chars=%d stop=%s",
+            self._base_url,
+            model,
+            single_line,
+            len(prefix or ""),
+            len(suffix or ""),
+            payload.get("stop"),
+        )
+
+        response = self._client.post("/chat/completions", json=payload)
+        response.raise_for_status()
+        data = response.json()
+        choice = (data.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        content = message.get("content")
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text") or item.get("content") or ""
+                    if text:
+                        parts.append(str(text))
+            content = "".join(parts)
+        if not content:
+            content = choice.get("text", "") or data.get("text", "") or ""
+        logger.info(
+            "OpenAI-compatible completion response received: model=%s chars=%d",
+            model,
+            len(str(content or "")),
+        )
+        return str(content or "")

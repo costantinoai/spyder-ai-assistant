@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from spyder_ai_assistant.completion_provider import (
+    AIChatCompletionProvider,
+    CompletionWorker,
     _CompletionCache,
     _CompletionCacheKey,
     _CompletionCandidateStore,
@@ -19,7 +21,9 @@ from spyder_ai_assistant.completion_provider import (
     _looks_repetitive_completion,
     _should_allow_multiline_completion,
     _trim_suffix_overlap,
+    resolve_completion_backend_settings,
 )
+from spyder.plugins.completion.api import CompletionRequestTypes
 
 
 def _queued_request(req_id, filename="example.py"):
@@ -144,7 +148,9 @@ def test_multiline_completion_only_allowed_in_block_like_contexts():
     assert _should_allow_multiline_completion("def compute(x):\n    ")
     assert _should_allow_multiline_completion("result = (\n    ")
     assert _should_allow_multiline_completion("value = compute(")
+    assert _should_allow_multiline_completion("def compute(x):\n    value = 1\n    ")
     assert not _should_allow_multiline_completion("answer = ")
+    assert not _should_allow_multiline_completion("value = 1\n")
 
 
 def test_completion_already_in_document_detects_existing_suffix():
@@ -156,6 +162,29 @@ def test_tracked_document_state_defaults_to_version_one():
     state = _TrackedDocumentState(text="print('ok')")
 
     assert state.version == 1
+
+
+def test_did_change_preserves_version_when_text_is_unchanged():
+    provider = AIChatCompletionProvider.__new__(AIChatCompletionProvider)
+    provider._document_states = {}
+    provider._latest_target_by_filename = {}
+    provider._shown_candidates = {}
+    provider._handle_completion_request = lambda req, req_id: None
+
+    provider.send_request(
+        "python",
+        CompletionRequestTypes.DOCUMENT_DID_OPEN,
+        {"file": "/tmp/example.py", "text": "value = 1\n"},
+        1,
+    )
+    provider.send_request(
+        "python",
+        CompletionRequestTypes.DOCUMENT_DID_CHANGE,
+        {"file": "/tmp/example.py", "text": "value = 1\n"},
+        2,
+    )
+
+    assert provider._document_states["/tmp/example.py"].version == 1
 
 
 def test_trim_suffix_overlap_removes_only_the_shared_tail():
@@ -240,3 +269,88 @@ def test_completion_candidate_store_cycles_scored_alternatives():
     assert store.texts(key) == ["other_value", "backup_value"]
     assert store.next_after(key, "other_value") == "backup_value"
     assert store.next_after(key, "backup_value") == "other_value"
+
+
+def test_completion_worker_lazily_builds_client_after_backend_refresh():
+    worker = CompletionWorker()
+    received = []
+    errors = []
+
+    class _FakeClient:
+        def generate_completion(
+            self,
+            model,
+            prefix,
+            suffix="",
+            options=None,
+            single_line=False,
+        ):
+            del model, prefix, suffix, options, single_line
+            return "helper_value"
+
+    worker._client = None
+    worker._client_signature = None
+    worker._get_client = lambda provider_kind, endpoint, api_key: _FakeClient()
+    worker.sig_completion_ready.connect(
+        lambda req_id, text, suffix: received.append((req_id, text, suffix))
+    )
+    worker.sig_error.connect(lambda req_id, message: errors.append((req_id, message)))
+
+    worker._handle_completion(
+        7,
+        "fake-model",
+        "result = ",
+        "",
+        {"_provider_kind": "ollama"},
+    )
+
+    assert errors == []
+    assert received == [(7, "helper_value", "")]
+
+
+def test_resolve_completion_backend_settings_defaults_to_ollama():
+    settings = resolve_completion_backend_settings(
+        chat_provider="ollama",
+        ollama_host="http://localhost:11434",
+    )
+
+    assert settings["provider_kind"] == "ollama"
+    assert settings["endpoint"] == "http://localhost:11434"
+    assert settings["api_key"] == ""
+    assert settings["cache_id"] == "ollama:http://localhost:11434"
+
+
+def test_resolve_completion_backend_settings_uses_selected_profile():
+    settings = resolve_completion_backend_settings(
+        chat_provider="openai_compatible",
+        chat_provider_profile_id="research",
+        provider_profiles=[
+            {
+                "profile_id": "research",
+                "label": "Research API",
+                "provider_kind": "openai_compatible",
+                "base_url": "http://127.0.0.1:9000",
+                "api_key": "secret",
+                "enabled": True,
+            }
+        ],
+        ollama_host="http://localhost:11434",
+    )
+
+    assert settings["provider_kind"] == "openai_compatible"
+    assert settings["provider_label"] == "Research API"
+    assert settings["endpoint"] == "http://127.0.0.1:9000"
+    assert settings["api_key"] == "secret"
+    assert settings["cache_id"] == "openai_compatible:research"
+
+
+def test_resolve_completion_backend_settings_falls_back_without_profile():
+    settings = resolve_completion_backend_settings(
+        chat_provider="openai_compatible",
+        chat_provider_profile_id="missing",
+        provider_profiles=[],
+        ollama_host="http://localhost:11434",
+    )
+
+    assert settings["provider_kind"] == "ollama"
+    assert settings["endpoint"] == "http://localhost:11434"

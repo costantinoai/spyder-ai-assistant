@@ -11,6 +11,9 @@ from spyder_ai_assistant.backend.chat_providers import (
     OpenAICompatibleChatProvider,
     OllamaChatProvider,
 )
+from spyder_ai_assistant.backend.client import (
+    OpenAICompatibleCompletionClient,
+)
 
 
 class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
@@ -44,6 +47,25 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", "0"))
         raw_payload = self.rfile.read(content_length or 0)
         self.server.last_chat_payload = json.loads(raw_payload.decode("utf-8"))
+
+        if not self.server.last_chat_payload.get("stream", False):
+            payload = {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "result = helper(values)\nreturn result",
+                        }
+                    }
+                ]
+            }
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+            return
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -136,6 +158,29 @@ def test_openai_compatible_provider_streams_response_and_metrics():
     assert server.httpd.last_chat_payload["model"] == "fake-chat-1"
     assert server.httpd.last_chat_payload["temperature"] == 0.3
     assert server.httpd.last_chat_payload["max_tokens"] == 48
+
+
+def test_openai_compatible_completion_client_posts_non_stream_request():
+    with _OpenAICompatibleServer() as server:
+        client = OpenAICompatibleCompletionClient(server.base_url, api_key="secret-token")
+
+        result = client.generate_completion(
+            model="fake-chat-1",
+            prefix="def compute(values):\n    result = ",
+            suffix="\n    return result\n",
+            options={"temperature": 0.2, "num_predict": 96},
+            single_line=False,
+        )
+
+    assert result == "result = helper(values)\nreturn result"
+    assert server.httpd.seen_auth == "Bearer secret-token"
+    assert server.httpd.last_chat_payload["stream"] is False
+    assert server.httpd.last_chat_payload["model"] == "fake-chat-1"
+    assert server.httpd.last_chat_payload["temperature"] == 0.2
+    assert server.httpd.last_chat_payload["max_tokens"] == 96
+    assert server.httpd.last_chat_payload["messages"][0]["role"] == "system"
+    assert server.httpd.last_chat_payload["messages"][1]["role"] == "user"
+    assert server.httpd.last_chat_payload["stop"] == ["\n\n\n", "\nclass ", "\ndef ", "\n# %%"]
 
 
 def test_chat_provider_registry_aggregates_models_from_multiple_providers(monkeypatch):
