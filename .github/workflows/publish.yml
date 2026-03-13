@@ -39,8 +39,8 @@ jobs:
       - name: Install build tools
         run: pip install build
 
-      - name: Build clean sdist and wheel
-        run: python -m tools.release.build_dist
+      - name: Build sdist and wheel
+        run: python -m build
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v6
