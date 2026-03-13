@@ -1083,6 +1083,36 @@ class ChatWidget(PluginMainWidget):
             if self.get_conf("chat_model", default="") != self._current_model:
                 self.set_conf("chat_model", self._current_model)
 
+    # --- Appearance config keys that map to ChatDisplay.update_appearance ---
+    _APPEARANCE_KEYS = (
+        "chat_font_family", "chat_font_size", "chat_line_height",
+        "code_font_family", "code_font_size",
+        "pygments_style_dark", "pygments_style_light",
+        "bubble_padding", "bubble_border_radius", "bubble_spacing",
+        "theme_preset", "theme_color_overrides",
+    )
+
+    def _apply_current_appearance(self, display):
+        """Apply all current appearance config values to one ChatDisplay."""
+        kwargs = {}
+        for key in self._APPEARANCE_KEYS:
+            try:
+                kwargs[key] = self.get_conf(key)
+            except Exception:
+                pass  # key not in config yet — use display default
+        if kwargs:
+            display.update_appearance(**kwargs)
+
+    def update_all_display_appearance(self, **kwargs):
+        """Push appearance settings to all active ChatDisplay widgets.
+
+        Called by the plugin's @on_conf_change handlers when the user
+        changes appearance settings (font, code font, bubble geometry, etc.).
+        Iterates all chat sessions and calls update_appearance on each display.
+        """
+        for session in self._sessions._by_widget.values():
+            session.display.update_appearance(**kwargs)
+
     def sync_model_selection_from_conf(self):
         """Apply the configured provider/model preference without relisting."""
         if self.model_combo.count() <= 0:
@@ -1196,6 +1226,53 @@ class ChatWidget(PluginMainWidget):
             "prompt_fix": self.get_conf("prompt_fix", default=""),
             "prompt_docstring": self.get_conf("prompt_docstring", default=""),
             "prompt_ask": self.get_conf("prompt_ask", default=""),
+            # Appearance
+            "chat_font_family": self.get_conf(
+                "chat_font_family", default="sans-serif",
+            ),
+            "chat_font_size": int(
+                self.get_conf("chat_font_size", default=10) or 10
+            ),
+            "chat_line_height": float(
+                self.get_conf("chat_line_height", default=1.5) or 1.5
+            ),
+            "code_font_family": self.get_conf(
+                "code_font_family", default="Courier New",
+            ),
+            "code_font_size": int(
+                self.get_conf("code_font_size", default=9) or 9
+            ),
+            "pygments_style_dark": self.get_conf(
+                "pygments_style_dark", default="monokai",
+            ),
+            "pygments_style_light": self.get_conf(
+                "pygments_style_light", default="default",
+            ),
+            "bubble_padding": int(
+                self.get_conf("bubble_padding", default=12) or 12
+            ),
+            "bubble_border_radius": int(
+                self.get_conf("bubble_border_radius", default=8) or 8
+            ),
+            "bubble_spacing": int(
+                self.get_conf("bubble_spacing", default=4) or 4
+            ),
+            # Theme
+            "theme_preset": self.get_conf(
+                "theme_preset", default="default",
+            ),
+            "theme_color_overrides": self.get_conf(
+                "theme_color_overrides", default="{}",
+            ),
+            # Behavior
+            "idle_completion_delay_ms": int(
+                self.get_conf("idle_completion_delay_ms", default=1000) or 1000
+            ),
+            "post_accept_completion_delay_ms": int(
+                self.get_conf(
+                    "post_accept_completion_delay_ms", default=75,
+                ) or 75
+            ),
         }
 
     def _create_assistant_settings_dialog(self):
@@ -1612,6 +1689,10 @@ class ChatWidget(PluginMainWidget):
         session.display.sig_apply_code_requested.connect(
             self.sig_apply_code
         )
+
+        # Apply current appearance config to the new display so it
+        # matches the user's settings immediately.
+        self._apply_current_appearance(session.display)
 
         idx = self._tab_widget.addTab(session.display, session.title)
         self._sessions.add(session)

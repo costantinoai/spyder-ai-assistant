@@ -187,6 +187,23 @@ class AIChatPlugin(SpyderDockablePlugin):
             "prompt_ask":
                 "Regarding this code from {filename}:\n\n"
                 "```\n{code}\n```\n\n",
+            # Appearance: chat display font, code font, bubble geometry
+            "chat_font_family": "sans-serif",
+            "chat_font_size": 10,
+            "chat_line_height": 1.5,
+            "code_font_family": "Courier New",
+            "code_font_size": 9,
+            "pygments_style_dark": "monokai",
+            "pygments_style_light": "default",
+            "bubble_padding": 12,
+            "bubble_border_radius": 8,
+            "bubble_spacing": 4,
+            # Theme: preset name and per-color overrides (JSON blob)
+            "theme_preset": "default",
+            "theme_color_overrides": "{}",
+            # Behavior: ghost text timing
+            "idle_completion_delay_ms": 1000,
+            "post_accept_completion_delay_ms": 75,
         }),
     ]
     CONF_VERSION = "0.1.0"
@@ -513,6 +530,12 @@ class AIChatPlugin(SpyderDockablePlugin):
                 manual_completion_requester=partial(
                     self._request_manual_ai_completion,
                     codeeditor,
+                ),
+                idle_completion_delay_ms=self.get_conf(
+                    "idle_completion_delay_ms", default=1000,
+                ),
+                post_accept_completion_delay_ms=self.get_conf(
+                    "post_accept_completion_delay_ms", default=75,
                 ),
             )
             self._ghost_managers[editor_id] = manager
@@ -1495,6 +1518,93 @@ class AIChatPlugin(SpyderDockablePlugin):
         """Keep completion debounce aligned with the live provider."""
         del value
         self._sync_completion_provider_settings()
+
+    # --- Appearance config change handlers ---
+    # These propagate appearance settings to all active ChatDisplay widgets
+    # so the user sees changes immediately without restarting.
+
+    @on_conf_change(option="chat_font_family")
+    def on_chat_font_family_changed(self, value):
+        """Propagate chat font family change to all chat displays."""
+        self._propagate_appearance_setting("chat_font_family", value)
+
+    @on_conf_change(option="chat_font_size")
+    def on_chat_font_size_changed(self, value):
+        """Propagate chat font size change to all chat displays."""
+        self._propagate_appearance_setting("chat_font_size", value)
+
+    @on_conf_change(option="chat_line_height")
+    def on_chat_line_height_changed(self, value):
+        """Propagate chat line height change to all chat displays."""
+        self._propagate_appearance_setting("chat_line_height", value)
+
+    @on_conf_change(option="code_font_family")
+    def on_code_font_family_changed(self, value):
+        """Propagate code font family change to all chat displays."""
+        self._propagate_appearance_setting("code_font_family", value)
+
+    @on_conf_change(option="code_font_size")
+    def on_code_font_size_changed(self, value):
+        """Propagate code font size change to all chat displays."""
+        self._propagate_appearance_setting("code_font_size", value)
+
+    @on_conf_change(option="pygments_style_dark")
+    def on_pygments_dark_changed(self, value):
+        """Propagate dark Pygments style change to all chat displays."""
+        self._propagate_appearance_setting("pygments_style_dark", value)
+
+    @on_conf_change(option="pygments_style_light")
+    def on_pygments_light_changed(self, value):
+        """Propagate light Pygments style change to all chat displays."""
+        self._propagate_appearance_setting("pygments_style_light", value)
+
+    @on_conf_change(option="bubble_padding")
+    def on_bubble_padding_changed(self, value):
+        """Propagate bubble padding change to all chat displays."""
+        self._propagate_appearance_setting("bubble_padding", value)
+
+    @on_conf_change(option="bubble_border_radius")
+    def on_bubble_radius_changed(self, value):
+        """Propagate bubble border radius change to all chat displays."""
+        self._propagate_appearance_setting("bubble_border_radius", value)
+
+    @on_conf_change(option="bubble_spacing")
+    def on_bubble_spacing_changed(self, value):
+        """Propagate bubble spacing change to all chat displays."""
+        self._propagate_appearance_setting("bubble_spacing", value)
+
+    @on_conf_change(option="theme_preset")
+    def on_theme_preset_changed(self, value):
+        """Propagate theme preset change to all chat displays."""
+        self._propagate_appearance_setting("theme_preset", value)
+
+    @on_conf_change(option="theme_color_overrides")
+    def on_theme_overrides_changed(self, value):
+        """Propagate theme color overrides to all chat displays."""
+        self._propagate_appearance_setting("theme_color_overrides", value)
+
+    def _propagate_appearance_setting(self, key, value):
+        """Push a single appearance setting to all active chat displays."""
+        try:
+            widget = self.get_widget()
+        except Exception:
+            return
+        widget.update_all_display_appearance(**{key: value})
+
+    # --- Behavior config change handlers ---
+    # These propagate ghost text timing to all editor ghost text managers.
+
+    @on_conf_change(option="idle_completion_delay_ms")
+    def on_idle_delay_changed(self, value):
+        """Propagate idle completion delay to all ghost text managers."""
+        for manager in self._ghost_managers.values():
+            manager.update_timing(idle_ms=value)
+
+    @on_conf_change(option="post_accept_completion_delay_ms")
+    def on_post_accept_delay_changed(self, value):
+        """Propagate post-accept delay to all ghost text managers."""
+        for manager in self._ghost_managers.values():
+            manager.update_timing(post_accept_ms=value)
 
     @on_plugin_teardown(plugin=Plugins.Preferences)
     def on_preferences_teardown(self):

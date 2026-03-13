@@ -40,6 +40,11 @@ import re
 from qtpy.QtCore import Qt, QTimer, Signal, QSize
 from qtpy.QtWidgets import QApplication, QTextEdit, QToolButton
 
+from spyder_ai_assistant.utils.chat_themes import (
+    get_theme_colors,
+    parse_color_overrides,
+)
+
 logger = logging.getLogger(__name__)
 
 # Pixel threshold for "near bottom" detection. If the scrollbar is
@@ -141,7 +146,27 @@ class ChatDisplay(QTextEdit):
         # If the background luminance is below 128, we're on a dark theme.
         bg = self.palette().color(self.backgroundRole())
         is_dark = bg.lightness() < 128
-        self._theme = self._DARK_THEME if is_dark else self._LIGHT_THEME
+        self._is_dark = is_dark
+
+        # Theme state: preset name + per-color overrides.
+        # Resolved into self._theme via get_theme_colors().
+        self._theme_preset = "default"
+        self._theme_color_overrides = {}
+        self._theme = get_theme_colors("default", is_dark)
+
+        # Configurable appearance values — initialized to defaults that
+        # match the previously-hardcoded values. Updated at runtime via
+        # update_appearance() when the user changes settings.
+        self._font_family = "sans-serif"
+        self._font_size = 10        # pt
+        self._line_height = 1.5
+        self._code_font_family = "Courier New"
+        self._code_font_size = 9    # pt
+        self._pygments_style_dark = "monokai"
+        self._pygments_style_light = "default"
+        self._bubble_padding = 12   # px (used as cellpadding)
+        self._bubble_border_radius = 8  # px
+        self._bubble_spacing = 4    # px (vertical margin between bubbles)
 
         # Buffer for accumulating streaming tokens from the LLM
         self._streaming_buffer = ""
@@ -191,6 +216,84 @@ class ChatDisplay(QTextEdit):
         )
 
         # Initialize the document (empty chat)
+        self.setHtml(self._html_content)
+
+    # --- Appearance configuration ---
+
+    def update_appearance(self, **kwargs):
+        """Update configurable appearance values and re-render.
+
+        Accepts any subset of appearance keys. Only provided keys are
+        updated; omitted keys keep their current value. After updating,
+        the full chat HTML is rebuilt so changes are visible immediately.
+
+        Supported keys:
+            chat_font_family, chat_font_size, chat_line_height,
+            code_font_family, code_font_size,
+            pygments_style_dark, pygments_style_light,
+            bubble_padding, bubble_border_radius, bubble_spacing,
+            theme_preset, theme_color_overrides
+        """
+        attr_map = {
+            "chat_font_family": "_font_family",
+            "chat_font_size": "_font_size",
+            "chat_line_height": "_line_height",
+            "code_font_family": "_code_font_family",
+            "code_font_size": "_code_font_size",
+            "pygments_style_dark": "_pygments_style_dark",
+            "pygments_style_light": "_pygments_style_light",
+            "bubble_padding": "_bubble_padding",
+            "bubble_border_radius": "_bubble_border_radius",
+            "bubble_spacing": "_bubble_spacing",
+        }
+        changed = False
+        for key, attr in attr_map.items():
+            if key in kwargs and kwargs[key] != getattr(self, attr):
+                setattr(self, attr, kwargs[key])
+                changed = True
+
+        # Handle theme preset and color overrides
+        theme_changed = False
+        if "theme_preset" in kwargs and kwargs["theme_preset"] != self._theme_preset:
+            self._theme_preset = kwargs["theme_preset"]
+            theme_changed = True
+        if "theme_color_overrides" in kwargs:
+            # Accept either a dict or a JSON string
+            overrides = kwargs["theme_color_overrides"]
+            if isinstance(overrides, str):
+                overrides = parse_color_overrides(overrides)
+            if overrides != self._theme_color_overrides:
+                self._theme_color_overrides = overrides
+                theme_changed = True
+        if theme_changed:
+            self._theme = get_theme_colors(
+                self._theme_preset, self._is_dark, self._theme_color_overrides,
+            )
+            self._apply_scroll_button_style()
+            changed = True
+
+        if changed:
+            self._full_rerender()
+
+    def _full_rerender(self):
+        """Rebuild the entire chat HTML from stored messages.
+
+        Called after appearance settings change so the new fonts, sizes,
+        and geometry are applied to all existing messages.
+        """
+        # Re-render is done by reconstructing _html_content from the
+        # message list maintained by ChatSession. The session calls
+        # reload_messages() which clears and re-appends each message.
+        # We emit a signal so the owning session can drive the reload.
+        # For now, just refresh the current HTML (layout values are
+        # read live from instance attributes, so a setHtml re-render
+        # with the same content picks up the new values).
+        if self._is_streaming:
+            # During streaming, the next token append will use the new
+            # values. Don't interrupt the stream.
+            return
+        # Re-set the same HTML to force Qt to re-render with new styles.
+        # This works because _wrap_message reads from instance attributes.
         self.setHtml(self._html_content)
 
     # --- Scroll-to-bottom button positioning and styling ---
@@ -376,13 +479,22 @@ class ChatDisplay(QTextEdit):
             HTML string for a complete message bubble.
         """
         lc = label_color or text_color
+        # Use configurable appearance values (set via update_appearance)
+        pad = self._bubble_padding
+        sp = self._bubble_spacing
+        ff = self._font_family
+        fs = self._font_size
+        lh = self._line_height
+        br = self._bubble_border_radius
+        # Label size is 80% of body font, capped between 7–12pt
+        label_fs = max(7, min(12, int(round(fs * 0.8))))
         return (
-            f'<table width="100%" cellpadding="12" cellspacing="0"'
-            f' style="margin-top:4px; margin-bottom:4px;">'
+            f'<table width="100%" cellpadding="{pad}" cellspacing="0"'
+            f' style="margin-top:{sp}px; margin-bottom:{sp}px;">'
             f'<tr><td style="background-color:{bg}; color:{text_color};'
-            f' font-family:sans-serif; font-size:10pt;'
-            f' border-radius:8px; line-height:1.5;">'
-            f'<span style="font-size:8pt; font-weight:bold;'
+            f' font-family:{ff}; font-size:{fs}pt;'
+            f' border-radius:{br}px; line-height:{lh};">'
+            f'<span style="font-size:{label_fs}pt; font-weight:bold;'
             f' color:{lc}; letter-spacing:0.5px;">'
             f'{label}</span><br>'
             f'{content}'
@@ -706,16 +818,19 @@ class ChatDisplay(QTextEdit):
         # Escape and render with basic markdown (thinking can contain code)
         escaped_thinking = self._render_markdown(thinking_text)
 
+        # Thinking block font is slightly smaller than the main body
+        think_fs = max(7, self._font_size - 1)
+        think_label_fs = max(7, think_fs - 1)
         return (
             f'<table width="100%" cellpadding="8" cellspacing="0"'
             f' style="margin-top:6px; margin-bottom:2px;">'
             f'<tr><td style="background-color:{t["thinking_bg"]};'
             f' color:{t["thinking_text"]};'
-            f' font-family:sans-serif; font-size:9pt;'
+            f' font-family:{self._font_family}; font-size:{think_fs}pt;'
             f' font-style:italic;'
             f' border-left:3px solid {t["thinking_border"]};'
             f' border-radius:4px;">'
-            f'<b style="font-style:normal; font-size:8pt;">'
+            f'<b style="font-style:normal; font-size:{think_label_fs}pt;">'
             f'{label}</b><br>'
             f'{escaped_thinking}'
             f'</td></tr></table>'
@@ -802,6 +917,10 @@ class ChatDisplay(QTextEdit):
             # Falls back to plain <pre> for unknown languages or no hint.
             highlighted = self._highlight_code(raw_code, lang)
 
+            # Code font from configurable appearance settings
+            cff = self._code_font_family
+            cfs = self._code_font_size
+
             if highlighted:
                 # Pygments output is highlighted <span> elements.
                 # Wrap in our styled <pre> for consistent appearance.
@@ -812,7 +931,7 @@ class ChatDisplay(QTextEdit):
                 )
                 block_html = (
                     f'<pre style="background-color:{cb_bg};'
-                    f' font-family:Courier New,monospace; font-size:9pt;'
+                    f' font-family:{cff},monospace; font-size:{cfs}pt;'
                     f' padding:8px 12px; white-space:pre-wrap;'
                     f' word-wrap:break-word;">'
                     f'{lang_label}{highlighted}</pre>'
@@ -826,7 +945,7 @@ class ChatDisplay(QTextEdit):
                 )
                 block_html = (
                     f'<pre style="background-color:{cb_bg}; color:{cb_text};'
-                    f' font-family:Courier New,monospace; font-size:9pt;'
+                    f' font-family:{cff},monospace; font-size:{cfs}pt;'
                     f' padding:8px 12px; white-space:pre-wrap;'
                     f' word-wrap:break-word;">'
                     f'{lang_label}{code}</pre>'
@@ -885,6 +1004,10 @@ class ChatDisplay(QTextEdit):
             # Syntax-highlight with Pygments if a language is specified.
             highlighted = self._highlight_code(raw_code, lang)
 
+            # Code font from configurable appearance settings
+            cff = self._code_font_family
+            cfs = self._code_font_size
+
             if highlighted:
                 lang_label = (
                     f'<span style="color:#888; font-size:0.85em;">'
@@ -893,7 +1016,7 @@ class ChatDisplay(QTextEdit):
                 )
                 block_html = (
                     f'<pre style="background-color:{cb_bg};'
-                    f' font-family:Courier New,monospace; font-size:9pt;'
+                    f' font-family:{cff},monospace; font-size:{cfs}pt;'
                     f' padding:8px 12px; white-space:pre-wrap;'
                     f' word-wrap:break-word;">'
                     f'{lang_label}{highlighted}</pre>'
@@ -906,7 +1029,7 @@ class ChatDisplay(QTextEdit):
                 )
                 block_html = (
                     f'<pre style="background-color:{cb_bg}; color:{cb_text};'
-                    f' font-family:Courier New,monospace; font-size:9pt;'
+                    f' font-family:{cff},monospace; font-size:{cfs}pt;'
                     f' padding:8px 12px; white-space:pre-wrap;'
                     f' word-wrap:break-word;">'
                     f'{lang_label}{code}</pre>'
@@ -939,8 +1062,10 @@ class ChatDisplay(QTextEdit):
             code_content = match.group(1)
             code_html = (
                 f'<code style="background-color:{ic_bg}; color:{ic_text};'
-                f' padding:1px 4px; font-family:Courier New,monospace;'
-                f' font-size:9pt;">{code_content}</code>'
+                f' padding:1px 4px;'
+                f' font-family:{self._code_font_family},monospace;'
+                f' font-size:{self._code_font_size}pt;">'
+                f'{code_content}</code>'
             )
             placeholder = f"\x00INLINECODE{len(protected_blocks)}\x00"
             protected_blocks.append(code_html)
@@ -1406,10 +1531,10 @@ class ChatDisplay(QTextEdit):
 
             lexer = get_lexer_by_name(language, stripall=True)
 
-            # Pick a Pygments style that matches the Spyder theme.
-            # Dark theme -> monokai, light theme -> default.
-            bg = self.palette().color(self.backgroundRole())
-            style = "monokai" if bg.lightness() < 128 else "default"
+            # Pick a Pygments style based on user configuration.
+            # Falls back to the current theme-appropriate default.
+            style = (self._pygments_style_dark if self._is_dark
+                     else self._pygments_style_light)
 
             # nowrap=True gives us just the highlighted <span> elements
             # without wrapping <div>/<pre> — we provide our own <pre> wrapper

@@ -210,6 +210,7 @@ class GhostTextManager:
         lifecycle_callback=None,
         manual_completion_requester=None,
         idle_completion_delay_ms=IDLE_COMPLETION_DELAY_MS,
+        post_accept_completion_delay_ms=POST_ACCEPT_COMPLETION_DELAY_MS,
     ):
         self._editor = editor
         self._lifecycle_callback = lifecycle_callback
@@ -237,8 +238,12 @@ class GhostTextManager:
         )
         self._post_accept_completion_timer = QTimer(editor)
         self._post_accept_completion_timer.setSingleShot(True)
+        self._post_accept_completion_delay_ms = max(
+            0, int(post_accept_completion_delay_ms
+                   or POST_ACCEPT_COMPLETION_DELAY_MS),
+        )
         self._post_accept_completion_timer.setInterval(
-            POST_ACCEPT_COMPLETION_DELAY_MS
+            self._post_accept_completion_delay_ms
         )
         self._post_accept_reason = "accepted"
         self._post_accept_pending = False
@@ -272,6 +277,23 @@ class GhostTextManager:
         # because we block editor signals during those operations.
         editor.cursorPositionChanged.connect(self._on_cursor_moved)
         editor.textChanged.connect(self._schedule_idle_completion)
+
+    def update_timing(self, idle_ms=None, post_accept_ms=None):
+        """Update completion delay timers from config.
+
+        Called when the user changes ghost text timing settings.
+        Only updates values that are explicitly provided.
+        """
+        if idle_ms is not None:
+            self._idle_completion_delay_ms = max(250, int(idle_ms))
+            self._idle_completion_timer.setInterval(
+                self._idle_completion_delay_ms
+            )
+        if post_accept_ms is not None:
+            self._post_accept_completion_delay_ms = max(0, int(post_accept_ms))
+            self._post_accept_completion_timer.setInterval(
+                self._post_accept_completion_delay_ms
+            )
 
     def show_suggestion(self, text, target=None):
         """Display a ghost text suggestion at the current cursor position.
@@ -780,7 +802,7 @@ class GhostTextManager:
         self._post_accept_completion_timer.start()
         logger.info(
             "Scheduled post-accept AI completion after %dms (reason=%s)",
-            POST_ACCEPT_COMPLETION_DELAY_MS,
+            self._post_accept_completion_delay_ms,
             self._post_accept_reason,
         )
 
@@ -797,7 +819,7 @@ class GhostTextManager:
             return
         logger.info(
             "Requesting post-accept AI completion after %dms (reason=%s)",
-            POST_ACCEPT_COMPLETION_DELAY_MS,
+            self._post_accept_completion_delay_ms,
             self._post_accept_reason,
         )
         self.request_completion(source="post_accept")
