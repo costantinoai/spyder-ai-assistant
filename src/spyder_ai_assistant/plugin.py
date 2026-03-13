@@ -46,7 +46,6 @@ from spyder_ai_assistant.utils.code_apply import (
 from spyder_ai_assistant.utils.provider_profiles import normalize_provider_profiles
 from spyder_ai_assistant.utils.runtime_context import RuntimeContextService
 from spyder_ai_assistant.widgets.chat_widget import ChatWidget
-from spyder_ai_assistant.widgets.config_page import AIChatConfigPage
 from spyder_ai_assistant.widgets.code_apply_dialog import CodeApplyDialog
 from spyder_ai_assistant.widgets.ghost_text import GhostTextManager
 
@@ -122,7 +121,7 @@ class AIChatPlugin(SpyderDockablePlugin):
     # --- Plugin identity ---
     NAME = "ai_chat"
     WIDGET_CLASS = ChatWidget
-    CONF_WIDGET_CLASS = AIChatConfigPage
+    CONF_WIDGET_CLASS = None
 
     # --- Plugin dependencies ---
     # Preferences is required for the configuration system.
@@ -311,6 +310,73 @@ class AIChatPlugin(SpyderDockablePlugin):
             ),
         }
 
+    def _build_completion_provider_settings(self):
+        """Return the plugin-backed completion settings for the provider."""
+        return {
+            "ollama_host": self.get_conf(
+                "ollama_host", default="http://localhost:11434"
+            ),
+            "chat_provider": self.get_conf("chat_provider", default="ollama"),
+            "chat_provider_profile_id": self.get_conf(
+                "chat_provider_profile_id",
+                default="",
+            ),
+            "provider_profiles": self.get_conf("provider_profiles", default="[]"),
+            "openai_compatible_base_url": self.get_conf(
+                "openai_compatible_base_url",
+                default="",
+            ),
+            "openai_compatible_api_key": self.get_conf(
+                "openai_compatible_api_key",
+                default="",
+            ),
+            "completion_model": self.get_conf("completion_model", default=""),
+            "completion_temperature": self.get_conf(
+                "completion_temperature",
+                default=0.15,
+            ),
+            "completion_max_tokens": self.get_conf(
+                "completion_max_tokens",
+                default=256,
+            ),
+            "completions_enabled": self.get_conf(
+                "completions_enabled",
+                default=True,
+            ),
+            "debounce_ms": self.get_conf("debounce_ms", default=300),
+        }
+
+    def _sync_completion_provider_settings(self, provider=None):
+        """Push pane settings into the live completion provider config."""
+        if provider is None:
+            provider = self._get_completion_provider_instance()
+        if provider is None:
+            logger.debug(
+                "Skipping completion-provider settings sync because the provider is not ready yet"
+            )
+            return False
+
+        settings = self._build_completion_provider_settings()
+        synced = False
+        for key, value in settings.items():
+            try:
+                current = provider.get_conf(key)
+            except Exception:
+                current = None
+            if current == value:
+                continue
+            provider.set_conf(key, value)
+            synced = True
+
+        if synced:
+            logger.info(
+                "Synced live completion provider settings: provider=%s profile=%s model=%s",
+                settings.get("chat_provider", ""),
+                settings.get("chat_provider_profile_id", "") or "<none>",
+                settings.get("completion_model", ""),
+            )
+        return synced
+
     def _refresh_chat_provider_settings(self):
         """Push provider settings to the widget and refresh model listing."""
         try:
@@ -323,6 +389,7 @@ class AIChatPlugin(SpyderDockablePlugin):
         widget.update_chat_provider_settings(
             self._build_chat_provider_settings()
         )
+        self._sync_completion_provider_settings()
 
     def _sync_chat_model_selection_from_conf(self):
         """Apply configured provider/model preferences when the widget exists."""
@@ -365,6 +432,7 @@ class AIChatPlugin(SpyderDockablePlugin):
         - Updating the toolbar context label on editor tab switches
         """
         editor_plugin = self.get_plugin(Plugins.Editor)
+        logger.info("Editor plugin became available for AI Chat wiring")
 
         # Register context menu actions on each new editor that opens
         editor_plugin.sig_codeeditor_created.connect(
@@ -381,7 +449,14 @@ class AIChatPlugin(SpyderDockablePlugin):
 
         current_editor = editor_plugin.get_current_editor()
         if current_editor is not None:
+            logger.info(
+                "Applying AI Chat wiring to current editor on startup: %s",
+                getattr(current_editor, "filename", "") or "<untitled>",
+            )
+            self._on_codeeditor_created(current_editor)
             self._on_codeeditor_changed(current_editor)
+        else:
+            logger.info("No current editor was available during AI Chat startup")
 
     @on_plugin_teardown(plugin=Plugins.Editor)
     def on_editor_teardown(self):
@@ -430,6 +505,7 @@ class AIChatPlugin(SpyderDockablePlugin):
         """
         # Install ghost text manager for this editor
         editor_id = id(codeeditor)
+        document_id = self._get_editor_completion_document_id(codeeditor)
         if editor_id not in self._ghost_managers:
             manager = GhostTextManager(
                 codeeditor,
@@ -441,9 +517,10 @@ class AIChatPlugin(SpyderDockablePlugin):
             )
             self._ghost_managers[editor_id] = manager
             logger.info(
-                "Installed ghost text manager on editor %d for %s",
+                "Installed ghost text manager on editor %d for %s (document_id=%s)",
                 editor_id,
                 getattr(codeeditor, "filename", "") or "<untitled>",
+                document_id,
             )
 
             # Add keyboard shortcut to trigger AI completion manually.
@@ -484,19 +561,18 @@ class AIChatPlugin(SpyderDockablePlugin):
                 accept_line_shortcut
             ]
             logger.info(
-                "Registered AI completion shortcuts for %s: trigger=%s accept_word=%s accept_line=%s",
+                "Registered AI completion shortcuts for %s: document_id=%s trigger=%s accept_word=%s accept_line=%s",
                 getattr(codeeditor, "filename", "") or "<untitled>",
+                document_id,
                 key_combo,
                 accept_word_combo,
                 accept_line_combo,
             )
-            filename = getattr(codeeditor, "filename", "") or ""
-            if filename:
-                self._filename_to_editor[filename] = codeeditor
-                logger.info(
-                    "Registered editor mapping for %s during editor creation",
-                    filename,
-                )
+            self._filename_to_editor[document_id] = codeeditor
+            logger.info(
+                "Registered editor mapping for %s during editor creation",
+                document_id,
+            )
 
         # Import here to avoid import errors if editor plugin is not available
         from spyder.plugins.editor.widgets.codeeditor.codeeditor import (
@@ -561,11 +637,34 @@ class AIChatPlugin(SpyderDockablePlugin):
         # When the completion provider emits a ghost text for a filename,
         # we need to find the right editor widget to display it on.
         try:
-            filename = editor_plugin.get_current_filename() or ""
-            if filename:
-                self._filename_to_editor[filename] = codeeditor
+            document_id = self._get_editor_completion_document_id(codeeditor)
+            if document_id:
+                self._filename_to_editor[document_id] = codeeditor
+                logger.info(
+                    "Registered editor mapping for %s during editor change",
+                    document_id,
+                )
         except Exception:
             pass
+
+    @staticmethod
+    def _get_editor_completion_document_id(codeeditor):
+        """Return one stable completion document identifier for an editor."""
+        filename = getattr(codeeditor, "filename", "") or ""
+        if filename:
+            return filename
+
+        language = getattr(codeeditor, "language", "python") or "python"
+        extension = {
+            "python": ".py",
+            "c": ".c",
+            "cpp": ".cpp",
+            "javascript": ".js",
+            "typescript": ".ts",
+            "json": ".json",
+            "markdown": ".md",
+        }.get(str(language).lower(), ".txt")
+        return f"untitled-editor-{id(codeeditor)}{extension}"
 
     # --- Context menu action handler ---
 
@@ -1025,14 +1124,7 @@ class AIChatPlugin(SpyderDockablePlugin):
             return True
 
         cursor = codeeditor.textCursor()
-        filename = getattr(codeeditor, "filename", "") or ""
-        if not filename:
-            logger.info(
-                "Manual AI completion fell back to Spyder completion because "
-                "the editor filename is unavailable"
-            )
-            codeeditor.do_completion()
-            return True
+        filename = self._get_editor_completion_document_id(codeeditor)
         self._filename_to_editor[filename] = codeeditor
         logger.info(
             "Manual AI completion refreshed editor mapping for %s",
@@ -1171,6 +1263,7 @@ class AIChatPlugin(SpyderDockablePlugin):
 
         self._manual_completion_filter = _ManualCompletionShortcutFilter(self)
         app.installEventFilter(self._manual_completion_filter)
+        logger.info("Installed application-level manual AI completion shortcut filter")
 
     def _remove_manual_completion_shortcut_filter(self):
         """Remove the app-wide fallback filter during shutdown."""
@@ -1183,6 +1276,7 @@ class AIChatPlugin(SpyderDockablePlugin):
         except Exception:
             pass
         self._manual_completion_filter = None
+        logger.info("Removed application-level manual AI completion shortcut filter")
 
     def _editor_has_manual_completion_focus(self):
         """Return True when the current focus belongs to the active editor."""
@@ -1279,6 +1373,10 @@ class AIChatPlugin(SpyderDockablePlugin):
             if provider_info and isinstance(provider_info, dict):
                 provider_instance = provider_info.get("instance")
                 if provider_instance is not None:
+                    logger.info(
+                        "AI completion provider instance became available for ghost-text wiring"
+                    )
+                    self._sync_completion_provider_settings(provider_instance)
                     self._ensure_ghost_text_signal_connected(provider_instance)
                     return
 
@@ -1354,12 +1452,49 @@ class AIChatPlugin(SpyderDockablePlugin):
         """Refresh model selection after the default provider changes."""
         del value
         self._sync_chat_model_selection_from_conf()
+        self._sync_completion_provider_settings()
+
+    @on_conf_change(option="chat_provider_profile_id")
+    def on_chat_provider_profile_id_changed(self, value):
+        """Keep the live completion provider aligned with profile changes."""
+        del value
+        self._sync_completion_provider_settings()
 
     @on_conf_change(option="chat_model")
     def on_chat_model_changed(self, value):
         """Refresh model selection after the default chat model changes."""
         del value
         self._sync_chat_model_selection_from_conf()
+
+    @on_conf_change(option="completion_model")
+    def on_completion_model_changed(self, value):
+        """Keep the live completion provider aligned with pane settings."""
+        del value
+        self._sync_completion_provider_settings()
+
+    @on_conf_change(option="completion_temperature")
+    def on_completion_temperature_changed(self, value):
+        """Keep completion temperature aligned with the live provider."""
+        del value
+        self._sync_completion_provider_settings()
+
+    @on_conf_change(option="completion_max_tokens")
+    def on_completion_max_tokens_changed(self, value):
+        """Keep completion token budget aligned with the live provider."""
+        del value
+        self._sync_completion_provider_settings()
+
+    @on_conf_change(option="completions_enabled")
+    def on_completions_enabled_changed(self, value):
+        """Keep the live completion enable/disable state aligned."""
+        del value
+        self._sync_completion_provider_settings()
+
+    @on_conf_change(option="debounce_ms")
+    def on_completion_debounce_changed(self, value):
+        """Keep completion debounce aligned with the live provider."""
+        del value
+        self._sync_completion_provider_settings()
 
     @on_plugin_teardown(plugin=Plugins.Preferences)
     def on_preferences_teardown(self):
@@ -1375,6 +1510,7 @@ class AIChatPlugin(SpyderDockablePlugin):
             filenames = []
 
         seen_editors = set()
+        installed_count = 0
         for filename in filenames:
             try:
                 codeeditor = editor_plugin.get_codeeditor_for_filename(filename)
@@ -1390,5 +1526,10 @@ class AIChatPlugin(SpyderDockablePlugin):
 
             seen_editors.add(editor_id)
             self._on_codeeditor_created(codeeditor)
-            if filename:
-                self._filename_to_editor[filename] = codeeditor
+            document_id = self._get_editor_completion_document_id(codeeditor)
+            self._filename_to_editor[document_id] = codeeditor
+            installed_count += 1
+        logger.info(
+            "Registered AI Chat wiring on %d pre-existing editor(s)",
+            installed_count,
+        )

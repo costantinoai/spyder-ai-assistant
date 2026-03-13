@@ -36,12 +36,13 @@ import logging
 import time
 
 from qtpy.QtCore import Qt, QEvent, QObject, QTimer
-from qtpy.QtGui import QColor, QTextCharFormat, QTextCursor
+from qtpy.QtGui import QColor, QPalette, QTextCharFormat, QTextCursor
 from qtpy.QtWidgets import QTextEdit
 
 logger = logging.getLogger(__name__)
 IDLE_COMPLETION_DELAY_MS = 1000
 MANUAL_REQUEST_DEDUP_WINDOW_S = 0.5
+POST_ACCEPT_COMPLETION_DELAY_MS = 75
 
 
 class _GhostEventFilter(QObject):
@@ -133,6 +134,12 @@ class _GhostEventFilter(QObject):
             self._manager.clear(reason="escape")
             return True  # Consume the event
 
+        elif key == Qt.Key_Backspace:
+            # Backspace explicitly dismisses the current suggestion, but the
+            # editor should still handle the key normally.
+            self._manager.clear(reason="backspace")
+            return False
+
         else:
             if self._manager.try_accept_typed_text(event):
                 return True
@@ -210,6 +217,8 @@ class GhostTextManager:
         self._ghost_active = False
         self._ghost_text = ""
         self._target = None
+        self._insert_offset = -1
+        self._display_cursor_offset = -1
         # Document positions of the inserted ghost text, used for
         # applying extra selections (gray overlay) on the range.
         self._ghost_start = -1
@@ -219,11 +228,22 @@ class GhostTextManager:
             int(idle_completion_delay_ms or IDLE_COMPLETION_DELAY_MS),
         )
         self._last_manual_request_at = 0.0
+        self._last_manual_request_state = None
         self._idle_completion_timer = QTimer(editor)
         self._idle_completion_timer.setSingleShot(True)
         self._idle_completion_timer.setInterval(self._idle_completion_delay_ms)
         self._idle_completion_timer.timeout.connect(
             self._request_idle_completion
+        )
+        self._post_accept_completion_timer = QTimer(editor)
+        self._post_accept_completion_timer.setSingleShot(True)
+        self._post_accept_completion_timer.setInterval(
+            POST_ACCEPT_COMPLETION_DELAY_MS
+        )
+        self._post_accept_reason = "accepted"
+        self._post_accept_pending = False
+        self._post_accept_completion_timer.timeout.connect(
+            self._request_post_accept_completion
         )
 
         # Event filter for key interception (Tab/Escape/any key).
@@ -289,6 +309,12 @@ class GhostTextManager:
         self._target = target or {}
         cursor = self._editor.textCursor()
         original_pos = cursor.position()
+        insert_offset = int(self._target.get("insert_offset", original_pos))
+        insert_offset = max(0, min(insert_offset, len(self._editor.toPlainText())))
+        restore_pos = original_pos + len(text) if insert_offset <= original_pos else original_pos
+        insert_cursor = QTextCursor(self._editor.document())
+        insert_cursor.setPosition(insert_offset)
+        ghost_format = self._build_ghost_text_format()
 
         # Block EDITOR signals (not document signals) during insertion:
         # - textChanged won't fire (no completion re-trigger, no dirty flag)
@@ -301,16 +327,19 @@ class GhostTextManager:
         try:
             # Insert as one atomic undo step so document.undo() removes
             # the entire ghost text in one call.
-            cursor.beginEditBlock()
-            cursor.insertText(text)
-            cursor.endEditBlock()
+            insert_cursor.beginEditBlock()
+            insert_cursor.insertText(text, ghost_format)
+            insert_cursor.endEditBlock()
 
-            self._ghost_start = original_pos
-            self._ghost_end = original_pos + len(text)
+            self._ghost_start = insert_offset
+            self._ghost_end = insert_offset + len(text)
+            self._insert_offset = insert_offset
+            self._display_cursor_offset = original_pos
 
             # Restore cursor to original position — the user should see
-            # their cursor at the same spot, with the gray text after it.
-            cursor.setPosition(original_pos)
+            # their cursor at the same logical spot, even when the ghost
+            # text is inserted earlier on a continuation line.
+            cursor.setPosition(restore_pos)
             self._editor.setTextCursor(cursor)
         finally:
             self._editor.blockSignals(False)
@@ -320,16 +349,17 @@ class GhostTextManager:
 
         self._ghost_active = True
 
-        # Apply gray color via extra selections. This renders ON TOP of
-        # the syntax highlighter's formatting, so ghost text is always
-        # gray regardless of syntax colors.
+        # Apply one overlay selection on top of the inserted formatting so
+        # the ghost style survives highlighter refreshes and stays visible.
         self._apply_ghost_extra_selection()
 
         logger.debug("Ghost text shown: %d chars", len(text))
         logger.info(
-            "Ghost text shown: chars=%d target=%s preview=%r",
+            "Ghost text shown: chars=%d target=%s insert_offset=%s display_offset=%s preview=%r",
             len(text),
             self._target,
+            self._insert_offset,
+            self._display_cursor_offset,
             text[:100],
         )
         self._emit_lifecycle_event(
@@ -364,9 +394,34 @@ class GhostTextManager:
         self._ghost_active = False
         self._ghost_text = ""
         self._target = None
+        display_cursor_offset = self._display_cursor_offset
         self._ghost_start = -1
         self._ghost_end = -1
-        logger.info("Ghost text cleared: reason=%s", reason)
+        self._insert_offset = -1
+        self._display_cursor_offset = -1
+        if reason in {"escape", "backspace"}:
+            self._last_manual_request_at = 0.0
+            self._last_manual_request_state = None
+            logger.info(
+                "Reset manual AI completion dedup state after explicit %s dismissal",
+                reason,
+            )
+        logger.info(
+            "Ghost text cleared: reason=%s insert_offset=%s display_offset=%s",
+            reason,
+            self._insert_offset,
+            display_cursor_offset,
+        )
+
+        if display_cursor_offset >= 0:
+            try:
+                cursor = self._editor.textCursor()
+                cursor.setPosition(
+                    max(0, min(display_cursor_offset, len(self._editor.toPlainText())))
+                )
+                self._editor.setTextCursor(cursor)
+            except Exception:
+                pass
 
         # Remove our ghost extra selection. After undo the text is gone,
         # so the selection is invalid. Rebuild without it.
@@ -390,14 +445,22 @@ class GhostTextManager:
             return
 
         text = self._ghost_text
+        insert_offset = self._insert_offset
+        display_offset = self._display_cursor_offset
 
         # Remove the gray ghost text (silently via undo)
         self.clear(reason="accepted", record_event=False)
 
         # Re-insert as normal text — this is a real edit that enters
         # the undo stack and triggers textChanged/dirty indicators.
-        self._editor.insert_text(text)
-        logger.info("Ghost text accepted fully: %d chars", len(text))
+        self._insert_real_text(text, insert_offset, display_offset)
+        logger.info(
+            "Ghost text accepted fully: chars=%d insert_offset=%s display_offset=%s",
+            len(text),
+            insert_offset,
+            display_offset,
+        )
+        self._schedule_post_accept_completion("accepted")
         self._emit_lifecycle_event(
             "accepted",
             method="full",
@@ -448,9 +511,11 @@ class GhostTextManager:
 
         full_text = self._ghost_text
         remainder = full_text[len(text):]
+        insert_offset = self._insert_offset
+        display_offset = self._display_cursor_offset
 
         self.clear(reason="accepted", record_event=False)
-        self._editor.insert_text(text)
+        self._insert_real_text(text, insert_offset, display_offset)
 
         if remainder:
             cursor = self._editor.textCursor()
@@ -460,6 +525,11 @@ class GhostTextManager:
                     "offset": cursor.position(),
                     "line": cursor.blockNumber(),
                     "column": cursor.columnNumber(),
+                    "insert_offset": (
+                        insert_offset + len(text)
+                        if isinstance(insert_offset, int) and insert_offset >= 0
+                        else cursor.position()
+                    ),
                 },
             )
             logger.debug(
@@ -481,6 +551,7 @@ class GhostTextManager:
         else:
             logger.debug("Ghost text fully accepted by typing: %r", text)
             logger.info("Ghost text fully accepted by typing: %r", text)
+            self._schedule_post_accept_completion("typed_accept")
             self._emit_lifecycle_event(
                 "accepted",
                 method="full",
@@ -490,7 +561,7 @@ class GhostTextManager:
 
         return True
 
-    def request_completion(self):
+    def request_completion(self, source="manual"):
         """Manually trigger a completion request.
 
         Called when the user presses the completion shortcut (e.g.,
@@ -500,31 +571,54 @@ class GhostTextManager:
         plugin did not provide an explicit requester.
         """
         self._idle_completion_timer.stop()
-        now = time.monotonic()
-        if (now - self._last_manual_request_at) < MANUAL_REQUEST_DEDUP_WINDOW_S:
-            logger.info(
-                "Ignoring duplicate manual AI completion request within %.2fs window",
-                MANUAL_REQUEST_DEDUP_WINDOW_S,
+        self._post_accept_completion_timer.stop()
+        self._post_accept_pending = False
+        if source not in {"idle", "post_accept"}:
+            now = time.monotonic()
+            cursor = self._editor.textCursor()
+            request_state = (
+                int(cursor.position()),
+                int(cursor.selectionStart()),
+                int(cursor.selectionEnd()),
+                len(self._editor.toPlainText() or ""),
             )
-            return
-        self._last_manual_request_at = now
+            if (
+                self._last_manual_request_state == request_state
+                and (now - self._last_manual_request_at) < MANUAL_REQUEST_DEDUP_WINDOW_S
+            ):
+                logger.info(
+                    "Ignoring duplicate %s AI completion request within %.2fs window",
+                    source,
+                    MANUAL_REQUEST_DEDUP_WINDOW_S,
+                )
+                return
+            self._last_manual_request_at = now
+            self._last_manual_request_state = request_state
         try:
             if self._manual_completion_requester is not None:
-                logger.info("Requesting manual AI completion through plugin path")
+                logger.info(
+                    "Requesting %s AI completion through plugin path",
+                    source,
+                )
                 handled = self._manual_completion_requester()
                 if handled is not False:
-                    logger.info("Manual AI completion request was handled by plugin path")
+                    logger.info(
+                        "%s AI completion request was handled by plugin path",
+                        source.capitalize(),
+                    )
                     return
                 logger.info(
-                    "Manual AI completion requester returned False; falling back to editor completion"
+                    "%s AI completion requester returned False; falling back to editor completion",
+                    source.capitalize(),
                 )
             else:
                 logger.info(
-                    "No manual AI completion requester is installed; falling back to editor completion"
+                    "No %s AI completion requester is installed; falling back to editor completion",
+                    source,
                 )
             self._editor.do_completion()
         except Exception as e:
-            logger.debug("Manual completion trigger failed: %s", e)
+            logger.debug("%s completion trigger failed: %s", source, e)
 
     def _apply_ghost_extra_selection(self):
         """Apply gray foreground to ghost text via extra selections.
@@ -544,12 +638,7 @@ class GhostTextManager:
         ghost_cursor.setPosition(self._ghost_end, QTextCursor.KeepAnchor)
         sel.cursor = ghost_cursor
 
-        # Gray foreground — dimmed but readable against dark backgrounds.
-        # Also use italic to visually distinguish from real code.
-        fmt = QTextCharFormat()
-        fmt.setForeground(QColor(110, 110, 110))
-        fmt.setFontItalic(True)
-        sel.format = fmt
+        sel.format = self._build_ghost_text_format()
 
         # Append our selection to the editor's existing extra selections
         # (don't replace them — Spyder uses extra selections for current
@@ -557,6 +646,35 @@ class GhostTextManager:
         existing = list(self._editor.extraSelections())
         existing.append(sel)
         self._editor.setExtraSelections(existing)
+
+    def _build_ghost_palette(self):
+        """Return theme-aware colors that clearly mark inline ghost text."""
+        palette = self._editor.palette()
+        base_color = palette.color(QPalette.Base)
+        if not base_color.isValid():
+            base_color = QColor(30, 34, 39)
+
+        dark_theme = base_color.lightness() < 128
+        if dark_theme:
+            ghost_foreground = QColor(214, 205, 176)
+            ghost_background = QColor(120, 99, 43, 192)
+            underline = QColor(237, 224, 181)
+        else:
+            ghost_foreground = QColor(126, 102, 56)
+            ghost_background = QColor(244, 230, 187, 168)
+            underline = QColor(148, 122, 71)
+        return ghost_foreground, ghost_background, underline
+
+    def _build_ghost_text_format(self):
+        """Return one text format reused for inserted and overlay ghost text."""
+        foreground, background, underline = self._build_ghost_palette()
+        fmt = QTextCharFormat()
+        fmt.setForeground(foreground)
+        fmt.setBackground(background)
+        fmt.setUnderlineStyle(QTextCharFormat.DotLine)
+        fmt.setUnderlineColor(underline)
+        fmt.setFontItalic(True)
+        return fmt
 
     def _remove_ghost_extra_selection(self):
         """Remove ghost extra selections from the editor.
@@ -615,6 +733,12 @@ class GhostTextManager:
                 "Idle AI completion scheduling skipped because ghost text is already visible"
             )
             return
+        if self._post_accept_pending:
+            logger.info(
+                "Idle AI completion scheduling skipped because a post-accept request is already pending (reason=%s)",
+                self._post_accept_reason,
+            )
+            return
         if not self._editor_has_focus():
             self._idle_completion_timer.stop()
             logger.info(
@@ -640,7 +764,49 @@ class GhostTextManager:
             "Requesting idle AI completion after %dms pause",
             self._idle_completion_delay_ms,
         )
-        self.request_completion()
+        self.request_completion(source="idle")
+
+    def _schedule_post_accept_completion(self, reason):
+        """Schedule one immediate completion after accepting ghost text."""
+        self._post_accept_reason = str(reason or "accepted")
+        if not self._editor_has_focus():
+            self._post_accept_pending = False
+            logger.info(
+                "Post-accept AI completion scheduling skipped because the editor does not have focus (reason=%s)",
+                self._post_accept_reason,
+            )
+            return
+        self._post_accept_pending = True
+        self._post_accept_completion_timer.start()
+        logger.info(
+            "Scheduled post-accept AI completion after %dms (reason=%s)",
+            POST_ACCEPT_COMPLETION_DELAY_MS,
+            self._post_accept_reason,
+        )
+
+    def _request_post_accept_completion(self):
+        """Trigger one follow-up completion after a full accept."""
+        self._post_accept_pending = False
+        if self._ghost_active or not self._editor_has_focus():
+            logger.info(
+                "Post-accept AI completion request skipped: ghost_active=%s editor_has_focus=%s reason=%s",
+                self._ghost_active,
+                self._editor_has_focus(),
+                self._post_accept_reason,
+            )
+            return
+        logger.info(
+            "Requesting post-accept AI completion after %dms (reason=%s)",
+            POST_ACCEPT_COMPLETION_DELAY_MS,
+            self._post_accept_reason,
+        )
+        self.request_completion(source="post_accept")
+        if not self._ghost_active and self._editor_has_focus():
+            self._idle_completion_timer.start()
+            logger.info(
+                "Scheduled backup idle AI completion after post-accept request (%dms)",
+                self._idle_completion_delay_ms,
+            )
 
     def on_completion_popup_visibility_changed(self, visible):
         """Track popup visibility and clear ghost text if the menu opens."""
@@ -671,6 +837,8 @@ class GhostTextManager:
         if self._ghost_active:
             self.clear(reason="cleanup", record_event=False)
         self._idle_completion_timer.stop()
+        self._post_accept_completion_timer.stop()
+        self._post_accept_pending = False
 
         try:
             self._editor.cursorPositionChanged.disconnect(
@@ -701,20 +869,34 @@ class GhostTextManager:
 
         full_text = self._ghost_text
         remainder = full_text[len(accepted_text):]
+        insert_offset = self._insert_offset
+        display_offset = self._display_cursor_offset
 
         self.clear(reason="accepted", record_event=False)
-        self._editor.insert_text(accepted_text)
+        self._insert_real_text(accepted_text, insert_offset, display_offset)
+        new_display_offset = display_offset
+        if insert_offset >= 0 and display_offset >= 0 and insert_offset <= display_offset:
+            new_display_offset = display_offset + len(accepted_text)
+        elif display_offset < 0:
+            new_display_offset = self._editor.textCursor().position()
 
         if remainder:
             cursor = self._editor.textCursor()
             self.show_suggestion(
                 remainder,
                 target={
-                    "offset": cursor.position(),
+                    "offset": new_display_offset,
                     "line": cursor.blockNumber(),
                     "column": cursor.columnNumber(),
+                    "insert_offset": (
+                        insert_offset + len(accepted_text)
+                        if insert_offset >= 0
+                        else cursor.position()
+                    ),
                 },
             )
+        else:
+            self._schedule_post_accept_completion(f"partial_{method}")
 
         logger.debug(
             "Ghost text partially accepted by %s: %d chars accepted, %d remain",
@@ -792,6 +974,36 @@ class GhostTextManager:
             self._lifecycle_callback(event_name, payload)
         except Exception as error:  # pragma: no cover - defensive UI guard
             logger.debug("Ghost lifecycle callback failed: %s", error)
+
+    def _insert_real_text(self, text, insert_offset, display_offset):
+        """Insert accepted text at the ghost anchor and restore the cursor."""
+        cursor = self._editor.textCursor()
+        insert_at = (
+            insert_offset
+            if isinstance(insert_offset, int) and insert_offset >= 0
+            else cursor.position()
+        )
+        insert_at = max(0, min(insert_at, len(self._editor.toPlainText())))
+        logger.info(
+            "Inserting accepted ghost text: chars=%d insert_offset=%s display_offset=%s",
+            len(text),
+            insert_at,
+            display_offset,
+        )
+        insert_cursor = QTextCursor(self._editor.document())
+        insert_cursor.setPosition(insert_at)
+        insert_cursor.insertText(text, QTextCharFormat())
+
+        restore_offset = (
+            display_offset
+            if isinstance(display_offset, int) and display_offset >= 0
+            else cursor.position()
+        )
+        if insert_at <= restore_offset:
+            restore_offset += len(text)
+        cursor = self._editor.textCursor()
+        cursor.setPosition(max(0, min(restore_offset, len(self._editor.toPlainText()))))
+        self._editor.setTextCursor(cursor)
 
     def _completion_popup_visible(self, manual_only=False):
         """Return True when the editor's native completion popup is visible."""

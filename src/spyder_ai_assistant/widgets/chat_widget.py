@@ -72,6 +72,9 @@ from spyder_ai_assistant.utils.chat_workflows import (
     build_debug_prompt,
     build_export_markdown,
 )
+from spyder_ai_assistant.widgets.assistant_settings_dialog import (
+    AssistantSettingsDialog,
+)
 from spyder_ai_assistant.widgets.chat_input import ChatInput
 from spyder_ai_assistant.widgets.chat_settings_dialog import ChatSettingsDialog
 from spyder_ai_assistant.widgets.exchange_delete_dialog import ExchangeDeleteDialog
@@ -281,6 +284,10 @@ class ChatWidget(PluginMainWidget):
         self._history_sessions = []
         # Latest provider diagnostics emitted by the worker after model refresh.
         self._provider_diagnostics = []
+        # Latest provider-aware model payloads emitted by the worker.
+        self._available_model_payloads = []
+        # Currently open global assistant settings dialog, if any.
+        self._assistant_settings_dialog = None
 
     # --- PluginMainWidget interface ---
 
@@ -375,8 +382,13 @@ class ChatWidget(PluginMainWidget):
         )
         self._chat_settings_action = self.create_action(
             "ai_chat_tab_settings",
-            text="Chat Settings...",
+            text="Tab Overrides...",
             triggered=self._open_chat_settings_dialog,
+        )
+        self._assistant_settings_action = self.create_action(
+            "ai_chat_assistant_settings",
+            text="Assistant Settings...",
+            triggered=self._open_assistant_settings_dialog,
         )
         self._history_action = self.create_action(
             "ai_chat_history",
@@ -391,6 +403,7 @@ class ChatWidget(PluginMainWidget):
         options_menu = self.get_options_menu()
         self.add_item_to_menu(refresh_action, menu=options_menu)
         self.add_item_to_menu(self._new_tab_action, menu=options_menu)
+        self.add_item_to_menu(self._assistant_settings_action, menu=options_menu)
         self.add_item_to_menu(self._provider_profiles_action, menu=options_menu)
         self.add_item_to_menu(self._chat_settings_action, menu=options_menu)
         self.add_item_to_menu(self._delete_exchange_action, menu=options_menu)
@@ -470,8 +483,16 @@ class ChatWidget(PluginMainWidget):
         self.chat_settings_btn = QToolButton(self)
         self.chat_settings_btn.setText("Settings")
         self.chat_settings_btn.setToolTip(
-            "Adjust inference settings for the active chat tab"
+            "Open assistant settings. Use the menu for tab overrides and providers."
         )
+        self.chat_settings_btn.setPopupMode(QToolButton.MenuButtonPopup)
+        settings_menu = QMenu(self.chat_settings_btn)
+        settings_menu.addAction(self._assistant_settings_action)
+        settings_menu.addAction(self._chat_settings_action)
+        settings_menu.addAction(self._provider_profiles_action)
+        settings_menu.addSeparator()
+        settings_menu.addAction(refresh_action)
+        self.chat_settings_btn.setMenu(settings_menu)
         self.session_btn = QToolButton(self)
         self.session_btn.setText("Sessions")
         self.session_btn.setPopupMode(QToolButton.MenuButtonPopup)
@@ -532,7 +553,7 @@ class ChatWidget(PluginMainWidget):
         self.chat_input.submit_requested.connect(self._send_message)
         self.send_btn.clicked.connect(self._send_message)
         self.stop_btn.clicked.connect(self._stop_generation)
-        self.chat_settings_btn.clicked.connect(self._open_chat_settings_dialog)
+        self.chat_settings_btn.clicked.connect(self._open_assistant_settings_dialog)
         self.session_btn.clicked.connect(self._open_history_browser)
         self.regenerate_btn.clicked.connect(self._regenerate_last_turn)
         self.model_combo.currentIndexChanged.connect(
@@ -595,14 +616,14 @@ class ChatWidget(PluginMainWidget):
         self.prompt_preset_combo.blockSignals(False)
 
     def _sync_chat_settings_button(self, session=None):
-        """Reflect the active session inference overrides in the settings button."""
+        """Reflect assistant settings entrypoint and active tab overrides."""
         if session is None:
             session = self._active_session
 
         if session is None:
             self.chat_settings_btn.setText("Settings")
             self.chat_settings_btn.setToolTip(
-                "Adjust inference settings for the active chat tab"
+                "Open assistant settings. Use the menu for tab overrides and providers."
             )
             return
 
@@ -613,7 +634,12 @@ class ChatWidget(PluginMainWidget):
         )
         self.chat_settings_btn.setText("Settings*" if has_override else "Settings")
         self.chat_settings_btn.setToolTip(
-            self._build_chat_settings_tooltip(metadata)
+            "\n".join(
+                [
+                    "Open assistant settings. Use the menu for tab overrides and providers.",
+                    self._build_chat_settings_tooltip(metadata),
+                ]
+            )
         )
 
     def _sync_session_menu_button(self, session=None):
@@ -885,6 +911,9 @@ class ChatWidget(PluginMainWidget):
 
     def _on_models_listed(self, models):
         """Populate the model dropdown with available models."""
+        self._available_model_payloads = [
+            dict(model) for model in (models or []) if isinstance(model, dict)
+        ]
         previous = self.model_combo.currentData()
 
         self.model_combo.blockSignals(True)
@@ -904,6 +933,10 @@ class ChatWidget(PluginMainWidget):
 
         self._on_model_changed(self.model_combo.currentIndex())
         self._sync_provider_status_label(models_available=bool(models))
+        if self._assistant_settings_dialog is not None:
+            self._assistant_settings_dialog.replace_models(
+                self._discovered_models_snapshot()
+            )
 
     def _on_provider_diagnostics(self, diagnostics):
         """Store provider diagnostics emitted after a model refresh."""
@@ -1100,6 +1133,142 @@ class ChatWidget(PluginMainWidget):
             ),
         }
 
+    def _discovered_models_snapshot(self):
+        """Return the latest provider-aware model payloads for settings UI."""
+        if self._available_model_payloads:
+            return [dict(model) for model in self._available_model_payloads]
+
+        models = []
+        for index in range(self.model_combo.count()):
+            payload = self.model_combo.itemData(index)
+            if isinstance(payload, dict):
+                models.append(dict(payload))
+        return models
+
+    def _assistant_settings_snapshot(self):
+        """Return the global assistant settings exposed from the pane."""
+        return {
+            "ollama_host": self.get_conf(
+                "ollama_host",
+                default="http://localhost:11434",
+            ),
+            "chat_provider": self.get_conf("chat_provider", default="ollama"),
+            "chat_provider_profile_id": self.get_conf(
+                "chat_provider_profile_id",
+                default="",
+            ),
+            "chat_model": self.get_conf(
+                "chat_model",
+                default="gpt-oss-20b-abliterated",
+            ),
+            "completion_model": self.get_conf("completion_model", default=""),
+            "chat_temperature": self._chat_temperature_conf_value(),
+            "max_tokens": normalize_chat_max_tokens(
+                self.get_conf("max_tokens", default=1024)
+            ),
+            "completions_enabled": bool(
+                self.get_conf("completions_enabled", default=True)
+            ),
+            "completion_temperature": float(
+                self.get_conf("completion_temperature", default=0.15) or 0.15
+            ),
+            "completion_max_tokens": int(
+                self.get_conf("completion_max_tokens", default=256) or 256
+            ),
+            "debounce_ms": int(self.get_conf("debounce_ms", default=300) or 300),
+            "completion_shortcut": self.get_conf(
+                "completion_shortcut",
+                default="Ctrl+Shift+Space",
+            ),
+            "completion_accept_word_shortcut": self.get_conf(
+                "completion_accept_word_shortcut",
+                default="Alt+Right",
+            ),
+            "completion_accept_line_shortcut": self.get_conf(
+                "completion_accept_line_shortcut",
+                default="Alt+Shift+Right",
+            ),
+            "chat_system_prompt": self.get_conf(
+                "chat_system_prompt",
+                default="",
+            ),
+            "prompt_explain": self.get_conf("prompt_explain", default=""),
+            "prompt_fix": self.get_conf("prompt_fix", default=""),
+            "prompt_docstring": self.get_conf("prompt_docstring", default=""),
+            "prompt_ask": self.get_conf("prompt_ask", default=""),
+        }
+
+    def _create_assistant_settings_dialog(self):
+        """Build the global assistant settings dialog from current state."""
+        dialog = AssistantSettingsDialog(
+            models=self._discovered_models_snapshot(),
+            settings=self._assistant_settings_snapshot(),
+            parent=self,
+        )
+        dialog.manage_profiles_requested.connect(
+            self._open_provider_profiles_dialog
+        )
+        dialog.manage_profiles_requested.connect(
+            lambda: dialog.replace_models(self._discovered_models_snapshot())
+        )
+        dialog.refresh_models_requested.connect(self._refresh_models)
+        dialog.refresh_models_requested.connect(
+            lambda: dialog.replace_models(self._discovered_models_snapshot())
+        )
+        return dialog
+
+    def _apply_assistant_settings(self, settings):
+        """Persist the global assistant settings exposed from the pane."""
+        settings = dict(settings or {})
+        current = self._assistant_settings_snapshot()
+        changed_provider = False
+        changed_model = False
+        changed_any = False
+
+        for key, value in settings.items():
+            if current.get(key) == value:
+                continue
+            self.set_conf(key, value)
+            changed_any = True
+            if key in {"ollama_host", "chat_provider", "chat_provider_profile_id"}:
+                changed_provider = True
+            if key in {"chat_model", "completion_model"}:
+                changed_model = True
+
+        if not changed_any:
+            return False
+
+        logger.info(
+            "Saved assistant settings: provider=%s profile=%s chat_model=%s completion_model=%s",
+            settings.get("chat_provider", current.get("chat_provider", "")),
+            settings.get(
+                "chat_provider_profile_id",
+                current.get("chat_provider_profile_id", ""),
+            ) or "<none>",
+            settings.get("chat_model", current.get("chat_model", "")),
+            settings.get("completion_model", current.get("completion_model", "")),
+        )
+
+        if changed_provider:
+            self.update_chat_provider_settings()
+        elif changed_model:
+            self.sync_model_selection_from_conf()
+
+        return True
+
+    def _open_assistant_settings_dialog(self):
+        """Open the global assistant settings dialog from the pane."""
+        dialog = self._create_assistant_settings_dialog()
+        self._assistant_settings_dialog = dialog
+        try:
+            if dialog.exec_() != dialog.Accepted:
+                self._sync_chat_settings_button(self._active_session)
+                return False
+            return self._apply_assistant_settings(dialog.selected_settings())
+        finally:
+            if self._assistant_settings_dialog is dialog:
+                self._assistant_settings_dialog = None
+
     def _chat_temperature_conf_value(self):
         """Return one safe config-backed chat temperature source value."""
         try:
@@ -1127,7 +1296,7 @@ class ChatWidget(PluginMainWidget):
         """Return the active tab settings summary shown in the UI."""
         return "\n".join(
             [
-                "Adjust inference settings for the active chat tab.",
+                "Tab overrides:",
                 (
                     "Temperature: "
                     f"{format_chat_temperature(metadata['temperature'])} "
@@ -1717,7 +1886,7 @@ class ChatWidget(PluginMainWidget):
         if not self._current_model:
             session.display.append_error(
                 "No chat model selected. Check the configured providers, then "
-                "use 'Refresh Models' from the options menu."
+                "use 'Refresh Models' from Settings."
             )
             return False
 
@@ -1737,7 +1906,7 @@ class ChatWidget(PluginMainWidget):
         if not self._current_model:
             session.display.append_error(
                 "No chat model selected. Check the configured providers, then "
-                "use 'Refresh Models' from the options menu."
+                "use 'Refresh Models' from Settings."
             )
             return False
 

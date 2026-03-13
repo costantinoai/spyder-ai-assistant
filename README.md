@@ -37,13 +37,14 @@ The plugin registers automatically. After restart:
 
 - Open the chat panel: **View > Panes > AI Chat**
 - Pick your model from the toolbar dropdown
+- Open **Settings** inside the chat pane for assistant-wide settings, tab overrides, and provider profiles
 - Start typing — inline completions appear automatically as ghost text
 
 **To manually trigger an inline suggestion:** press `Ctrl+Shift+Space`.
 
 That's it. Everything runs locally and works offline.
 
-> **Optional:** to use cloud or self-hosted chat endpoints, open **AI Chat > Sessions > Provider Profiles...** and add one or more OpenAI-compatible profiles.
+> **Optional:** to use cloud or self-hosted endpoints, open **AI Chat > Settings > Provider Profiles...** and add one or more OpenAI-compatible profiles. Their recognized models then appear in the chat and completion dropdowns automatically.
 
 ---
 
@@ -62,8 +63,9 @@ Copilot-style ghost text that appears as you type, powered by Ollama's Fill-in-M
 | `Alt+Right` | Accept next word |
 | `Alt+Shift+Right` | Accept next line |
 | `Escape` | Dismiss |
+| `Backspace` | Dismiss and keep editing |
 
-The provider is tuned beyond a basic API call: it caches recent prompts, trims suffix overlap so brackets aren't duplicated, filters repetitive output, pulls relevant snippets from other open files for richer context, suppresses Spyder's native popup when a ghost suggestion is active, and cycles through alternative candidates locally without extra model round-trips. The status bar shows the active completion model and its state (`generating`, `offline`, or ready).
+The provider is tuned beyond a basic API call: it caches recent prompts, trims suffix overlap so brackets aren't duplicated, filters repetitive output, pulls relevant snippets from other open files for richer context, suppresses Spyder's native popup when a ghost suggestion is active, and cycles through alternative candidates locally without extra model round-trips. Explicit dismissals (`Escape`, `Backspace`) are forgotten as soon as the editor content changes. The status bar shows the active completion model and its state (`generating`, `offline`, or ready).
 
 ### Chat panel
 
@@ -123,14 +125,14 @@ The **Sessions** button keeps session actions in one place. Its history browser 
 
 ### Multi-provider support
 
-By default, everything runs through Ollama. For chat, you can also manage multiple named OpenAI-compatible profiles from **AI Chat > Sessions > Provider Profiles...**.
+By default, the built-in local path uses Ollama. You can also manage multiple named OpenAI-compatible profiles from **AI Chat > Settings > Provider Profiles...** and use them for chat and inline completions.
 
 - each profile has its own label, endpoint, API key, and enabled state
 - the shared model selector groups entries by provider/profile and keeps endpoint details in the tooltip
 - the status label reports provider issues without hiding working models
 - removing a stale profile falls back cleanly to another available model
 
-Inline completions stay Ollama-backed for low latency.
+Inline completions follow the configured completion provider and model while keeping the same ghost-text UX.
 
 ---
 
@@ -172,12 +174,13 @@ Running chat and completions simultaneously keeps both models in VRAM. A 7B chat
 
 ## Configuration
 
-All settings live in **Preferences**:
+All assistant settings live in the chat pane under **Settings**:
 
-- **Preferences > AI Chat** — default chat provider, Ollama server URL, model names, temperature, max tokens, keyboard shortcuts, system prompt, and action prompt templates (with `{filename}` and `{code}` placeholders)
-- **Preferences > Completion and linting > AI Chat** — completion toggle, model, temperature, max tokens, debounce delay
+- **Settings > Assistant Settings...** — default chat model, default completion model, Ollama host, generation defaults, shortcuts, system prompt, and action prompt templates (with `{filename}` and `{code}` placeholders)
+- **Settings > Tab Overrides...** — per-tab temperature and max-token overrides
+- **Settings > Provider Profiles...** — named OpenAI-compatible endpoints and API keys whose discovered models populate the chat/completion selectors
 
-OpenAI-compatible chat endpoints are managed directly from the chat pane through **Sessions > Provider Profiles...**. Existing single-endpoint settings are imported automatically the first time you open that dialog.
+Existing single-endpoint settings are imported automatically the first time you open the provider-profiles dialog.
 
 Per-tab chat modes and inference overrides are set directly in the chat pane and persist with the session.
 
@@ -185,9 +188,9 @@ Per-tab chat modes and inference overrides are set directly in the chat pane and
 
 ## Troubleshooting
 
-**"No models found" in the dropdown** — Run `curl http://localhost:11434/api/tags` to check Ollama, or pull a model with `ollama pull qwen2.5:7b`. For OpenAI-compatible profiles, open **Sessions > Provider Profiles...** and confirm the endpoint responds on `/v1/models`.
+**"No models found" in the dropdown** — Run `curl http://localhost:11434/api/tags` to check Ollama, or pull a model with `ollama pull qwen2.5:7b`. For OpenAI-compatible profiles, open **Settings > Provider Profiles...** and confirm the endpoint responds on `/v1/models`.
 
-**Completions aren't appearing** — Enable them in Preferences > Completion and linting > AI Chat. The status bar should show `AI: model-name`. If it says `AI: offline`, Ollama isn't reachable.
+**Completions aren't appearing** — Enable them in **Settings > Assistant Settings...**. The status bar should show `AI: model-name`. If it says `AI: offline`, check the selected provider/profile and model availability.
 
 **Chat panel doesn't show up** — Check View > Panes for "AI Chat". If missing, the plugin may be in a different Python env than Spyder. Verify: `python -c "import spyder_ai_assistant; print('OK')"`.
 

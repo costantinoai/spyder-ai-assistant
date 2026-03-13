@@ -73,6 +73,23 @@ MIDDLE_OF_LINE_ALLOWED_SUFFIX_RE = re.compile(
 PYTHON_BLOCK_START_RE = re.compile(
     r"^\s*(?:async\s+def|def|class|if|elif|else|for|while|with|try|except|finally|match|case)\b.*:\s*$"
 )
+PYTHON_CONTINUATION_LINE_RE = re.compile(
+    r".*(?:"
+    r"[\+\-\*/%&\|\^=,\\\(\[\{]\s*$|"
+    r"(?:==|!=|<=|>=|<|>|//|\*\*|<<|>>)\s*$|"
+    r"\b(?:and|or|in|is|not)\s*$"
+    r")"
+)
+_LEADING_OPERATOR_CONTINUATION_RE = re.compile(
+    r"^(?:"
+    r"[\+\*/%&\|\^]|"
+    r"//|"
+    r"\*\*|"
+    r"<<|>>|"
+    r"\b(?:and|or|in|is)\b|"
+    r","
+    r")"
+)
 
 _COMMENT_MARKERS_BY_EXTENSION = {
     ".py": "#",
@@ -177,10 +194,13 @@ class _CompletionTarget:
     column: int
     offset: int
     current_word: str = ""
+    insert_line: int | None = None
+    insert_column: int | None = None
+    insert_offset: int | None = None
 
     def to_payload(self):
         """Serialize a target for ghost-text routing."""
-        return {
+        payload = {
             "filename": self.filename,
             "version": self.version,
             "line": self.line,
@@ -188,6 +208,13 @@ class _CompletionTarget:
             "offset": self.offset,
             "current_word": self.current_word,
         }
+        if self.insert_line is not None:
+            payload["insert_line"] = self.insert_line
+        if self.insert_column is not None:
+            payload["insert_column"] = self.insert_column
+        if self.insert_offset is not None:
+            payload["insert_offset"] = self.insert_offset
+        return payload
 
 
 class _CompletionCandidateStore:
@@ -357,12 +384,57 @@ def _summarize_target_for_log(target):
     """Return one compact target string for logs."""
     if target is None:
         return "<none>"
-    return (
+    summary = (
         f"{os.path.basename(target.filename)}"
         f":v{target.version}"
         f":L{target.line + 1}:C{target.column + 1}"
         f":offset={target.offset}"
         f":word={target.current_word!r}"
+    )
+    if (
+        target.insert_offset is not None
+        and target.insert_offset != target.offset
+    ):
+        summary += (
+            f":insert=L{(target.insert_line or 0) + 1}"
+            f":C{(target.insert_column or 0) + 1}"
+            f":offset={target.insert_offset}"
+        )
+    return summary
+
+
+def _resolve_completion_anchor(text, line, column, offset):
+    """Return the preferred insertion anchor for one completion request."""
+    text = str(text or "")
+    offset = max(0, min(int(offset or 0), len(text)))
+    line = max(0, int(line or 0))
+    column = max(0, int(column or 0))
+
+    line_start = text.rfind("\n", 0, offset) + 1
+    current_line_prefix = text[line_start:offset]
+    if current_line_prefix.strip():
+        return line, column, offset
+
+    if line_start <= 0:
+        return line, column, offset
+
+    previous_line_end = line_start - 1
+    previous_line_start = text.rfind("\n", 0, previous_line_end) + 1
+    previous_line = text[previous_line_start:previous_line_end]
+    stripped_previous = previous_line.rstrip()
+    if not stripped_previous:
+        return line, column, offset
+
+    if PYTHON_BLOCK_START_RE.match(stripped_previous):
+        return line, column, offset
+
+    if not PYTHON_CONTINUATION_LINE_RE.match(stripped_previous):
+        return line, column, offset
+
+    return (
+        max(0, line - 1),
+        len(previous_line),
+        previous_line_end,
     )
 
 
@@ -465,7 +537,32 @@ def _clean_completion(raw_text, prefix, suffix=""):
     if not raw_text:
         return ""
 
-    text = raw_text
+    text = str(raw_text or "")
+
+    # --- Step 0: Strip leaked chat-template echoes early ---
+    # Some local chat-style fallback outputs append the prompt/template
+    # markers after valid code, e.g.:
+    #   "b<|endoftext|>Human: Complete the code ..."
+    # Keep only the code before those leaked protocol tokens.
+    leak_markers = (
+        "<|endoftext|>",
+        "<|eot_id|>",
+        "<|start_header_id|>",
+        "Human:",
+        "User:",
+        "Assistant:",
+        "\nHuman:",
+        "\nUser:",
+        "\nAssistant:",
+    )
+    leak_positions = [
+        position
+        for marker in leak_markers
+        for position in [text.find(marker)]
+        if position > 0
+    ]
+    if leak_positions:
+        text = text[: min(leak_positions)]
 
     # --- Step 1: Strip markdown code fences ---
     # Pattern A: Full wrapping (```python\n...\n```)
@@ -565,6 +662,23 @@ def _clean_completion(raw_text, prefix, suffix=""):
     return cleaned
 
 
+_GENERIC_COMPLETION_MODEL_NAMES = {
+    "",
+    "completion-model",
+    "fake/completion-model",
+    "fake",
+}
+
+
+def _short_completion_model_label(model_name):
+    """Return a readable short label for the active completion model."""
+    normalized = str(model_name or "").strip()
+    if not normalized:
+        return "unconfigured"
+    tail = normalized.split("/")[-1]
+    return tail.split(":")[0] or normalized
+
+
 def _build_completion_path_marker(filename):
     """Return a small path marker that improves completion prompt quality."""
     basename = os.path.basename(filename or "") or "untitled"
@@ -646,10 +760,12 @@ def _looks_like_valid_middle_of_line_suffix(suffix):
 def _should_allow_multiline_completion(prefix):
     """Allow multiline completions only in block-like contexts."""
     current_line = prefix.rsplit("\n", 1)[-1]
-    if current_line and not current_line.strip():
-        indentation = len(current_line) - len(current_line.lstrip(" \t"))
-        if indentation > 0:
-            return True
+    if not current_line.strip():
+        lines = prefix.splitlines()
+        for line in reversed(lines):
+            stripped = line.rstrip()
+            if stripped.strip():
+                return True
 
     lines = prefix.splitlines()
     for line in reversed(lines):
@@ -707,6 +823,55 @@ def _looks_repetitive_completion(completion_text):
         return True
 
     return False
+
+
+def _looks_like_invalid_blank_line_operator_continuation(
+    text,
+    target,
+    completion_text,
+):
+    """Reject bare operator continuations on a fresh blank line.
+
+    Example to reject:
+        result = a + b + c + d
+        + e + f
+
+    That only makes sense when the insertion anchor was already moved back to
+    the unfinished previous line, or when the previous line is a real Python
+    continuation. On a new blank line after a complete statement, it is noise.
+    """
+    if not text or not completion_text or target is None:
+        return False
+
+    if target.insert_offset is not None and target.insert_offset != target.offset:
+        return False
+
+    offset = max(0, min(int(target.offset or 0), len(text)))
+    line_start = text.rfind("\n", 0, offset) + 1
+    current_line_prefix = text[line_start:offset]
+    if current_line_prefix.strip():
+        return False
+
+    if line_start <= 0:
+        return False
+
+    previous_line_end = line_start - 1
+    previous_line_start = text.rfind("\n", 0, previous_line_end) + 1
+    previous_line = text[previous_line_start:previous_line_end].rstrip()
+    if not previous_line.strip():
+        return False
+
+    if PYTHON_BLOCK_START_RE.match(previous_line):
+        return False
+
+    if PYTHON_CONTINUATION_LINE_RE.match(previous_line):
+        return False
+
+    normalized = str(completion_text or "").lstrip()
+    if not normalized:
+        return False
+
+    return bool(_LEADING_OPERATOR_CONTINUATION_RE.match(normalized))
 
 
 def _finalize_completion_text(completion_text, suffix):
@@ -867,10 +1032,12 @@ class CompletionWorker(QObject):
                 raw_text or "", prefix, suffix
             )
             logger.info(
-                "Completion worker finished req_id=%d raw_chars=%d cleaned_chars=%d",
+                "Completion worker finished req_id=%d raw_chars=%d cleaned_chars=%d raw_preview=%r cleaned_preview=%r",
                 req_id,
                 len(raw_text or ""),
                 len(completion_text or ""),
+                _summarize_text_for_log(raw_text, max_chars=120),
+                _summarize_text_for_log(completion_text, max_chars=120),
             )
 
             if not completion_text:
@@ -1036,6 +1203,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._completion_cache = _CompletionCache()
         self._candidate_store = _CompletionCandidateStore()
         self._shown_candidates = {}
+        self._dismissed_targets = {}
         self._metrics = {
             "requests_received": 0,
             "skipped": 0,
@@ -1053,6 +1221,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             "cycled": 0,
             "alternatives_requested": 0,
             "dismissed_escape": 0,
+            "dismissed_backspace": 0,
             "dismissed_typing": 0,
             "dismissed_cursor_move": 0,
             "dismissed_popup_visible": 0,
@@ -1108,16 +1277,13 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._started = True
 
         # Show the active model name in the status bar
-        model = self.get_conf("completion_model")
         backend_settings = self._resolve_completion_backend_settings()
-        # Shorten long model names for the status bar (e.g., "qooba/qwen3-..." → last part)
-        short_model = model.split("/")[-1].split(":")[0] if "/" in model else model
-        self._update_status(f"AI: {short_model}")
+        self._update_status(self._ready_status_text(backend_settings))
 
         logger.info(
             "AI completion provider started: model=%s provider=%s endpoint=%s "
             "temperature=%s max_tokens=%s debounce_ms=%s",
-            model,
+            self.get_conf("completion_model"),
             backend_settings["provider_kind"],
             backend_settings["endpoint"],
             self.get_conf("completion_temperature"),
@@ -1143,6 +1309,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._completion_cache.clear()
         self._candidate_store.clear()
         self._shown_candidates.clear()
+        self._dismissed_targets.clear()
         logger.info("AI completion provider shut down")
 
     def send_request(self, language, req_type, req, req_id):
@@ -1168,6 +1335,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
                     text=text,
                     version=1,
                 )
+                self._dismissed_targets.pop(filename, None)
                 logger.debug(
                     "DID_OPEN: tracked %s (version=%d, %d chars)",
                     filename,
@@ -1194,6 +1362,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
                     text=text,
                     version=version,
                 )
+                self._dismissed_targets.pop(filename, None)
                 logger.debug(
                     "DID_CHANGE: tracked %s (version=%d, %d chars)",
                     filename,
@@ -1207,6 +1376,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
                 self._document_states.pop(filename, None)
                 self._latest_target_by_filename.pop(filename, None)
                 self._shown_candidates.pop(filename, None)
+                self._dismissed_targets.pop(filename, None)
 
         elif req_type == CompletionRequestTypes.DOCUMENT_COMPLETION:
             # Completion request — debounce to avoid spamming the model
@@ -1316,6 +1486,14 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             req_id,
             _summarize_target_for_log(target),
         )
+
+        if self._is_target_dismissed(target):
+            self._dismissed_targets.pop(target.filename, None)
+            logger.info(
+                "Manual AI completion req_id=%d cleared explicit dismissal for %s so the same target can be shown again",
+                req_id,
+                target.filename,
+            )
 
         if not self.get_conf("completions_enabled"):
             logger.info(
@@ -1476,7 +1654,12 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             self._emit_empty_response(req_id)
             return
 
-        offset = max(0, min(target.offset, len(text)))
+        anchor_offset = (
+            target.insert_offset
+            if target.insert_offset is not None
+            else target.offset
+        )
+        offset = max(0, min(anchor_offset, len(text)))
 
         # Split file content at cursor position into prefix (before cursor)
         # and suffix (after cursor) for the FIM model
@@ -1520,7 +1703,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         allow_multiline = _should_allow_multiline_completion(prefix)
 
         # Build model options from config
-        model = self.get_conf("completion_model")
+        model = self._resolved_completion_model()
         backend_settings = self._resolve_completion_backend_settings()
         options = {
             "temperature": self.get_conf("completion_temperature"),
@@ -1678,11 +1861,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         if not self._started:
             return
 
-        model = self.get_conf("completion_model")
-        short_model = (
-            model.split("/")[-1].split(":")[0] if "/" in model else model
-        )
-        self._update_status(f"AI: {short_model}")
+        self._update_status(self._ready_status_text())
 
     def _emit_empty_response(self, req_id):
         """Emit an empty completion response for a request id."""
@@ -1767,6 +1946,24 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         if self.get_conf("completions_enabled"):
             self._set_ready_status()
 
+    def _resolved_completion_model(self):
+        """Return the configured live completion model after light healing."""
+        model = str(self.get_conf("completion_model") or "").strip()
+        if model not in _GENERIC_COMPLETION_MODEL_NAMES:
+            return model
+        default_model = dict(self.CONF_DEFAULTS).get("completion_model", "")
+        logger.warning(
+            "Completion model config was generic/invalid (%r); falling back to %r",
+            model,
+            default_model,
+        )
+        return str(default_model or "").strip()
+
+    def _ready_status_text(self, backend_settings=None):
+        """Return the steady-state status label for the live completion model."""
+        del backend_settings
+        return f"AI: {_short_completion_model_label(self._resolved_completion_model())}"
+
     @on_conf_change(option="ollama_host")
     def on_host_changed(self, value):
         """Update completion backend settings when the Ollama host changes."""
@@ -1806,6 +2003,10 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
     @on_conf_change(option="completion_model")
     def on_completion_model_changed(self, _value):
         """Refresh steady-state status and clear stale cached completions."""
+        resolved_model = self._resolved_completion_model()
+        if resolved_model != str(self.get_conf("completion_model") or "").strip():
+            self.set_conf("completion_model", resolved_model)
+            return
         self._completion_cache.clear()
         self._candidate_store.clear()
         if self.get_conf("completions_enabled"):
@@ -1851,14 +2052,41 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
         state = self._document_states.get(filename)
         version = state.version if state is not None else 0
+        line = int(req.get("line", 0))
+        column = int(req.get("column", 0))
+        offset = int(req.get("offset", 0))
+        insert_line, insert_column, insert_offset = _resolve_completion_anchor(
+            state.text if state is not None else "",
+            line,
+            column,
+            offset,
+        )
+        if insert_offset != offset:
+            logger.info(
+                "Adjusted AI completion anchor for %s from cursor L%d:C%d offset=%d to insert L%d:C%d offset=%d",
+                filename,
+                line + 1,
+                column + 1,
+                offset,
+                insert_line + 1,
+                insert_column + 1,
+                insert_offset,
+            )
 
         return _CompletionTarget(
             filename=filename,
             version=version,
-            line=int(req.get("line", 0)),
-            column=int(req.get("column", 0)),
-            offset=int(req.get("offset", 0)),
-            current_word=str(req.get("current_word", "") or ""),
+            line=line,
+            column=column,
+            offset=offset,
+            current_word=(
+                ""
+                if insert_offset != offset
+                else str(req.get("current_word", "") or "")
+            ),
+            insert_line=(insert_line if insert_offset != offset else None),
+            insert_column=(insert_column if insert_offset != offset else None),
+            insert_offset=(insert_offset if insert_offset != offset else None),
         )
 
     def _is_target_current(self, target):
@@ -1869,6 +2097,11 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
         latest_target = self._latest_target_by_filename.get(target.filename)
         return latest_target == target
+
+    def _is_target_dismissed(self, target):
+        """Return True when one target was explicitly dismissed by the user."""
+        dismissed = self._dismissed_targets.get(target.filename)
+        return dismissed == target
 
     @staticmethod
     def _should_skip_completion(req, prefix, suffix):
@@ -1907,17 +2140,46 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         elif event_name == "dismissed":
             metric_name = {
                 "escape": "dismissed_escape",
+                "backspace": "dismissed_backspace",
                 "typing": "dismissed_typing",
                 "cursor_move": "dismissed_cursor_move",
                 "popup_visible": "dismissed_popup_visible",
             }.get(reason)
             if metric_name:
                 self._increment_metric(metric_name)
+            if reason in {"escape", "backspace"} and filename:
+                state = self._document_states.get(filename)
+                self._dismissed_targets[filename] = _CompletionTarget(
+                    filename=filename,
+                    version=int(target.get("version", getattr(state, "version", 0)) or 0),
+                    line=int(target.get("line", 0)),
+                    column=int(target.get("column", 0)),
+                    offset=int(target.get("offset", 0)),
+                    current_word=str(target.get("current_word", "") or ""),
+                    insert_line=(
+                        int(target["insert_line"])
+                        if target.get("insert_line") is not None
+                        else None
+                    ),
+                    insert_column=(
+                        int(target["insert_column"])
+                        if target.get("insert_column") is not None
+                        else None
+                    ),
+                    insert_offset=(
+                        int(target["insert_offset"])
+                        if target.get("insert_offset") is not None
+                        else None
+                    ),
+                )
         elif event_name == "suppressed" and reason in (
             "popup_visible",
             "native_popup",
         ):
             self._increment_metric("suppressed_popup_visible")
+
+        if event_name == "accepted" and filename:
+            self._dismissed_targets.pop(filename, None)
 
         if event_name in {"dismissed", "accepted"} and filename:
             self._shown_candidates.pop(filename, None)
@@ -1971,9 +2233,23 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             self._finish_request(req_id)
             return
 
+        if self._is_target_dismissed(target):
+            logger.info(
+                "Suppressed AI completion req_id=%d for %s because the target was explicitly dismissed",
+                req_id,
+                filename,
+            )
+            self._finish_request(req_id)
+            return
+
         current_suffix = ""
-        if state is not None and 0 <= target.offset <= len(state.text):
-            current_suffix = state.text[target.offset:]
+        current_offset = (
+            target.insert_offset
+            if target.insert_offset is not None
+            else target.offset
+        )
+        if state is not None and 0 <= current_offset <= len(state.text):
+            current_suffix = state.text[current_offset:]
 
         if source == "cache":
             final_text = completion_text or ""
@@ -1983,14 +2259,38 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
                 completion_text,
                 current_suffix,
             )
+            if (
+                final_text
+                and state is not None
+                and _looks_like_invalid_blank_line_operator_continuation(
+                    state.text,
+                    target,
+                    final_text,
+                )
+            ):
+                logger.info(
+                    "Rejecting AI completion req_id=%d for %s because it starts with a bare operator on a fresh blank line: preview=%r",
+                    req_id,
+                    filename,
+                    _summarize_text_for_log(final_text, max_chars=100),
+                )
+                final_text = ""
+                filter_reason = "invalid_operator_continuation"
 
-        if cache_key is not None:
+        if cache_key is not None and final_text:
             self._completion_cache.put(
                 cache_key,
                 {
                     "text": final_text,
                     "filter_reason": filter_reason,
                 },
+            )
+        elif cache_key is not None and filter_reason:
+            logger.info(
+                "Not caching empty filtered AI completion req_id=%d for %s: reason=%s",
+                req_id,
+                filename,
+                filter_reason,
             )
 
         if final_text and filename and self.get_conf("completions_enabled"):
@@ -2059,8 +2359,12 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         metrics = self.get_metrics_snapshot()
         backend_settings = self._resolve_completion_backend_settings()
         provider_label = backend_settings.get("provider_label", "AI")
+        model_name = self._resolved_completion_model()
         tooltip_lines = [
             f"AI Code Completion status ({provider_label})",
+            "",
+            f"Model: {model_name or 'unconfigured'}",
+            f"Endpoint: {backend_settings.get('endpoint', '') or 'unknown'}",
             "",
             f"Requests: {metrics['requests_received']}",
             (

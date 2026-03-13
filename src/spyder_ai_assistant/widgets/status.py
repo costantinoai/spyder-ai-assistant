@@ -3,7 +3,7 @@
 Shows the current state of the AI completion system in Spyder's status bar:
 - "AI: model-name" when ready and enabled
 - "AI: disabled" when completions are turned off
-- "AI: offline" when the Ollama server is unreachable
+- "AI: offline" when the active completion backend is unreachable
 
 Registered via STATUS_BAR_CLASSES on the completion provider.
 """
@@ -28,7 +28,7 @@ class AIChatCompletionStatus(StatusBarWidget):
 
     def get_tooltip(self):
         """Tooltip shown on hover over the status bar item."""
-        return "AI Code Completion status (Ollama)"
+        return "AI Code Completion status"
 
     def set_value(self, value):
         """Update the displayed status text.

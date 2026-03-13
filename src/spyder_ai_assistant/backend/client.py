@@ -14,9 +14,36 @@ from ollama import Client
 logger = logging.getLogger(__name__)
 
 
-def build_completion_system_prompt(system=None):
+def _blank_line_after_complete_statement(prefix):
+    """Return True when the cursor is on a fresh line after a complete line."""
+    text = str(prefix or "")
+    current_line = text.rsplit("\n", 1)[-1]
+    if current_line.strip():
+        return False
+
+    lines = text.splitlines()
+    for line in reversed(lines):
+        stripped = line.rstrip()
+        if not stripped.strip():
+            continue
+        if stripped.endswith(("(", "[", "{", "\\", "+", "-", "*", "/", "%", "&", "|", "^", ",")):
+            return False
+        if stripped.endswith((" and", " or", " in", " is", " not")):
+            return False
+        if stripped.endswith(":"):
+            return False
+        return True
+    return False
+
+
+def _has_meaningful_suffix_context(suffix):
+    """Return True when the suffix contains more than whitespace."""
+    return bool(str(suffix or "").strip())
+
+
+def build_completion_system_prompt(system=None, *, blank_line_mode=False):
     """Return the shared system prompt for completion backends."""
-    return system or (
+    base = system or (
         "You are a code completion engine inside an IDE. "
         "Fill in the code between the prefix (before cursor) and "
         "suffix (after cursor). "
@@ -31,6 +58,13 @@ def build_completion_system_prompt(system=None):
         "7) Write complete, well-structured code. Include docstrings, "
         "comments, and full function bodies when appropriate."
     )
+    if blank_line_mode:
+        base += (
+            " 8) If the cursor is on a fresh blank line after a complete "
+            "statement, start the next statement or block on the current line. "
+            "Do NOT continue the previous line with a leading operator or comma."
+        )
+    return base
 
 
 def build_completion_stop_sequences(single_line=False):
@@ -45,18 +79,56 @@ def build_completion_stop_sequences(single_line=False):
     ]
 
 
-def build_completion_user_prompt(prefix, suffix=""):
+def _is_blank_line_completion_context(prefix):
+    """Return True when the cursor sits on an otherwise blank line."""
+    current_line = (prefix or "").rsplit("\n", 1)[-1]
+    return not current_line.strip()
+
+
+def build_completion_user_prompt(
+    prefix,
+    suffix="",
+    single_line=False,
+    *,
+    blank_line_mode=False,
+):
     """Render one provider-agnostic prefix/suffix completion prompt."""
-    return (
-        "[PREFIX]\n"
-        f"{prefix or ''}\n"
-        "[/PREFIX]\n"
-        "[SUFFIX]\n"
-        f"{suffix or ''}\n"
-        "[/SUFFIX]\n"
-        "Return only the code that should be inserted between PREFIX and "
-        "SUFFIX. Do not wrap the answer in markdown."
+    completion_scope = (
+        "Return a concise continuation for the current line."
+        if single_line
+        else "Return the next complete code block or lines to insert."
     )
+    if blank_line_mode:
+        completion_scope = (
+            "Return the next statement or block that should start on the "
+            "current blank line."
+        )
+    return (
+        "Complete the code at the cursor and return only the inserted text.\n\n"
+        "Prefix (before cursor):\n"
+        f"{prefix or ''}\n\n"
+        "Suffix (after cursor):\n"
+        f"{suffix or ''}\n\n"
+        f"{completion_scope} "
+        "Return only the code to insert at the cursor. "
+        "Do not repeat the prefix. Do not repeat the suffix. "
+        "Do not start with a bare operator or comma when the current line is blank. "
+        "Do not use markdown fences or explanations."
+    )
+
+
+def _looks_like_empty_completion_meta(text):
+    """Return True when one completion response is only formatting/meta."""
+    stripped = str(text or "").strip().lower()
+    if not stripped:
+        return True
+    fence_only = {
+        "```",
+        "```python",
+        "```py",
+        "python",
+    }
+    return stripped in fence_only
 
 
 class OllamaClient:
@@ -215,7 +287,11 @@ class OllamaClient:
         """
         from ollama import ResponseError
 
-        default_system = build_completion_system_prompt(system=system)
+        blank_line_mode = _blank_line_after_complete_statement(prefix)
+        default_system = build_completion_system_prompt(
+            system=system,
+            blank_line_mode=blank_line_mode,
+        )
         merged_options = dict(options or {})
 
         # Add stop sequences to prevent the model from generating too much.
@@ -238,7 +314,10 @@ class OllamaClient:
         # Try FIM (with suffix) first, unless we already know this model
         # doesn't support it. Fall back to prefix-only on "does not support
         # insert" errors.
-        use_suffix = suffix and model not in self._fim_unsupported_models
+        use_suffix = (
+            _has_meaningful_suffix_context(suffix)
+            and model not in self._fim_unsupported_models
+        )
 
         if use_suffix:
             try:
@@ -267,7 +346,61 @@ class OllamaClient:
                 else:
                     raise
 
-        # Prefix-only completion (no suffix/FIM)
+        # Prefix-only fallback works poorly on several local models because it
+        # tends to emit markdown fences or other meta tokens. Use the chat API
+        # instead, which behaves much more reliably for these models.
+        try:
+            response_text = self._generate_completion_via_chat(
+                model=model,
+                prefix=prefix,
+                suffix=suffix,
+                system=default_system,
+                options=merged_options,
+                single_line=single_line,
+                blank_line_mode=blank_line_mode,
+            )
+            if _looks_like_empty_completion_meta(response_text):
+                logger.info(
+                    "Ollama completion chat fallback returned meta-only output: model=%s raw=%r",
+                    model,
+                    response_text,
+                )
+                if single_line and _is_blank_line_completion_context(prefix):
+                    retry_options = dict(merged_options)
+                    retry_options["stop"] = build_completion_stop_sequences(
+                        single_line=False
+                    )
+                    retry_text = self._generate_completion_via_chat(
+                        model=model,
+                        prefix=prefix,
+                        suffix=suffix,
+                        system=default_system,
+                        options=retry_options,
+                        single_line=False,
+                        blank_line_mode=blank_line_mode,
+                    )
+                    logger.info(
+                        "Ollama completion blank-line retry response received via chat fallback: model=%s chars=%d raw=%r",
+                        model,
+                        len(retry_text or ""),
+                        retry_text,
+                    )
+                    if not _looks_like_empty_completion_meta(retry_text):
+                        return retry_text
+            logger.info(
+                "Ollama completion response received via chat fallback: model=%s chars=%d",
+                model,
+                len(response_text or ""),
+            )
+            if not _looks_like_empty_completion_meta(response_text):
+                return response_text
+        except Exception as chat_error:
+            logger.info(
+                "Ollama completion chat fallback failed for model=%s; retrying prefix-only generate: %s",
+                model,
+                chat_error,
+            )
+
         response = self._client.generate(
             model=model,
             prompt=prefix,
@@ -275,12 +408,59 @@ class OllamaClient:
             options=merged_options,
             stream=False,
         )
+        response_text = getattr(response, "response", "") or ""
         logger.info(
             "Ollama completion response received via prefix-only mode: model=%s chars=%d",
             model,
-            len(getattr(response, "response", "") or ""),
+            len(response_text),
         )
-        return response.response
+        if _looks_like_empty_completion_meta(response_text):
+            logger.info(
+                "Ollama prefix-only completion looks like empty meta output: model=%s raw=%r",
+                model,
+                response_text,
+            )
+        return response_text
+
+    def _generate_completion_via_chat(
+        self, model, prefix, suffix, system, options, single_line,
+        blank_line_mode=False,
+    ):
+        """Generate one completion through Ollama's chat endpoint."""
+        messages = [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": build_completion_user_prompt(
+                    prefix,
+                    suffix,
+                    single_line=single_line,
+                    blank_line_mode=blank_line_mode,
+                ),
+            },
+        ]
+        logger.info(
+            "Ollama completion chat fallback request: host=%s model=%s single_line=%s prefix_chars=%d suffix_chars=%d stop=%s",
+            self._host,
+            model,
+            single_line,
+            len(prefix or ""),
+            len(suffix or ""),
+            options.get("stop"),
+        )
+        response = self._client.chat(
+            model=model,
+            messages=messages,
+            options=options,
+            stream=False,
+        )
+        message = getattr(response, "message", None)
+        if message is None and isinstance(response, dict):
+            message = response.get("message") or {}
+        content = getattr(message, "content", None)
+        if content is None and isinstance(message, dict):
+            content = message.get("content")
+        return str(content or "")
 
 
 class OpenAICompatibleCompletionClient:
@@ -314,11 +494,19 @@ class OpenAICompatibleCompletionClient:
             "messages": [
                 {
                     "role": "system",
-                    "content": build_completion_system_prompt(system=system),
+                    "content": build_completion_system_prompt(
+                        system=system,
+                        blank_line_mode=_blank_line_after_complete_statement(prefix),
+                    ),
                 },
                 {
                     "role": "user",
-                    "content": build_completion_user_prompt(prefix, suffix),
+                    "content": build_completion_user_prompt(
+                        prefix,
+                        suffix,
+                        single_line=single_line,
+                        blank_line_mode=_blank_line_after_complete_statement(prefix),
+                    ),
                 },
             ],
             "stream": False,

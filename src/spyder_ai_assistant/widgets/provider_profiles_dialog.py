@@ -44,9 +44,9 @@ class ProviderProfilesDialog(QDialog):
         layout = QVBoxLayout(self)
 
         intro = QLabel(
-            "Manage named OpenAI-compatible chat endpoints here. "
-            "These profiles are used by the chat model selector. "
-            "Inline completions remain Ollama-backed."
+            "Manage named OpenAI-compatible endpoints here. "
+            "These profiles are used by the shared chat and completion "
+            "model selectors."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)

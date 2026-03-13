@@ -48,7 +48,10 @@ Below the input, the visible controls are intentionally compact:
 
 This keeps the common actions one click away without filling the pane with a
 large row of equally prominent buttons. The `Sessions` button opens history on
-click and exposes lower-frequency session actions from its menu.
+click and exposes lower-frequency session actions from its menu. The
+`Settings` button opens assistant-wide settings on click and exposes
+assistant settings, tab overrides, provider profiles, and model refresh from
+its menu.
 
 The model selector is provider-aware. The same dropdown can list:
 
@@ -87,8 +90,8 @@ The active chat tab also owns its own optional inference overrides.
 
 Controls:
 
-- `Settings` button in the chat pane
-- `Chat Settings...` action in the pane options menu
+- `Settings > Tab Overrides...` in the chat pane
+- `Tab Overrides...` action in the pane options menu
 
 Available overrides:
 
@@ -104,6 +107,16 @@ Behavior:
 - reopening or duplicating a saved session preserves its saved overrides
 - resetting a tab back to global defaults clears the saved override fields
 
+Assistant-wide settings stay beside those overrides instead of living in
+Spyder Preferences. `Settings > Assistant Settings...` contains:
+
+- recognized chat and completion model dropdowns
+- Ollama host
+- completion enable/disable
+- global temperature/token defaults
+- ghost-text shortcuts
+- base system prompt and editor action prompt templates
+
 ## Provider-aware chat transport
 
 Chat transport is intentionally broader than the completion transport.
@@ -114,10 +127,12 @@ Behavior:
 - multiple named OpenAI-compatible profiles can coexist
 - the provider switch happens in the same dock widget with no restart required
 - provider-specific connection failures identify the failing endpoint
-- provider profiles are managed from `Sessions > Provider Profiles...`
+- provider profiles are managed from `Settings > Provider Profiles...`
+- saved chat/completion model defaults are chosen from the recognized model
+  list returned by the local Ollama endpoint and enabled provider profiles
 - saving the profile dialog migrates any legacy single-endpoint config into the
   profile store so removed profiles stay removed
-- completions remain Ollama-backed in the current shipped design
+- completions can use the configured completion provider/profile and model
 
 ## Session persistence and history
 
