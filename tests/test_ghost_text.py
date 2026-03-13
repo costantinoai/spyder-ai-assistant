@@ -26,6 +26,7 @@ class _TestEditor(QPlainTextEdit):
 
     def do_completion(self):
         """No-op completion hook used by the manager shortcut."""
+        self.did_completion = True
 
 
 def _app():
@@ -133,3 +134,85 @@ def test_typing_through_one_matching_prefix_advances_the_ghost_text():
         event_name == "advanced" and payload.get("method") == "typed"
         for event_name, payload in events
     )
+
+
+def test_request_completion_prefers_manual_ai_requester():
+    _app()
+    editor = _TestEditor()
+    requests = []
+    manager = GhostTextManager(
+        editor,
+        manual_completion_requester=lambda: requests.append("manual"),
+    )
+
+    manager.request_completion()
+
+    assert requests == ["manual"]
+    assert not getattr(editor, "did_completion", False)
+
+
+def test_request_completion_falls_back_to_editor_completion():
+    _app()
+    editor = _TestEditor()
+    manager = GhostTextManager(editor)
+
+    manager.request_completion()
+
+    assert editor.did_completion
+
+
+def test_request_completion_falls_back_when_manual_requester_declines():
+    _app()
+    editor = _TestEditor()
+    manager = GhostTextManager(
+        editor,
+        manual_completion_requester=lambda: False,
+    )
+
+    manager.request_completion()
+
+    assert editor.did_completion
+
+
+def test_idle_completion_requests_when_editor_is_focused():
+    _app()
+    editor = _TestEditor()
+    requests = []
+    manager = GhostTextManager(
+        editor,
+        manual_completion_requester=lambda: requests.append("manual"),
+    )
+    manager._editor_has_focus = lambda: True
+
+    manager._request_idle_completion()
+
+    assert requests == ["manual"]
+
+
+def test_idle_completion_skips_when_ghost_text_is_visible():
+    _app()
+    editor = _TestEditor()
+    requests = []
+    manager = GhostTextManager(
+        editor,
+        manual_completion_requester=lambda: requests.append("manual"),
+    )
+    manager._editor_has_focus = lambda: True
+    editor.setPlainText("result = ")
+    _move_cursor_to_end(editor)
+    assert manager.show_suggestion("value")
+
+    manager._request_idle_completion()
+
+    assert requests == []
+
+
+def test_idle_completion_scheduler_stops_without_focus():
+    _app()
+    editor = _TestEditor()
+    manager = GhostTextManager(editor)
+    manager._editor_has_focus = lambda: False
+
+    manager._schedule_idle_completion()
+
+    assert not manager._idle_completion_timer.isActive()

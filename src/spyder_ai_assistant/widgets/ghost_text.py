@@ -33,12 +33,15 @@ Usage (from plugin.py):
 """
 
 import logging
+import time
 
-from qtpy.QtCore import Qt, QEvent, QObject
+from qtpy.QtCore import Qt, QEvent, QObject, QTimer
 from qtpy.QtGui import QColor, QTextCharFormat, QTextCursor
 from qtpy.QtWidgets import QTextEdit
 
 logger = logging.getLogger(__name__)
+IDLE_COMPLETION_DELAY_MS = 1000
+MANUAL_REQUEST_DEDUP_WINDOW_S = 0.5
 
 
 class _GhostEventFilter(QObject):
@@ -52,24 +55,58 @@ class _GhostEventFilter(QObject):
         super().__init__(editor)
         self._manager = manager
         self._editor = editor
+        self._manual_shortcut_override_active = False
+
+    @staticmethod
+    def _is_manual_completion_shortcut(event):
+        """Return True when the event matches Ctrl+Shift+Space."""
+        modifiers = event.modifiers()
+        required = Qt.ControlModifier | Qt.ShiftModifier
+        disallowed = Qt.AltModifier | Qt.MetaModifier
+        return (
+            event.key() == Qt.Key_Space
+            and (modifiers & required) == required
+            and not (modifiers & disallowed)
+        )
 
     def eventFilter(self, obj, event):
         """Intercept key events for ghost text acceptance/dismissal."""
-        if event.type() != QEvent.KeyPress:
+        if event.type() not in (QEvent.ShortcutOverride, QEvent.KeyPress):
             return False
+
+        if self._is_manual_completion_shortcut(event):
+            if event.type() == QEvent.ShortcutOverride:
+                self._manual_shortcut_override_active = True
+                logger.info(
+                    "Editor-level manual AI completion shortcut override intercepted on %s",
+                    obj.__class__.__name__,
+                )
+                self._manager.request_completion()
+                return True
+
+            if self._manual_shortcut_override_active:
+                self._manual_shortcut_override_active = False
+                return True
+
+            logger.info(
+                "Editor-level manual AI completion keypress intercepted on %s",
+                obj.__class__.__name__,
+            )
+            self._manager.request_completion()
+            return True
+
+        key = event.key()
+        modifiers = event.modifiers()
 
         if not self._manager.has_suggestion():
             return False
 
-        key = event.key()
         logger.debug(
             "Ghost keypress intercepted: key=%r text=%r target=%s",
             key,
             event.text(),
             obj.__class__.__name__,
         )
-
-        modifiers = event.modifiers()
 
         if (
             key == Qt.Key_Right
@@ -160,9 +197,16 @@ class GhostTextManager:
         editor: The Spyder CodeEditor widget to manage.
     """
 
-    def __init__(self, editor, lifecycle_callback=None):
+    def __init__(
+        self,
+        editor,
+        lifecycle_callback=None,
+        manual_completion_requester=None,
+        idle_completion_delay_ms=IDLE_COMPLETION_DELAY_MS,
+    ):
         self._editor = editor
         self._lifecycle_callback = lifecycle_callback
+        self._manual_completion_requester = manual_completion_requester
         self._ghost_active = False
         self._ghost_text = ""
         self._target = None
@@ -170,6 +214,17 @@ class GhostTextManager:
         # applying extra selections (gray overlay) on the range.
         self._ghost_start = -1
         self._ghost_end = -1
+        self._idle_completion_delay_ms = max(
+            250,
+            int(idle_completion_delay_ms or IDLE_COMPLETION_DELAY_MS),
+        )
+        self._last_manual_request_at = 0.0
+        self._idle_completion_timer = QTimer(editor)
+        self._idle_completion_timer.setSingleShot(True)
+        self._idle_completion_timer.setInterval(self._idle_completion_delay_ms)
+        self._idle_completion_timer.timeout.connect(
+            self._request_idle_completion
+        )
 
         # Event filter for key interception (Tab/Escape/any key).
         # Must be a proper QObject subclass for installEventFilter.
@@ -196,6 +251,7 @@ class GhostTextManager:
         # arrow keys. This handler doesn't fire during our own insertions
         # because we block editor signals during those operations.
         editor.cursorPositionChanged.connect(self._on_cursor_moved)
+        editor.textChanged.connect(self._schedule_idle_completion)
 
     def show_suggestion(self, text, target=None):
         """Display a ghost text suggestion at the current cursor position.
@@ -219,6 +275,8 @@ class GhostTextManager:
 
         if not text:
             return False
+
+        self._idle_completion_timer.stop()
 
         if self._completion_popup_visible():
             self._hide_completion_popup()
@@ -268,6 +326,12 @@ class GhostTextManager:
         self._apply_ghost_extra_selection()
 
         logger.debug("Ghost text shown: %d chars", len(text))
+        logger.info(
+            "Ghost text shown: chars=%d target=%s preview=%r",
+            len(text),
+            self._target,
+            text[:100],
+        )
         self._emit_lifecycle_event(
             "shown",
             chars=len(text),
@@ -285,6 +349,7 @@ class GhostTextManager:
         if not self._ghost_active:
             return
 
+        self._idle_completion_timer.stop()
         doc = self._editor.document()
         was_modified = doc.isModified()
         self._editor.blockSignals(True)
@@ -301,7 +366,7 @@ class GhostTextManager:
         self._target = None
         self._ghost_start = -1
         self._ghost_end = -1
-        logger.debug("Ghost text cleared")
+        logger.info("Ghost text cleared: reason=%s", reason)
 
         # Remove our ghost extra selection. After undo the text is gone,
         # so the selection is invalid. Rebuild without it.
@@ -332,7 +397,7 @@ class GhostTextManager:
         # Re-insert as normal text — this is a real edit that enters
         # the undo stack and triggers textChanged/dirty indicators.
         self._editor.insert_text(text)
-        logger.debug("Ghost text accepted: %d chars", len(text))
+        logger.info("Ghost text accepted fully: %d chars", len(text))
         self._emit_lifecycle_event(
             "accepted",
             method="full",
@@ -402,6 +467,11 @@ class GhostTextManager:
                 text,
                 len(remainder),
             )
+            logger.info(
+                "Ghost text advanced by typed prefix %r (%d chars remain)",
+                text,
+                len(remainder),
+            )
             self._emit_lifecycle_event(
                 "advanced",
                 method="typed",
@@ -410,6 +480,7 @@ class GhostTextManager:
             )
         else:
             logger.debug("Ghost text fully accepted by typing: %r", text)
+            logger.info("Ghost text fully accepted by typing: %r", text)
             self._emit_lifecycle_event(
                 "accepted",
                 method="full",
@@ -423,10 +494,34 @@ class GhostTextManager:
         """Manually trigger a completion request.
 
         Called when the user presses the completion shortcut (e.g.,
-        Ctrl+Shift+Space). Triggers the editor's built-in completion
-        mechanism which routes through the AI completion provider.
+        Ctrl+Shift+Space). Prefer the plugin-provided AI-only request
+        path so the native Spyder popup does not steal focus from ghost
+        text. Fall back to the editor's built-in completion hook if the
+        plugin did not provide an explicit requester.
         """
+        self._idle_completion_timer.stop()
+        now = time.monotonic()
+        if (now - self._last_manual_request_at) < MANUAL_REQUEST_DEDUP_WINDOW_S:
+            logger.info(
+                "Ignoring duplicate manual AI completion request within %.2fs window",
+                MANUAL_REQUEST_DEDUP_WINDOW_S,
+            )
+            return
+        self._last_manual_request_at = now
         try:
+            if self._manual_completion_requester is not None:
+                logger.info("Requesting manual AI completion through plugin path")
+                handled = self._manual_completion_requester()
+                if handled is not False:
+                    logger.info("Manual AI completion request was handled by plugin path")
+                    return
+                logger.info(
+                    "Manual AI completion requester returned False; falling back to editor completion"
+                )
+            else:
+                logger.info(
+                    "No manual AI completion requester is installed; falling back to editor completion"
+                )
             self._editor.do_completion()
         except Exception as e:
             logger.debug("Manual completion trigger failed: %s", e)
@@ -494,6 +589,58 @@ class GhostTextManager:
         """
         if self._ghost_active:
             self.clear(reason="cursor_move")
+            return
+        self._schedule_idle_completion()
+
+    def _editor_has_focus(self):
+        """Return True when the editor or one of its children has focus."""
+        try:
+            if self._editor.hasFocus():
+                return True
+            focus_widget = self._editor.focusWidget()
+            return bool(
+                focus_widget is not None
+                and (
+                    focus_widget is self._editor
+                    or self._editor.isAncestorOf(focus_widget)
+                )
+            )
+        except Exception:
+            return False
+
+    def _schedule_idle_completion(self):
+        """Schedule one AI completion after a short pause."""
+        if self._ghost_active:
+            logger.info(
+                "Idle AI completion scheduling skipped because ghost text is already visible"
+            )
+            return
+        if not self._editor_has_focus():
+            self._idle_completion_timer.stop()
+            logger.info(
+                "Idle AI completion scheduling skipped because the editor does not have focus"
+            )
+            return
+        self._idle_completion_timer.start()
+        logger.info(
+            "Scheduled idle AI completion after %dms",
+            self._idle_completion_delay_ms,
+        )
+
+    def _request_idle_completion(self):
+        """Trigger one completion when the editor has been idle long enough."""
+        if self._ghost_active or not self._editor_has_focus():
+            logger.info(
+                "Idle AI completion request skipped: ghost_active=%s editor_has_focus=%s",
+                self._ghost_active,
+                self._editor_has_focus(),
+            )
+            return
+        logger.info(
+            "Requesting idle AI completion after %dms pause",
+            self._idle_completion_delay_ms,
+        )
+        self.request_completion()
 
     def on_completion_popup_visibility_changed(self, visible):
         """Track popup visibility and clear ghost text if the menu opens."""
@@ -523,6 +670,7 @@ class GhostTextManager:
         # Remove any active ghost text from the document
         if self._ghost_active:
             self.clear(reason="cleanup", record_event=False)
+        self._idle_completion_timer.stop()
 
         try:
             self._editor.cursorPositionChanged.disconnect(
@@ -570,6 +718,12 @@ class GhostTextManager:
 
         logger.debug(
             "Ghost text partially accepted by %s: %d chars accepted, %d remain",
+            method,
+            len(accepted_text),
+            len(remainder),
+        )
+        logger.info(
+            "Ghost text partially accepted by %s: accepted=%d remaining=%d",
             method,
             len(accepted_text),
             len(remainder),

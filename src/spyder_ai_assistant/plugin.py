@@ -13,16 +13,19 @@ Features:
 """
 
 import logging
+import time
 from functools import partial
 
-from qtpy.QtCore import QTimer
+from qtpy.QtCore import QObject, Qt, QEvent, QTimer
 from qtpy.QtGui import QTextCursor
+from qtpy.QtWidgets import QApplication
 
 from spyder.api.config.decorators import on_conf_change
 from spyder.api.plugins import Plugins, SpyderDockablePlugin
 from spyder.api.plugin_registration.decorators import (
     on_plugin_available, on_plugin_teardown,
 )
+from spyder.plugins.completion.api import CompletionRequestTypes
 
 from spyder_ai_assistant.utils.context import (
     get_editor_context,
@@ -48,6 +51,59 @@ from spyder_ai_assistant.widgets.code_apply_dialog import CodeApplyDialog
 from spyder_ai_assistant.widgets.ghost_text import GhostTextManager
 
 logger = logging.getLogger(__name__)
+
+
+class _ManualCompletionShortcutFilter(QObject):
+    """Application-level fallback for the manual AI completion shortcut."""
+
+    def __init__(self, plugin):
+        super().__init__(plugin)
+        self._plugin = plugin
+        self._shortcut_override_active = False
+
+    @staticmethod
+    def _is_manual_completion_shortcut(event):
+        """Return True when the event matches Ctrl+Shift+Space."""
+        modifiers = event.modifiers()
+        required = Qt.ControlModifier | Qt.ShiftModifier
+        disallowed = Qt.AltModifier | Qt.MetaModifier
+        return (
+            event.key() == Qt.Key_Space
+            and (modifiers & required) == required
+            and not (modifiers & disallowed)
+        )
+
+    def eventFilter(self, obj, event):
+        """Forward Ctrl+Shift+Space when the active editor has focus."""
+        del obj
+        if event.type() not in (QEvent.ShortcutOverride, QEvent.KeyPress):
+            return False
+
+        if not self._is_manual_completion_shortcut(event):
+            return False
+
+        if not self._plugin._editor_has_manual_completion_focus():
+            return False
+
+        if event.type() == QEvent.ShortcutOverride:
+            self._shortcut_override_active = True
+            logger.info(
+                "Application-level manual AI completion shortcut override intercepted"
+            )
+            self._plugin._schedule_global_manual_completion_shortcut(
+                source="app_shortcut_override"
+            )
+            return True
+
+        if self._shortcut_override_active:
+            self._shortcut_override_active = False
+            return True
+
+        logger.info("Application-level manual AI completion keypress intercepted")
+        self._plugin._schedule_global_manual_completion_shortcut(
+            source="app_keypress"
+        )
+        return True
 
 
 class AIChatPlugin(SpyderDockablePlugin):
@@ -193,6 +249,12 @@ class AIChatPlugin(SpyderDockablePlugin):
         # Cached runtime context service keyed by active shellwidget.
         self._runtime_context = RuntimeContextService(self)
         self._completion_provider_instance = None
+        self._ghost_text_signal_provider = None
+        self._manual_completion_req_id = -1
+        self._manual_completion_filter = None
+        self._manual_completion_dispatch_pending = False
+        self._last_manual_completion_at = 0.0
+        self._last_manual_completion_target = None
         widget.set_runtime_request_executor(self._runtime_context.execute_request)
         widget.set_runtime_target_handler(self._runtime_context.set_target_shell_id)
         self._runtime_context.sig_current_context_changed.connect(
@@ -216,6 +278,7 @@ class AIChatPlugin(SpyderDockablePlugin):
         self._chat_session_save_timer.timeout.connect(
             self._flush_chat_session_state
         )
+        self._install_manual_completion_shortcut_filter()
         QTimer.singleShot(0, self._restore_initial_chat_session_state)
 
     def _build_chat_provider_settings(self):
@@ -286,6 +349,7 @@ class AIChatPlugin(SpyderDockablePlugin):
             manager.cleanup()
         self._ghost_managers.clear()
         self._filename_to_editor.clear()
+        self._remove_manual_completion_shortcut_filter()
         self._runtime_context.cleanup()
 
         return True
@@ -370,20 +434,29 @@ class AIChatPlugin(SpyderDockablePlugin):
             manager = GhostTextManager(
                 codeeditor,
                 lifecycle_callback=self._on_ghost_lifecycle_event,
+                manual_completion_requester=partial(
+                    self._request_manual_ai_completion,
+                    codeeditor,
+                ),
             )
             self._ghost_managers[editor_id] = manager
-            logger.debug("Ghost text manager installed on editor %d", editor_id)
+            logger.info(
+                "Installed ghost text manager on editor %d for %s",
+                editor_id,
+                getattr(codeeditor, "filename", "") or "<untitled>",
+            )
 
             # Add keyboard shortcut to trigger AI completion manually.
             # Default: Ctrl+Shift+Space (configurable in Preferences).
-            # Uses QShortcut on the editor widget so it only fires when
-            # the editor has focus.
+            # Keep this as a single plain QShortcut on the CodeEditor.
+            # The simpler setup was reliable in earlier shipped builds.
             from qtpy.QtWidgets import QShortcut
             from qtpy.QtGui import QKeySequence
             key_combo = self.get_conf("completion_shortcut")
             shortcut = QShortcut(QKeySequence(key_combo), codeeditor)
             shortcut.activated.connect(manager.request_completion)
             codeeditor._ai_chat_completion_shortcut = shortcut
+            codeeditor._ai_chat_completion_shortcuts = [shortcut]
 
             accept_word_combo = self.get_conf("completion_accept_word_shortcut")
             accept_word_shortcut = QShortcut(
@@ -394,6 +467,9 @@ class AIChatPlugin(SpyderDockablePlugin):
             codeeditor._ai_chat_completion_accept_word_shortcut = (
                 accept_word_shortcut
             )
+            codeeditor._ai_chat_completion_accept_word_shortcuts = [
+                accept_word_shortcut
+            ]
 
             accept_line_combo = self.get_conf("completion_accept_line_shortcut")
             accept_line_shortcut = QShortcut(
@@ -404,6 +480,23 @@ class AIChatPlugin(SpyderDockablePlugin):
             codeeditor._ai_chat_completion_accept_line_shortcut = (
                 accept_line_shortcut
             )
+            codeeditor._ai_chat_completion_accept_line_shortcuts = [
+                accept_line_shortcut
+            ]
+            logger.info(
+                "Registered AI completion shortcuts for %s: trigger=%s accept_word=%s accept_line=%s",
+                getattr(codeeditor, "filename", "") or "<untitled>",
+                key_combo,
+                accept_word_combo,
+                accept_line_combo,
+            )
+            filename = getattr(codeeditor, "filename", "") or ""
+            if filename:
+                self._filename_to_editor[filename] = codeeditor
+                logger.info(
+                    "Registered editor mapping for %s during editor creation",
+                    filename,
+                )
 
         # Import here to avoid import errors if editor plugin is not available
         from spyder.plugins.editor.widgets.codeeditor.codeeditor import (
@@ -812,31 +905,44 @@ class AIChatPlugin(SpyderDockablePlugin):
         """
         editor = self._filename_to_editor.get(filename)
         if editor is None:
-            logger.debug("No editor found for %s, skipping ghost text", filename)
+            try:
+                editor_plugin = self.get_plugin(Plugins.Editor)
+                current_editor = editor_plugin.get_current_editor()
+            except Exception:
+                current_editor = None
+            current_filename = getattr(current_editor, "filename", "") or ""
+            if current_editor is not None and current_filename == filename:
+                editor = current_editor
+                self._filename_to_editor[filename] = current_editor
+                logger.info(
+                    "Recovered editor mapping for %s from the current editor",
+                    filename,
+                )
+        if editor is None:
+            logger.info("No editor found for %s, skipping ghost text", filename)
             return
 
         manager = self._ghost_managers.get(id(editor))
         if manager is None:
-            logger.debug("No ghost manager for editor %d", id(editor))
+            logger.info("No ghost manager for editor %d", id(editor))
             return
 
+        logger.info(
+            "Routing ghost text to editor for %s: chars=%d target=%s",
+            filename,
+            len(text or ""),
+            target,
+        )
         shown = manager.show_suggestion(text, target=target)
         if not shown:
-            logger.debug(
+            logger.info(
                 "Ghost text suppressed for %s because the editor target no longer matched",
                 filename,
             )
 
     def _on_ghost_lifecycle_event(self, event_name, payload):
         """Forward one editor-side ghost lifecycle event to the provider."""
-        provider = self._completion_provider_instance
-        if provider is None:
-            try:
-                completions_plugin = self.get_plugin(Plugins.Completions)
-                provider = completions_plugin.get_provider("ai_chat")
-            except Exception:
-                provider = None
-
+        provider = self._get_completion_provider_instance()
         if provider is None or not hasattr(provider, "record_ghost_event"):
             return
 
@@ -844,6 +950,307 @@ class AIChatPlugin(SpyderDockablePlugin):
             provider.record_ghost_event(event_name, payload)
         except Exception as error:
             logger.debug("Failed to record ghost lifecycle event: %s", error)
+
+    def _get_completion_provider_instance(self):
+        """Return the AI completion provider instance if it is available."""
+        provider = self._completion_provider_instance
+        if provider is not None:
+            self._ensure_ghost_text_signal_connected(provider)
+            return provider
+
+        try:
+            completions_plugin = self.get_plugin(Plugins.Completions)
+            provider = completions_plugin.get_provider("ai_chat")
+        except Exception:
+            provider = None
+
+        if provider is not None:
+            self._ensure_ghost_text_signal_connected(provider)
+        return provider
+
+    def _ensure_ghost_text_signal_connected(self, provider=None):
+        """Connect the completion provider ghost-text signal exactly once.
+
+        The provider can become available before the plugin finishes its
+        normal retry-based wiring. Manual and idle completions must not race
+        ahead of that connection, otherwise the worker can return a valid
+        completion that nobody routes to the editor.
+        """
+        if provider is None:
+            try:
+                completions_plugin = self.get_plugin(Plugins.Completions)
+                provider = completions_plugin.get_provider("ai_chat")
+            except Exception:
+                provider = None
+
+        if provider is None:
+            return None
+
+        if self._ghost_text_signal_provider is provider:
+            self._completion_provider_instance = provider
+            return provider
+
+        previous_provider = self._ghost_text_signal_provider
+        if previous_provider is not None:
+            try:
+                previous_provider.sig_ghost_text_ready.disconnect(
+                    self._on_ghost_text_ready
+                )
+            except Exception:
+                pass
+
+        provider.sig_ghost_text_ready.connect(self._on_ghost_text_ready)
+        self._ghost_text_signal_provider = provider
+        self._completion_provider_instance = provider
+        logger.info(
+            "Ghost text signal connected to AI completion provider lazily"
+        )
+        return provider
+
+    def _request_manual_ai_completion(self, codeeditor):
+        """Trigger one AI-only completion request for the given editor.
+
+        The native Spyder completion path shows the popup menu immediately,
+        which fights with inline ghost text. Manual AI completion should
+        go straight to our provider so the result can appear as ghost text
+        without the popup taking over.
+        """
+        provider = self._get_completion_provider_instance()
+        if provider is None:
+            logger.info(
+                "Manual AI completion fell back to Spyder completion because "
+                "the provider is not ready"
+            )
+            codeeditor.do_completion()
+            return True
+
+        cursor = codeeditor.textCursor()
+        filename = getattr(codeeditor, "filename", "") or ""
+        if not filename:
+            logger.info(
+                "Manual AI completion fell back to Spyder completion because "
+                "the editor filename is unavailable"
+            )
+            codeeditor.do_completion()
+            return True
+        self._filename_to_editor[filename] = codeeditor
+        logger.info(
+            "Manual AI completion refreshed editor mapping for %s",
+            filename,
+        )
+
+        manual_target = (
+            filename,
+            int(cursor.position()),
+            int(cursor.selectionStart()),
+            int(cursor.selectionEnd()),
+        )
+        now = time.monotonic()
+        if (
+            self._last_manual_completion_target == manual_target
+            and (now - self._last_manual_completion_at) < 0.2
+        ):
+            logger.debug(
+                "Ignored duplicate manual AI completion dispatch for %s at offset=%d",
+                filename,
+                cursor.position(),
+            )
+            return True
+        self._last_manual_completion_target = manual_target
+        self._last_manual_completion_at = now
+
+        language = getattr(codeeditor, "language", "python") or "python"
+        editor_text = ""
+        try:
+            editor_text = codeeditor.toPlainText()
+        except Exception:
+            editor_text = ""
+
+        tracked_state = getattr(provider, "_document_states", {}).get(filename)
+        if editor_text:
+            sync_type = (
+                CompletionRequestTypes.DOCUMENT_DID_OPEN
+                if tracked_state is None
+                else CompletionRequestTypes.DOCUMENT_DID_CHANGE
+            )
+            if tracked_state is None or tracked_state.text != editor_text:
+                provider.send_request(
+                    language,
+                    sync_type,
+                    {"file": filename, "text": editor_text},
+                    self._manual_completion_req_id,
+                )
+                logger.debug(
+                    "Manual AI completion synced editor text for %s via %s (%d chars)",
+                    filename,
+                    "DID_OPEN"
+                    if sync_type == CompletionRequestTypes.DOCUMENT_DID_OPEN
+                    else "DID_CHANGE",
+                    len(editor_text),
+                )
+            else:
+                logger.info(
+                    "Manual AI completion found tracked editor text already up to date for %s (%d chars)",
+                    filename,
+                    len(editor_text),
+                )
+        else:
+            logger.info(
+                "Manual AI completion could not read editor text for %s; dispatching with current tracked content",
+                filename,
+            )
+
+        try:
+            current_word = codeeditor.get_current_word(
+                completion=True,
+                valid_python_variable=False,
+            )
+        except Exception:
+            current_word = ""
+
+        req = {
+            "file": filename,
+            "line": cursor.blockNumber(),
+            "column": cursor.columnNumber(),
+            "offset": cursor.position(),
+            "selection_start": cursor.selectionStart(),
+            "selection_end": cursor.selectionEnd(),
+            "current_word": current_word,
+        }
+        req_id = self._manual_completion_req_id
+        self._manual_completion_req_id -= 1
+
+        if hasattr(provider, "request_manual_completion"):
+            provider.request_manual_completion(req, req_id)
+        else:
+            provider.send_request(
+                language,
+                CompletionRequestTypes.DOCUMENT_COMPLETION,
+                req,
+                req_id,
+            )
+        logger.debug(
+            "Manual AI completion dispatched directly for %s at line=%d column=%d req_id=%d",
+            filename,
+            req["line"],
+            req["column"],
+            req_id,
+        )
+        logger.info(
+            "Manual AI completion dispatched directly for %s at line=%d column=%d req_id=%d current_word=%r",
+            filename,
+            req["line"],
+            req["column"],
+            req_id,
+            current_word,
+        )
+        return True
+
+    def _schedule_global_manual_completion_shortcut(self, source="shortcut"):
+        """Queue one manual completion dispatch after the current event."""
+        if self._manual_completion_dispatch_pending:
+            logger.info(
+                "Manual AI completion shortcut scheduling skipped because one dispatch is already pending"
+            )
+            return False
+
+        self._manual_completion_dispatch_pending = True
+
+        def _dispatch():
+            self._manual_completion_dispatch_pending = False
+            self._handle_global_manual_completion_shortcut(source=source)
+
+        QTimer.singleShot(0, _dispatch)
+        return True
+
+    def _install_manual_completion_shortcut_filter(self):
+        """Install the app-wide fallback filter for Ctrl+Shift+Space."""
+        app = QApplication.instance()
+        if app is None or self._manual_completion_filter is not None:
+            return
+
+        self._manual_completion_filter = _ManualCompletionShortcutFilter(self)
+        app.installEventFilter(self._manual_completion_filter)
+
+    def _remove_manual_completion_shortcut_filter(self):
+        """Remove the app-wide fallback filter during shutdown."""
+        app = QApplication.instance()
+        if app is None or self._manual_completion_filter is None:
+            return
+
+        try:
+            app.removeEventFilter(self._manual_completion_filter)
+        except Exception:
+            pass
+        self._manual_completion_filter = None
+
+    def _editor_has_manual_completion_focus(self):
+        """Return True when the current focus belongs to the active editor."""
+        return self._get_focused_codeeditor_for_manual_completion() is not None
+
+    def _get_focused_codeeditor_for_manual_completion(self):
+        """Return the active code editor when it currently owns focus."""
+        try:
+            editor_plugin = self.get_plugin(Plugins.Editor)
+        except Exception:
+            return None
+
+        if editor_plugin is None:
+            return None
+
+        codeeditor = editor_plugin.get_current_editor()
+        if codeeditor is None:
+            return None
+
+        app = QApplication.instance()
+        focus_widget = app.focusWidget() if app is not None else None
+        if focus_widget is None:
+            return None
+
+        targets = [codeeditor]
+        viewport = getattr(codeeditor, "viewport", None)
+        if callable(viewport):
+            viewport = viewport()
+        if viewport is not None and viewport is not codeeditor:
+            targets.append(viewport)
+
+        for target in targets:
+            try:
+                if focus_widget is target or target.isAncestorOf(focus_widget):
+                    return codeeditor
+            except Exception:
+                continue
+
+        return None
+
+    def _handle_global_manual_completion_shortcut(self, source="shortcut"):
+        """Dispatch the fallback manual completion shortcut to the editor."""
+        codeeditor = self._get_focused_codeeditor_for_manual_completion()
+        if codeeditor is None:
+            logger.info(
+                "Manual AI completion shortcut from %s ignored because no code editor has focus",
+                source,
+            )
+            return False
+
+        manager = self._ghost_managers.get(id(codeeditor))
+        if manager is None:
+            self._on_codeeditor_created(codeeditor)
+            manager = self._ghost_managers.get(id(codeeditor))
+        if manager is None:
+            logger.info(
+                "Manual AI completion shortcut from %s ignored because the ghost manager is unavailable",
+                source,
+            )
+            return False
+
+        logger.info(
+            "Manual AI completion shortcut from %s dispatched for %s",
+            source,
+            getattr(codeeditor, "filename", "") or "<untitled>",
+        )
+        manager.request_completion()
+        return True
 
     # --- Completions plugin wiring ---
 
@@ -872,11 +1279,7 @@ class AIChatPlugin(SpyderDockablePlugin):
             if provider_info and isinstance(provider_info, dict):
                 provider_instance = provider_info.get("instance")
                 if provider_instance is not None:
-                    self._completion_provider_instance = provider_instance
-                    provider_instance.sig_ghost_text_ready.connect(
-                        self._on_ghost_text_ready
-                    )
-                    logger.info("Ghost text signal connected to AI completion provider")
+                    self._ensure_ghost_text_signal_connected(provider_instance)
                     return
 
             # Provider not ready yet — retry with a short delay
@@ -899,17 +1302,16 @@ class AIChatPlugin(SpyderDockablePlugin):
     def on_completions_teardown(self):
         """Disconnect ghost text signal on teardown."""
         try:
-            completions_plugin = self.get_plugin(Plugins.Completions)
-            provider_info = completions_plugin.providers.get("ai_chat")
-            if provider_info and isinstance(provider_info, dict):
-                provider_instance = provider_info.get("instance")
-                if provider_instance is not None:
-                    provider_instance.sig_ghost_text_ready.disconnect(
-                        self._on_ghost_text_ready
-                    )
-                    self._completion_provider_instance = None
+            provider_instance = self._ghost_text_signal_provider
+            if provider_instance is not None:
+                provider_instance.sig_ghost_text_ready.disconnect(
+                    self._on_ghost_text_ready
+                )
         except Exception:
             pass  # Provider may already be destroyed
+        finally:
+            self._ghost_text_signal_provider = None
+            self._completion_provider_instance = None
 
     # --- Optional plugin wiring ---
 
