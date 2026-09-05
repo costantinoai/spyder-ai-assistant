@@ -57,6 +57,7 @@ from spyder_ai_assistant.utils.assistant_settings import (
 from spyder_ai_assistant.utils.code_apply import (
     APPLY_MODE_INSERT,
     APPLY_MODE_REPLACE,
+    apply_code_plan,
 )
 from spyder_ai_assistant.utils.runtime_context import RuntimeContextService
 from spyder_ai_assistant.widgets.chat_widget import ChatWidget
@@ -1009,30 +1010,8 @@ class AIChatPlugin(SpyderDockablePlugin):
 
     def _apply_code_into_editor(self, editor, code, plan):
         """Apply one reviewed code change into the current editor."""
-        cursor = editor.textCursor()
-        cursor.beginEditBlock()
-        try:
-            if plan["effective_mode"] == APPLY_MODE_REPLACE and plan["has_selection"]:
-                cursor.setPosition(plan["selection_start"])
-                cursor.setPosition(
-                    plan["selection_end"],
-                    QTextCursor.KeepAnchor,
-                )
-                cursor.insertText(code)
-                logger.info(
-                    "Applied chat code after preview by replacing the current selection"
-                )
-            else:
-                cursor.clearSelection()
-                cursor.setPosition(plan["cursor_position"])
-                editor.setTextCursor(cursor)
-                cursor.insertText(code)
-                logger.info(
-                    "Applied chat code after preview at the current cursor position"
-                )
-        finally:
-            cursor.endEditBlock()
-            editor.setTextCursor(cursor)
+        mode = apply_code_plan(editor, code, plan)
+        logger.info("Applied chat code after preview in %s mode", mode)
 
     # --- Ghost text routing ---
 
@@ -1175,6 +1154,16 @@ class AIChatPlugin(SpyderDockablePlugin):
             "Manual AI completion refreshed editor mapping for %s",
             filename,
         )
+        # A visible ghost is temporary document text: the provider must see
+        # the document as the user sees it (without the ghost) and the cursor
+        # where the user is, not after the inserted suggestion.
+        manager = self._ghost_managers.get(id(codeeditor))
+        if manager is not None:
+            editor_text, cursor_position = manager.document_state_without_ghost()
+        else:
+            editor_text, cursor_position = codeeditor.toPlainText(), cursor.position()
+        cursor = QTextCursor(codeeditor.document())
+        cursor.setPosition(min(cursor_position, codeeditor.document().characterCount() - 1))
 
         manual_target = (
             filename,
@@ -1183,10 +1172,14 @@ class AIChatPlugin(SpyderDockablePlugin):
             int(cursor.selectionEnd()),
         )
         now = time.monotonic()
+        # One key press can reach this method through both the editor-level
+        # and the application-level shortcut filters; a real second press
+        # never lands within this window, so treat it as the same press
+        # even when a ghost shown in between moved the cursor.
         if (
             self._last_manual_completion_target == manual_target
             and (now - self._last_manual_completion_at) < 0.2
-        ):
+        ) or (now - self._last_manual_completion_at) < 0.15:
             logger.info(
                 "Ignored duplicate manual AI completion dispatch for %s at offset=%d",
                 filename,
@@ -1197,12 +1190,6 @@ class AIChatPlugin(SpyderDockablePlugin):
         self._last_manual_completion_at = now
 
         language = getattr(codeeditor, "language", "python") or "python"
-        editor_text = ""
-        try:
-            editor_text = codeeditor.toPlainText()
-        except Exception:
-            editor_text = ""
-
         tracked_state = getattr(provider, "_document_states", {}).get(filename)
         if editor_text:
             sync_type = (

@@ -39,6 +39,7 @@ from spyder_ai_assistant.utils.assistant_settings import (
     COMPLETION_PROVIDER_CONF_DEFAULTS,
     AssistantSettings,
 )
+from spyder_ai_assistant.utils.text_positions import python_index, utf16_length
 from spyder_ai_assistant.utils.provider_profiles import (
     PROVIDER_KIND_OLLAMA,
     PROVIDER_KIND_OPENAI_COMPATIBLE,
@@ -420,6 +421,54 @@ def _summarize_target_for_log(target):
             f":offset={target.insert_offset}"
         )
     return summary
+
+
+def ghost_free_position(offset, ghost_start, ghost_end):
+    """Map a cursor offset taken while a ghost is visible to ghost-free space.
+
+    The editor document temporarily contains the ghost text, so Spyder's
+    own completion requests report cursor offsets that include it, while
+    the provider's tracked document (and every cache/anchor) does not.
+    Offsets after the ghost shift back by its length; offsets inside it
+    collapse to the ghost start. Returns ``(offset, adjusted)``.
+    """
+    if ghost_start is None or ghost_end is None or ghost_start < 0 or ghost_end <= ghost_start:
+        return offset, False
+    if offset >= ghost_end:
+        return offset - (ghost_end - ghost_start), True
+    if offset > ghost_start:
+        return ghost_start, True
+    return offset, False
+
+
+def update_visible_ghosts(visible_ghosts, payload):
+    """Keep ``{filename: (start, end)}`` in sync from one lifecycle event.
+
+    Every ghost event carries ``ghost_visible`` plus the bounds after the
+    event. Without a filename in the payload the state is reset, since at
+    most one ghost is ever visible.
+    """
+    payload = payload or {}
+    target = payload.get("target") or {}
+    filename = str(target.get("filename", "") or "")
+    if "ghost_visible" not in payload:
+        return
+    if payload.get("ghost_visible") and filename:
+        visible_ghosts[filename] = (
+            int(payload.get("ghost_start", -1)),
+            int(payload.get("ghost_end", -1)),
+        )
+    elif filename:
+        visible_ghosts.pop(filename, None)
+    else:
+        visible_ghosts.clear()
+
+
+def line_column_at(text, offset):
+    """Return 0-based ``(line, column)`` of a Qt offset in ``text``."""
+    index = python_index(text, offset)
+    line_start = text.rfind("\n", 0, index) + 1
+    return text.count("\n", 0, index), utf16_length(text[line_start:index])
 
 
 def _resolve_completion_anchor(text, line, column, offset):
@@ -1339,6 +1388,9 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._completion_cache = _CompletionCache()
         self._candidate_store = _CompletionCandidateStore()
         self._shown_candidates = {}
+        # {filename: (ghost_start, ghost_end)} for ghosts currently in an
+        # editor document, maintained from ghost lifecycle events.
+        self._visible_ghosts = {}
         self._dismissed_targets = {}
         self._metrics = {
             "requests_received": 0,
@@ -1463,6 +1515,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._completion_cache.clear()
         self._candidate_store.clear()
         self._shown_candidates.clear()
+        self._visible_ghosts.clear()
         self._dismissed_targets.clear()
         logger.info("AI completion provider shut down")
 
@@ -1530,6 +1583,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
                 self._document_states.pop(filename, None)
                 self._latest_target_by_filename.pop(filename, None)
                 self._shown_candidates.pop(filename, None)
+                self._visible_ghosts.pop(filename, None)
                 self._dismissed_targets.pop(filename, None)
 
         elif req_type == CompletionRequestTypes.DOCUMENT_COMPLETION:
@@ -2262,6 +2316,19 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         line = int(req.get("line", 0))
         column = int(req.get("column", 0))
         offset = int(req.get("offset", 0))
+        # Requests issued while a ghost is visible count the ghost text.
+        ghost = self._visible_ghosts.get(filename)
+        if ghost is not None:
+            offset, adjusted = ghost_free_position(offset, ghost[0], ghost[1])
+            if adjusted:
+                line, column = line_column_at(
+                    state.text if state is not None else "", offset
+                )
+                logger.info(
+                    "Normalized AI completion request past visible ghost for %s to offset=%d",
+                    filename,
+                    offset,
+                )
         insert_line, insert_column, insert_offset = _resolve_completion_anchor(
             state.text if state is not None else "",
             line,
@@ -2327,6 +2394,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
     def record_ghost_event(self, event_name, payload=None):
         """Record one ghost-text lifecycle event from the editor layer."""
         payload = payload or {}
+        update_visible_ghosts(self._visible_ghosts, payload)
         reason = str(payload.get("reason", "") or "")
         method = str(payload.get("method", "") or "")
         target = payload.get("target") or {}

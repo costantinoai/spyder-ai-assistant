@@ -73,7 +73,7 @@ A dockable pane for talking to a model about your code. Open it from **View > Pa
 
 - **Multi-tab sessions** — each conversation lives in its own tab
 - **Streaming responses** — tokens arrive in real time
-- **Syntax-highlighted code blocks** — with copy, insert-at-cursor, and replace-selection actions
+- **Syntax-highlighted code blocks** — with Copy and Apply actions; Apply previews a unified diff and can insert at the cursor, replace the selection, or replace the existing function/class of the same name in place
 - **Thinking/reasoning display** — models that emit `<think>` blocks (QwQ, DeepSeek-R1, etc.) show their reasoning in a dimmed section
 - **Per-tab chat modes** — switch between Coding, Debugging, Review, Data Analysis, Explanation, or Documentation presets
 - **Per-tab inference settings** — override temperature and max tokens for individual tabs

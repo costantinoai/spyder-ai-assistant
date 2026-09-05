@@ -16,7 +16,9 @@ from qtpy.QtWidgets import (
 from spyder_ai_assistant.utils.code_apply import (
     APPLY_MODE_INSERT,
     APPLY_MODE_REPLACE,
+    APPLY_MODE_REPLACE_DEFINITION,
     build_code_apply_plan,
+    find_definition_span,
 )
 
 
@@ -46,13 +48,21 @@ class CodeApplyDialog(QDialog):
         self._selection_start = int(selection_start or 0)
         self._selection_end = int(selection_end or 0)
         self._has_selection = self._selection_end > self._selection_start
-        self._default_mode = (
-            APPLY_MODE_REPLACE if self._has_selection else APPLY_MODE_INSERT
-        )
+        # A whole rewritten def/class that already exists in the file is the
+        # most common shape of a chat answer; offer to replace it in place.
+        self._definition = find_definition_span(self._document_text, self._code)
+        if self._has_selection:
+            self._default_mode = APPLY_MODE_REPLACE
+        elif self._definition:
+            self._default_mode = APPLY_MODE_REPLACE_DEFINITION
+        else:
+            self._default_mode = APPLY_MODE_INSERT
         if default_mode in {APPLY_MODE_INSERT, APPLY_MODE_REPLACE}:
             self._default_mode = default_mode
         if self._default_mode == APPLY_MODE_REPLACE and not self._has_selection:
-            self._default_mode = APPLY_MODE_INSERT
+            self._default_mode = (
+                APPLY_MODE_REPLACE_DEFINITION if self._definition else APPLY_MODE_INSERT
+            )
 
         layout = QVBoxLayout(self)
 
@@ -73,6 +83,12 @@ class CodeApplyDialog(QDialog):
         self.mode_combo.addItem("Insert at cursor", APPLY_MODE_INSERT)
         if self._has_selection:
             self.mode_combo.addItem("Replace selection", APPLY_MODE_REPLACE)
+        if self._definition:
+            self.mode_combo.addItem(
+                f"Replace {self._definition['kind']} {self._definition['name']} "
+                f"(lines {self._definition['start_line']}-{self._definition['end_line']})",
+                APPLY_MODE_REPLACE_DEFINITION,
+            )
         self.mode_combo.currentIndexChanged.connect(self._refresh_preview)
         metadata_form.addRow("File", self.file_label)
         metadata_form.addRow("Selection", self.selection_label)

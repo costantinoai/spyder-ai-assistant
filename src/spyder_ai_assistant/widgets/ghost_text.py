@@ -32,7 +32,7 @@ Usage (from plugin.py):
     # User types anything else → ghost text disappears
 """
 
-from spyder_ai_assistant.utils.text_positions import utf16_length
+from spyder_ai_assistant.utils.text_positions import python_index, utf16_length
 
 import logging
 import time
@@ -555,6 +555,27 @@ class GhostTextManager:
             self._emit_lifecycle_event(
                 "dismissed", reason=reason, target=dismissed_target
             )
+
+    def document_state_without_ghost(self):
+        """Return ``(text, cursor_position)`` as the user sees the document.
+
+        Ghost text is temporary document content; anything that syncs the
+        editor to a provider or reads the "real" cursor must exclude it.
+        Positions are Qt (UTF-16) offsets like the editor's own.
+        """
+        text = self._editor.toPlainText()
+        position = self._editor.textCursor().position()
+        if not self._ghost_active or self._ghost_start < 0:
+            return text, position
+        start, end = self._ghost_start, self._ghost_end
+        py_start = python_index(text, start)
+        py_end = python_index(text, end)
+        text = text[:py_start] + text[py_end:]
+        if position >= end:
+            position -= end - start
+        elif position > start:
+            position = start
+        return text, position
 
     def has_suggestion(self):
         """Return True if ghost text is currently visible."""
@@ -1137,6 +1158,13 @@ class GhostTextManager:
 
         if "target" not in payload and self._target is not None:
             payload["target"] = dict(self._target)
+        # Exact ghost bounds (Qt offsets) let the provider map cursor
+        # positions reported while the ghost is in the document back to
+        # ghost-free coordinates; ``ghost_visible`` is the state *after*
+        # this event.
+        payload["ghost_visible"] = bool(self._ghost_active)
+        payload["ghost_start"] = int(self._ghost_start)
+        payload["ghost_end"] = int(self._ghost_end)
 
         try:
             self._lifecycle_callback(event_name, payload)

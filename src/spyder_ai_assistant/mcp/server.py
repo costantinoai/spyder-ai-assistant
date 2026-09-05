@@ -400,7 +400,7 @@ class SpyderMCPServer:
             selection_start: int = -1,
             selection_end: int = -1,
         ) -> dict[str, Any]:
-            """Preview an editor mutation without changing the Spyder document."""
+            """Preview an editor mutation (mode: insert, replace, replace_definition) without changing the document."""
             return self._bridge.preview_file_edit(
                 code,
                 filename=filename,
@@ -422,7 +422,7 @@ class SpyderMCPServer:
             confirm: bool = False,
             save: bool = False,
         ) -> dict[str, Any]:
-            """Apply one previewed editor mutation after confirmation and position pinning."""
+            """Apply one previewed editor mutation (mode: insert, replace, replace_definition) after confirmation."""
             return self._bridge.apply_file_edit(
                 code,
                 filename=filename,

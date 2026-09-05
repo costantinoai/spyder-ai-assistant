@@ -10,11 +10,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from qtpy.QtCore import QObject, Qt, QThread, Signal, Slot
-from qtpy.QtGui import QTextCursor
 
 from spyder.api.plugins import Plugins
 
 from spyder_ai_assistant.utils.code_apply import (
+    apply_code_plan,
     build_code_apply_plan,
 )
 
@@ -540,24 +540,7 @@ class SpyderMCPBridge(QObject):
     @staticmethod
     def _apply_code_into_editor(editor, code, plan):
         """Apply one previewed code change directly to an editor widget."""
-        cursor = editor.textCursor()
-        cursor.beginEditBlock()
-        try:
-            if plan["effective_mode"] == "replace" and plan["has_selection"]:
-                cursor.setPosition(plan["selection_start"])
-                cursor.setPosition(
-                    plan["selection_end"],
-                    QTextCursor.KeepAnchor,
-                )
-                cursor.insertText(code)
-            else:
-                cursor.clearSelection()
-                cursor.setPosition(plan["cursor_position"])
-                editor.setTextCursor(cursor)
-                cursor.insertText(code)
-        finally:
-            cursor.endEditBlock()
-            editor.setTextCursor(cursor)
+        apply_code_plan(editor, code, plan)
 
     @staticmethod
     def _hash_text(text):
