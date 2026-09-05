@@ -17,6 +17,8 @@ from dataclasses import dataclass
 
 import httpx
 
+from spyder_ai_assistant.utils.provider_profiles import compatible_api_url
+
 from spyder_ai_assistant.backend.client import OllamaClient
 from spyder_ai_assistant.utils.provider_profiles import (
     DEFAULT_COMPATIBLE_PROFILE_LABEL,
@@ -163,7 +165,7 @@ class OpenAICompatibleChatProvider(BaseChatProvider):
             if self._api_key:
                 headers["Authorization"] = f"Bearer {self._api_key}"
             self._client = httpx.Client(
-                base_url=f"{self._base_url}/v1",
+                base_url=compatible_api_url(self._base_url),
                 headers=headers,
                 timeout=30.0,
             )

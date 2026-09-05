@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import difflib
 
+from spyder_ai_assistant.utils.text_positions import python_index, utf16_length
+
 
 APPLY_MODE_INSERT = "insert"
 APPLY_MODE_REPLACE = "replace"
@@ -33,26 +35,33 @@ def build_code_apply_plan(
     code = code or ""
     requested_mode = normalize_apply_mode(requested_mode)
 
-    cursor_position = _clamp_index(cursor_position, len(document_text))
-    selection_start = _clamp_index(selection_start, len(document_text))
-    selection_end = _clamp_index(selection_end, len(document_text))
+    # QTextCursor positions count UTF-16 units, while Python slices count
+    # Unicode code points. Keep Qt positions in the plan used for mutation,
+    # and convert only the indexes used to build the preview text.
+    qt_length = utf16_length(document_text)
+    cursor_position = _clamp_index(cursor_position, qt_length)
+    selection_start = _clamp_index(selection_start, qt_length)
+    selection_end = _clamp_index(selection_end, qt_length)
     if selection_end < selection_start:
         selection_start, selection_end = selection_end, selection_start
 
     has_selection = selection_end > selection_start
+    cursor_index = python_index(document_text, cursor_position)
+    start_index = python_index(document_text, selection_start)
+    end_index = python_index(document_text, selection_end)
     effective_mode = requested_mode
     note = ""
 
     if requested_mode == APPLY_MODE_REPLACE and has_selection:
         updated_text = (
-            document_text[:selection_start] + code + document_text[selection_end:]
+            document_text[:start_index] + code + document_text[end_index:]
         )
         mode_label = "Replace selection"
         note = "Apply the code by replacing the current editor selection."
     else:
         effective_mode = APPLY_MODE_INSERT
         updated_text = (
-            document_text[:cursor_position] + code + document_text[cursor_position:]
+            document_text[:cursor_index] + code + document_text[cursor_index:]
         )
         mode_label = "Insert at cursor"
         if requested_mode == APPLY_MODE_REPLACE:
@@ -72,10 +81,10 @@ def build_code_apply_plan(
         "selection_start": selection_start,
         "selection_end": selection_end,
         "selection_text": (
-            document_text[selection_start:selection_end] if has_selection else ""
+            document_text[start_index:end_index] if has_selection else ""
         ),
         "selection_preview": preview_text(
-            document_text[selection_start:selection_end] if has_selection else ""
+            document_text[start_index:end_index] if has_selection else ""
         ),
         "code_preview": preview_text(code),
         "document_text": document_text,

@@ -32,6 +32,8 @@ THEME_COLOR_KEYS = [
     "blockquote_bg", "blockquote_border", "blockquote_text",
     "table_border", "table_header_bg",
     "hr_color",
+    "warning_bg", "warning_text", "warning_label",
+    "info_bg", "info_text", "info_label", "lang_label",
 ]
 
 # The 8 most user-relevant color keys shown as swatch buttons in settings.
@@ -319,6 +321,17 @@ def get_theme_colors(preset_name, is_dark, overrides=None):
     variant = "dark" if is_dark else "light"
     # Start with a copy of the preset variant
     colors = dict(preset[variant])
+
+    # Semantic notice colors stay consistent across the decorative presets.
+    colors.update({
+        "warning_bg": "#443619" if is_dark else "#fff3cd",
+        "warning_text": "#ffe29a" if is_dark else "#664d03",
+        "warning_label": "#ffd166" if is_dark else "#856404",
+        "info_bg": "#183849" if is_dark else "#e1f2fa",
+        "info_text": "#bde7fb" if is_dark else "#17465e",
+        "info_label": "#80cbed" if is_dark else "#236788",
+        "lang_label": "#aaaaaa" if is_dark else "#888888",
+    })
 
     # Apply user overrides
     if overrides:

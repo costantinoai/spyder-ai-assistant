@@ -35,6 +35,10 @@ from spyder_ai_assistant.backend.client import (
     OllamaClient,
     OpenAICompatibleCompletionClient,
 )
+from spyder_ai_assistant.utils.assistant_settings import (
+    COMPLETION_PROVIDER_CONF_DEFAULTS,
+    AssistantSettings,
+)
 from spyder_ai_assistant.utils.provider_profiles import (
     PROVIDER_KIND_OLLAMA,
     PROVIDER_KIND_OPENAI_COMPATIBLE,
@@ -197,6 +201,21 @@ class _CompletionTarget:
     insert_line: int | None = None
     insert_column: int | None = None
     insert_offset: int | None = None
+
+    @property
+    def anchor(self):
+        """Identity of the spot a suggestion is inserted at.
+
+        While ghost text is visible the editor cursor sits after the ghost,
+        so a follow-up request reports a different ``offset`` for the same
+        logical place. Comparing anchors (file, document version, effective
+        insert position) instead of whole targets keeps "ask for another
+        candidate" and "user dismissed this spot" stable across that shift.
+        """
+        insert_offset = (
+            self.insert_offset if self.insert_offset is not None else self.offset
+        )
+        return (self.filename, self.version, insert_offset)
 
     def to_payload(self):
         """Serialize a target for ghost-text routing."""
@@ -1246,19 +1265,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
     # FLAT format: list of (option_name, default_value) tuples.
     # This is the format required by SpyderCompletionProvider (NOT the dict
     # format used by SpyderDockablePlugin).
-    CONF_DEFAULTS = [
-        ("ollama_host", "http://localhost:11434"),
-        ("chat_provider", PROVIDER_KIND_OLLAMA),
-        ("chat_provider_profile_id", ""),
-        ("provider_profiles", "[]"),
-        ("openai_compatible_base_url", ""),
-        ("openai_compatible_api_key", ""),
-        ("completion_model", "qooba/qwen3-coder-30b-a3b-instruct:q3_k_m"),
-        ("completion_temperature", 0.15),
-        ("completion_max_tokens", 512),
-        ("completions_enabled", True),
-        ("debounce_ms", DEFAULT_DEBOUNCE_MS),
-    ]
+    CONF_DEFAULTS = list(COMPLETION_PROVIDER_CONF_DEFAULTS)
 
     def __init__(self, parent, config):
         super().__init__(parent, config)
@@ -1639,12 +1646,14 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
     def _should_request_alternative(self, target):
         """Return True when the user is asking for another visible suggestion."""
         shown = self._shown_candidates.get(target.filename) or {}
-        return shown.get("target") == target
+        shown_target = shown.get("target")
+        return shown_target is not None and shown_target.anchor == target.anchor
 
     def _try_cycle_visible_candidate(self, target, req_id):
         """Cycle to the next remembered candidate for the same visible target."""
         shown = self._shown_candidates.get(target.filename) or {}
-        if shown.get("target") != target:
+        shown_target = shown.get("target")
+        if shown_target is None or shown_target.anchor != target.anchor:
             return False
 
         next_text = self._candidate_store.next_after(
@@ -1994,28 +2003,14 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
     def _resolve_completion_backend_settings(self):
         """Return the provider-aware backend settings for completions."""
+        settings = AssistantSettings.from_conf(self.get_conf)
         return resolve_completion_backend_settings(
-            chat_provider=self.get_conf(
-                "chat_provider",
-                default=PROVIDER_KIND_OLLAMA,
-            ),
-            chat_provider_profile_id=self.get_conf(
-                "chat_provider_profile_id",
-                default="",
-            ),
-            provider_profiles=self.get_conf("provider_profiles", default="[]"),
-            ollama_host=self.get_conf(
-                "ollama_host",
-                default="http://localhost:11434",
-            ),
-            openai_compatible_base_url=self.get_conf(
-                "openai_compatible_base_url",
-                default="",
-            ),
-            openai_compatible_api_key=self.get_conf(
-                "openai_compatible_api_key",
-                default="",
-            ),
+            chat_provider=settings.chat_provider,
+            chat_provider_profile_id=settings.chat_provider_profile_id,
+            provider_profiles=settings.provider_profiles,
+            ollama_host=settings.ollama_host,
+            openai_compatible_base_url=settings.openai_compatible_base_url,
+            openai_compatible_api_key=settings.openai_compatible_api_key,
         )
 
     def _on_completion_backend_changed(self):
@@ -2189,7 +2184,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
     def _is_target_dismissed(self, target):
         """Return True when one target was explicitly dismissed by the user."""
         dismissed = self._dismissed_targets.get(target.filename)
-        return dismissed == target
+        return dismissed is not None and dismissed.anchor == target.anchor
 
     @staticmethod
     def _should_skip_completion(req, prefix, suffix):

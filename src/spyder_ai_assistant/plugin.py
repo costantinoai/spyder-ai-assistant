@@ -13,6 +13,7 @@ Features:
 """
 
 import logging
+import os
 import time
 from functools import partial
 
@@ -27,25 +28,34 @@ from spyder.api.plugin_registration.decorators import (
 )
 from spyder.plugins.completion.api import CompletionRequestTypes
 
+from spyder_ai_assistant.mcp import (
+    SpyderMCPBridge,
+    SpyderMCPServer,
+    build_mcp_endpoint_url,
+    get_mcp_client_label,
+    launch_mcp_client_in_terminal,
+)
 from spyder_ai_assistant.utils.context import (
-    get_editor_context,
-    get_open_files_context,
-    get_project_context,
     get_toolbar_context,
     build_action_prompt,
 )
+from spyder_ai_assistant.utils.context_service import EditorContextService
 from spyder_ai_assistant.utils.chat_persistence import (
     get_chat_session_storage_path,
     load_chat_session_state,
     save_chat_session_state,
 )
+from spyder_ai_assistant.utils.assistant_settings import (
+    ASSISTANT_CONF_DEFAULTS,
+    AssistantSettings,
+)
 from spyder_ai_assistant.utils.code_apply import (
     APPLY_MODE_INSERT,
     APPLY_MODE_REPLACE,
 )
-from spyder_ai_assistant.utils.provider_profiles import normalize_provider_profiles
 from spyder_ai_assistant.utils.runtime_context import RuntimeContextService
 from spyder_ai_assistant.widgets.chat_widget import ChatWidget
+from spyder_ai_assistant.widgets.config_page import AIChatConfigPage
 from spyder_ai_assistant.widgets.code_apply_dialog import CodeApplyDialog
 from spyder_ai_assistant.widgets.ghost_text import GhostTextManager
 
@@ -121,7 +131,7 @@ class AIChatPlugin(SpyderDockablePlugin):
     # --- Plugin identity ---
     NAME = "ai_chat"
     WIDGET_CLASS = ChatWidget
-    CONF_WIDGET_CLASS = None
+    CONF_WIDGET_CLASS = AIChatConfigPage
 
     # --- Plugin dependencies ---
     # Preferences is required for the configuration system.
@@ -146,65 +156,7 @@ class AIChatPlugin(SpyderDockablePlugin):
     # CONF_DEFAULTS must be a list of (section_name, options_dict) tuples.
     # Spyder's PluginConfig._check_defaults validates this format.
     CONF_DEFAULTS = [
-        ("ai_chat", {
-            "ollama_host": "http://localhost:11434",
-            "chat_provider": "ollama",
-            "chat_provider_profile_id": "",
-            "chat_model": "gpt-oss-20b-abliterated",
-            "provider_profiles": "[]",
-            "openai_compatible_base_url": "",
-            "openai_compatible_api_key": "",
-            "completion_model":
-                "qooba/qwen3-coder-30b-a3b-instruct:q3_k_m",
-            # Stored as "temperature x10" for the current preferences UI.
-            # Runtime normalization keeps backward compatibility with older
-            # float values that may already exist in user config.
-            "chat_temperature": 5,
-            "completion_temperature": 0.15,
-            "max_tokens": 1024,
-            "completion_max_tokens": 256,
-            "completions_enabled": True,
-            # Keyboard shortcut for manually triggering AI completions.
-            # Ctrl+Shift+Space mirrors the common IDE convention (Ctrl+Space
-            # is Spyder's LSP completion, Shift variant for AI).
-            "completion_shortcut": "Ctrl+Shift+Space",
-            "completion_accept_word_shortcut": "Alt+Right",
-            "completion_accept_line_shortcut": "Alt+Shift+Right",
-            "chat_system_prompt":
-                "You are a helpful AI coding assistant working inside "
-                "the Spyder IDE. Be concise and provide code examples "
-                "when relevant.",
-            # Action prompts for context menu items. Use {filename} and
-            # {code} as placeholders that get replaced at runtime.
-            "prompt_explain":
-                "Explain this code from {filename}:\n\n```\n{code}\n```",
-            "prompt_fix":
-                "Find and fix bugs in this code from {filename}:"
-                "\n\n```\n{code}\n```",
-            "prompt_docstring":
-                "Add a docstring to this code from {filename}:"
-                "\n\n```\n{code}\n```",
-            "prompt_ask":
-                "Regarding this code from {filename}:\n\n"
-                "```\n{code}\n```\n\n",
-            # Appearance: chat display font, code font, bubble geometry
-            "chat_font_family": "sans-serif",
-            "chat_font_size": 10,
-            "chat_line_height": 1.5,
-            "code_font_family": "Courier New",
-            "code_font_size": 9,
-            "pygments_style_dark": "monokai",
-            "pygments_style_light": "default",
-            "bubble_padding": 12,
-            "bubble_border_radius": 8,
-            "bubble_spacing": 4,
-            # Theme: preset name and per-color overrides (JSON blob)
-            "theme_preset": "default",
-            "theme_color_overrides": "{}",
-            # Behavior: ghost text timing
-            "idle_completion_delay_ms": 1000,
-            "post_accept_completion_delay_ms": 75,
-        }),
+        ("ai_chat", dict(ASSISTANT_CONF_DEFAULTS)),
     ]
     CONF_VERSION = "0.1.0"
 
@@ -251,10 +203,17 @@ class AIChatPlugin(SpyderDockablePlugin):
         # Connect code-apply preview signals from chat code blocks
         widget.sig_apply_code.connect(self._preview_apply_code_into_editor)
 
+        # Shared cached context service — single access point for
+        # editor/project context used by both chat and MCP.
+        self._context_service = EditorContextService(
+            editor_resolver=self._safe_get_editor_plugin,
+            projects_resolver=self._safe_get_projects_plugin,
+        )
+
         # Provide the widget with a callable that returns the current
         # editor context (file, selection, cursor). The widget calls
         # this on each message send to enrich the system prompt.
-        widget.set_context_provider(self._get_editor_context)
+        widget.set_context_provider(self._context_service.get_full_context)
 
         # Ghost text managers: one per editor, keyed by editor widget id.
         # Maps editor id() → GhostTextManager instance.
@@ -271,8 +230,17 @@ class AIChatPlugin(SpyderDockablePlugin):
         self._manual_completion_dispatch_pending = False
         self._last_manual_completion_at = 0.0
         self._last_manual_completion_target = None
+        self._mcp_server = None
+        self._mcp_bridge = SpyderMCPBridge(
+            self,
+            runtime_context=self._runtime_context,
+            context_service=self._context_service,
+        )
+        self._reconfigure_mcp_server()
         widget.set_runtime_request_executor(self._runtime_context.execute_request)
         widget.set_runtime_target_handler(self._runtime_context.set_target_shell_id)
+        widget.set_mcp_server_status_provider(self._get_mcp_server_status)
+        widget.set_mcp_client_launcher(self._launch_mcp_client)
         self._runtime_context.sig_current_context_changed.connect(
             widget.update_runtime_context
         )
@@ -299,69 +267,13 @@ class AIChatPlugin(SpyderDockablePlugin):
 
     def _build_chat_provider_settings(self):
         """Return the current chat-provider settings snapshot."""
-        return {
-            "ollama_host": self.get_conf(
-                "ollama_host", default="http://localhost:11434"
-            ),
-            "provider_profiles": normalize_provider_profiles(
-                self.get_conf(
-                    "provider_profiles",
-                    default="[]",
-                ),
-                legacy_base_url=self.get_conf(
-                    "openai_compatible_base_url",
-                    default="",
-                ),
-                legacy_api_key=self.get_conf(
-                    "openai_compatible_api_key",
-                    default="",
-                ),
-            ),
-            "openai_compatible_base_url": self.get_conf(
-                "openai_compatible_base_url",
-                default="",
-            ),
-            "openai_compatible_api_key": self.get_conf(
-                "openai_compatible_api_key",
-                default="",
-            ),
-        }
+        return AssistantSettings.from_conf(self.get_conf).chat_provider_settings()
 
     def _build_completion_provider_settings(self):
         """Return the plugin-backed completion settings for the provider."""
-        return {
-            "ollama_host": self.get_conf(
-                "ollama_host", default="http://localhost:11434"
-            ),
-            "chat_provider": self.get_conf("chat_provider", default="ollama"),
-            "chat_provider_profile_id": self.get_conf(
-                "chat_provider_profile_id",
-                default="",
-            ),
-            "provider_profiles": self.get_conf("provider_profiles", default="[]"),
-            "openai_compatible_base_url": self.get_conf(
-                "openai_compatible_base_url",
-                default="",
-            ),
-            "openai_compatible_api_key": self.get_conf(
-                "openai_compatible_api_key",
-                default="",
-            ),
-            "completion_model": self.get_conf("completion_model", default=""),
-            "completion_temperature": self.get_conf(
-                "completion_temperature",
-                default=0.15,
-            ),
-            "completion_max_tokens": self.get_conf(
-                "completion_max_tokens",
-                default=256,
-            ),
-            "completions_enabled": self.get_conf(
-                "completions_enabled",
-                default=True,
-            ),
-            "debounce_ms": self.get_conf("debounce_ms", default=300),
-        }
+        return AssistantSettings.from_conf(
+            self.get_conf
+        ).completion_provider_settings()
 
     def _sync_completion_provider_settings(self, provider=None):
         """Push pane settings into the live completion provider config."""
@@ -419,6 +331,90 @@ class AIChatPlugin(SpyderDockablePlugin):
             return
         widget.sync_model_selection_from_conf()
 
+    def _mcp_server_config(self):
+        """Return the current embedded MCP server settings."""
+        return AssistantSettings.from_conf(self.get_conf).mcp_server_config()
+
+    def _reconfigure_mcp_server(self):
+        """Restart the embedded MCP server from the current config."""
+        config = self._mcp_server_config()
+
+        if self._mcp_server is not None:
+            self._mcp_server.stop()
+            if self._mcp_server.is_stopping():
+                logger.warning("MCP reconfiguration deferred until shutdown finishes")
+                QTimer.singleShot(250, self._reconfigure_mcp_server)
+                return False
+            self._mcp_server = None
+
+        if not config["enabled"]:
+            logger.info("Embedded Spyder MCP server is disabled in settings")
+            return False
+
+        self._mcp_server = SpyderMCPServer(
+            self._mcp_bridge,
+            host=config["host"],
+            port=config["port"],
+        )
+        return self._mcp_server.start()
+
+    def _get_mcp_server_status(self):
+        """Return the current embedded MCP server status snapshot."""
+        config = self._mcp_server_config()
+        server = self._mcp_server
+        status = {
+            "enabled": config["enabled"],
+            "running": bool(server is not None and server.is_running()),
+            "host": config["host"],
+            "port": config["port"],
+            "endpoint_url": (
+                server.endpoint_url
+                if server is not None
+                else build_mcp_endpoint_url(
+                    host=config["host"],
+                    port=config["port"],
+                )
+            ),
+            "error": "",
+        }
+        if server is not None and server.last_error:
+            status["error"] = server.last_error
+        elif not config["enabled"]:
+            status["error"] = "The embedded Spyder MCP server is disabled."
+        return status
+
+    def _resolve_mcp_client_working_directory(self):
+        """Return the best working directory for launched external clients."""
+        project_path = self._get_active_project_path()
+        if project_path and os.path.isdir(project_path):
+            return project_path
+
+        editor_plugin = self.get_plugin(Plugins.Editor, error=False)
+        if editor_plugin is not None:
+            editor = editor_plugin.get_current_editor()
+            filename = str(getattr(editor, "filename", "") or "").strip()
+            if filename:
+                editor_dir = os.path.dirname(os.path.abspath(filename))
+                if os.path.isdir(editor_dir):
+                    return editor_dir
+
+        return os.getcwd()
+
+    def _launch_mcp_client(self, client_id, endpoint_url):
+        """Open one external MCP-aware CLI in a system terminal."""
+        spec = launch_mcp_client_in_terminal(
+            client_id,
+            endpoint_url,
+            working_dir=self._resolve_mcp_client_working_directory(),
+        )
+        logger.info(
+            "Launching %s with Spyder MCP endpoint %s in %s",
+            spec.display_name,
+            spec.endpoint_url,
+            spec.working_dir,
+        )
+        return f"Launching {get_mcp_client_label(client_id)} in {spec.working_dir}"
+
     def on_close(self, cancellable=True):
         """Called during Spyder shutdown.
 
@@ -426,6 +422,8 @@ class AIChatPlugin(SpyderDockablePlugin):
         managers. Returns True to allow Spyder to proceed with shutdown.
         """
         self._flush_chat_session_state()
+        if self._mcp_server is not None:
+            self._mcp_server.stop(block=False)
         self.get_widget().cleanup_worker()
 
         # Clean up all ghost text managers
@@ -520,6 +518,9 @@ class AIChatPlugin(SpyderDockablePlugin):
         Args:
             codeeditor: The CodeEditor widget instance.
         """
+        # A new tab means the set of open files changed.
+        self._context_service.invalidate_open_files()
+
         # Install ghost text manager for this editor
         editor_id = id(codeeditor)
         document_id = self._get_editor_completion_document_id(codeeditor)
@@ -656,6 +657,10 @@ class AIChatPlugin(SpyderDockablePlugin):
         )
         self.get_widget().update_toolbar_context(context_str)
 
+        # Invalidate the cached open-files context — the set of "other"
+        # files changes when the active file changes.
+        self._context_service.invalidate_open_files()
+
         # Track filename → editor mapping for ghost text routing.
         # When the completion provider emits a ghost text for a filename,
         # we need to find the right editor widget to display it on.
@@ -732,45 +737,31 @@ class AIChatPlugin(SpyderDockablePlugin):
         self.get_widget().send_with_prompt(prompt)
         self.switch_to_plugin()
 
-    # --- Editor context provider ---
+    # --- Plugin resolvers for the shared context service ---
 
-    def _get_editor_context(self):
-        """Get the full context for system prompt enrichment.
+    def _safe_get_editor_plugin(self):
+        """Return the Spyder Editor plugin without raising."""
+        try:
+            return self.get_plugin(Plugins.Editor, error=False)
+        except TypeError:
+            try:
+                return self.get_plugin(Plugins.Editor)
+            except Exception:
+                return None
+        except Exception:
+            return None
 
-        Called by the chat widget on each message send. Returns a dict
-        with three context levels:
-        1. Active file — full content, cursor, selection
-        2. Other open files — summaries of non-active open tabs
-        3. Project structure — file tree of the project root
-
-        Returns:
-            Dict with keys:
-                - context: Dict from get_editor_context() (active file).
-                - open_files: List from get_open_files_context().
-                - project: Dict from get_project_context().
-            Returns dict with empty values if plugins are unavailable.
-        """
-        result = {
-            "context": {}, "open_files": [], "project": {}, "console": {},
-        }
-
-        # --- Active file context ---
-        editor_plugin = self.get_plugin(Plugins.Editor)
-        if editor_plugin is not None:
-            editor = editor_plugin.get_current_editor()
-            result["context"] = get_editor_context(editor, editor_plugin)
-
-            # --- Other open files (summaries) ---
-            current_filename = result["context"].get("filename", "")
-            result["open_files"] = get_open_files_context(
-                editor_plugin, current_filename
-            )
-
-        # --- Project structure ---
-        projects_plugin = self.get_plugin(Plugins.Projects)
-        result["project"] = get_project_context(projects_plugin)
-
-        return result
+    def _safe_get_projects_plugin(self):
+        """Return the Spyder Projects plugin without raising."""
+        try:
+            return self.get_plugin(Plugins.Projects, error=False)
+        except TypeError:
+            try:
+                return self.get_plugin(Plugins.Projects)
+            except Exception:
+                return None
+        except Exception:
+            return None
 
     # --- Chat session persistence ---
 
@@ -799,10 +790,12 @@ class AIChatPlugin(SpyderDockablePlugin):
 
     def _on_project_loaded(self, project_path):
         """Switch persisted chat state when a project is opened."""
+        self._context_service.invalidate_project()
         self._switch_chat_session_scope(project_path, restore=True)
 
     def _on_project_closed(self, _project_path):
         """Return persisted chat state to the global scope when closing."""
+        self._context_service.invalidate_project()
         self._switch_chat_session_scope(None, restore=True)
 
     def _resolve_chat_session_storage_path(self, project_path=None):
@@ -1057,10 +1050,9 @@ class AIChatPlugin(SpyderDockablePlugin):
         )
         shown = manager.show_suggestion(text, target=target)
         if not shown:
-            logger.info(
-                "Ghost text suppressed for %s because the editor target no longer matched",
-                filename,
-            )
+            # The manager already logged the concrete reason (popup visible,
+            # paused, target moved); this line only ties it to the file.
+            logger.info("Ghost text not shown for %s", filename)
 
     def _on_ghost_lifecycle_event(self, event_name, payload):
         """Forward one editor-side ghost lifecycle event to the provider."""
@@ -1165,7 +1157,7 @@ class AIChatPlugin(SpyderDockablePlugin):
             self._last_manual_completion_target == manual_target
             and (now - self._last_manual_completion_at) < 0.2
         ):
-            logger.debug(
+            logger.info(
                 "Ignored duplicate manual AI completion dispatch for %s at offset=%d",
                 filename,
                 cursor.position(),
@@ -1451,6 +1443,24 @@ class AIChatPlugin(SpyderDockablePlugin):
         """Propagate Ollama host changes to the provider-aware chat worker."""
         del value
         self._refresh_chat_provider_settings()
+
+    @on_conf_change(option="mcp_enabled")
+    def on_mcp_enabled_changed(self, value):
+        """Restart the embedded MCP server after enable/disable changes."""
+        del value
+        self._reconfigure_mcp_server()
+
+    @on_conf_change(option="mcp_host")
+    def on_mcp_host_changed(self, value):
+        """Restart the embedded MCP server after host changes."""
+        del value
+        self._reconfigure_mcp_server()
+
+    @on_conf_change(option="mcp_port")
+    def on_mcp_port_changed(self, value):
+        """Restart the embedded MCP server after port changes."""
+        del value
+        self._reconfigure_mcp_server()
 
     @on_conf_change(option="openai_compatible_base_url")
     def on_openai_compatible_base_url_changed(self, value):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from qtpy.QtCore import Qt, Signal
 from qtpy.QtGui import QColor, QFont, QPixmap, QIcon
+from qtpy.QtWidgets import QApplication
 from qtpy.QtWidgets import (
     QCheckBox,
     QColorDialog,
@@ -17,6 +18,7 @@ from qtpy.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -26,6 +28,22 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from spyder_ai_assistant.mcp.launch import (
+    MCP_CLIENT_CLAUDE,
+    MCP_CLIENT_CODEX,
+    MCP_CLIENT_OPENCODE,
+    get_mcp_client_label,
+)
+from spyder_ai_assistant.mcp.settings import (
+    DEFAULT_MCP_HOST,
+    DEFAULT_MCP_PORT,
+    DEFAULT_MCP_SERVER_NAME,
+    build_client_setup_snippets,
+    build_mcp_endpoint_url,
+    normalize_mcp_host,
+    normalize_mcp_port,
+)
+from spyder_ai_assistant.utils.assistant_settings import AssistantSettings
 from spyder_ai_assistant.utils.chat_themes import (
     EXPOSED_COLOR_KEYS,
     get_preset_names,
@@ -98,20 +116,30 @@ class AssistantSettingsDialog(QDialog):
     manage_profiles_requested = Signal()
     refresh_models_requested = Signal()
 
-    def __init__(self, *, models=None, settings=None, parent=None):
+    def __init__(
+        self,
+        *,
+        models=None,
+        settings=None,
+        mcp_status=None,
+        mcp_client_launcher=None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Assistant Settings")
         self.resize(760, 720)
 
         self._models = [dict(model) for model in (models or []) if isinstance(model, dict)]
-        self._settings = dict(settings or {})
+        self._settings = AssistantSettings.from_mapping(settings).to_conf_dict()
+        self._mcp_status = dict(mcp_status or {})
+        self._mcp_client_launcher = mcp_client_launcher
         self._completion_model_payloads = []
 
         layout = QVBoxLayout(self)
 
         intro = QLabel(
             "Configure models, generation, shortcuts, appearance, behavior, "
-            "and prompt templates here. "
+            "prompt templates, and the embedded MCP server here. "
             "Provider endpoints are managed through Provider Profiles."
         )
         intro.setWordWrap(True)
@@ -349,6 +377,105 @@ class AssistantSettingsDialog(QDialog):
         behavior_layout.addStretch(1)
         tabs.addTab(behavior_tab, "Behavior")
 
+        mcp_tab = QWidget(self)
+        mcp_layout = QVBoxLayout(mcp_tab)
+
+        mcp_server_group = QGroupBox("Embedded MCP server", mcp_tab)
+        mcp_server_form = QFormLayout(mcp_server_group)
+        self.mcp_enabled_checkbox = QCheckBox(
+            "Start the local Spyder MCP server automatically",
+            mcp_server_group,
+        )
+        self.mcp_host_edit = QLineEdit(mcp_server_group)
+        self.mcp_host_edit.setPlaceholderText(DEFAULT_MCP_HOST)
+        self.mcp_port_spin = QSpinBox(mcp_server_group)
+        self.mcp_port_spin.setRange(1, 65535)
+        self.mcp_port_spin.setValue(DEFAULT_MCP_PORT)
+        self.mcp_endpoint_edit = QLineEdit(mcp_server_group)
+        self.mcp_endpoint_edit.setReadOnly(True)
+        self.mcp_status_label = QLabel(mcp_server_group)
+        self.mcp_status_label.setWordWrap(True)
+        self.mcp_status_note_label = QLabel(
+            "Status reflects the currently saved configuration. Preview "
+            "commands below update live as you edit host or port values.",
+            mcp_server_group,
+        )
+        self.mcp_status_note_label.setWordWrap(True)
+        mcp_server_form.addRow(self.mcp_enabled_checkbox)
+        mcp_server_form.addRow("Listen host", self.mcp_host_edit)
+        mcp_server_form.addRow("Listen port", self.mcp_port_spin)
+        mcp_server_form.addRow("Endpoint URL", self.mcp_endpoint_edit)
+        mcp_server_form.addRow("Current status", self.mcp_status_label)
+        mcp_server_form.addRow("", self.mcp_status_note_label)
+        mcp_layout.addWidget(mcp_server_group)
+
+        clients_group = QGroupBox("Client setup", mcp_tab)
+        clients_layout = QVBoxLayout(clients_group)
+        clients_note = QLabel(
+            "Use these copy-ready snippets to connect Claude Code, Codex, "
+            "or OpenCode to the embedded Spyder MCP server."
+        )
+        clients_note.setWordWrap(True)
+        clients_layout.addWidget(clients_note)
+
+        claude_row = QHBoxLayout()
+        self.claude_command_edit = QLineEdit(clients_group)
+        self.claude_command_edit.setReadOnly(True)
+        self.copy_claude_btn = QPushButton("Copy Claude", clients_group)
+        self.copy_claude_btn.clicked.connect(
+            lambda: self._copy_text(self.claude_command_edit.text())
+        )
+        self.launch_claude_btn = QPushButton("Launch Claude", clients_group)
+        self.launch_claude_btn.clicked.connect(
+            lambda: self._launch_client(MCP_CLIENT_CLAUDE)
+        )
+        claude_row.addWidget(self.claude_command_edit, stretch=1)
+        claude_row.addWidget(self.copy_claude_btn)
+        claude_row.addWidget(self.launch_claude_btn)
+        clients_layout.addLayout(claude_row)
+
+        codex_row = QHBoxLayout()
+        self.codex_command_edit = QLineEdit(clients_group)
+        self.codex_command_edit.setReadOnly(True)
+        self.copy_codex_btn = QPushButton("Copy Codex", clients_group)
+        self.copy_codex_btn.clicked.connect(
+            lambda: self._copy_text(self.codex_command_edit.text())
+        )
+        self.launch_codex_btn = QPushButton("Launch Codex", clients_group)
+        self.launch_codex_btn.clicked.connect(
+            lambda: self._launch_client(MCP_CLIENT_CODEX)
+        )
+        codex_row.addWidget(self.codex_command_edit, stretch=1)
+        codex_row.addWidget(self.copy_codex_btn)
+        codex_row.addWidget(self.launch_codex_btn)
+        clients_layout.addLayout(codex_row)
+
+        self.opencode_config_edit = QPlainTextEdit(clients_group)
+        self.opencode_config_edit.setReadOnly(True)
+        self.opencode_config_edit.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.opencode_config_edit.setMinimumHeight(180)
+        clients_layout.addWidget(self.opencode_config_edit)
+
+        opencode_row = QHBoxLayout()
+        self.copy_opencode_btn = QPushButton("Copy OpenCode", clients_group)
+        self.copy_opencode_btn.clicked.connect(
+            lambda: self._copy_text(self.opencode_config_edit.toPlainText())
+        )
+        self.launch_opencode_btn = QPushButton("Launch OpenCode", clients_group)
+        self.launch_opencode_btn.clicked.connect(
+            lambda: self._launch_client(MCP_CLIENT_OPENCODE)
+        )
+        self.mcp_action_feedback = QLabel(clients_group)
+        self.mcp_action_feedback.setWordWrap(True)
+        opencode_row.addWidget(self.copy_opencode_btn)
+        opencode_row.addWidget(self.launch_opencode_btn)
+        opencode_row.addWidget(self.mcp_action_feedback, stretch=1)
+        opencode_row.addStretch()
+        clients_layout.addLayout(opencode_row)
+        mcp_layout.addWidget(clients_group)
+        mcp_layout.addStretch(1)
+        tabs.addTab(mcp_tab, "MCP")
+
         prompts_tab = QWidget(self)
         prompts_layout = QVBoxLayout(prompts_tab)
 
@@ -381,6 +508,8 @@ class AssistantSettingsDialog(QDialog):
 
         self._populate_model_combos()
         self._load_settings()
+        self.mcp_host_edit.textChanged.connect(self._refresh_mcp_preview)
+        self.mcp_port_spin.valueChanged.connect(self._refresh_mcp_preview)
 
     @staticmethod
     def _model_display(payload):
@@ -449,6 +578,127 @@ class AssistantSettingsDialog(QDialog):
             self.chat_model_combo.addItem(self._model_display(payload), dict(payload))
         self.chat_model_combo.blockSignals(False)
 
+    def _copy_text(self, text):
+        """Copy text to the system clipboard and update the feedback label."""
+        clipboard = QApplication.clipboard()
+        clipboard.setText(str(text or ""))
+        self._set_mcp_action_feedback("Copied to clipboard.")
+
+    def _set_mcp_action_feedback(self, text):
+        """Update the shared MCP client action feedback label."""
+        self.mcp_action_feedback.setText(str(text or ""))
+
+    def _current_mcp_host(self):
+        """Return the normalized host currently shown in the dialog."""
+        return normalize_mcp_host(self.mcp_host_edit.text())
+
+    def _current_mcp_port(self):
+        """Return the normalized port currently shown in the dialog."""
+        return normalize_mcp_port(self.mcp_port_spin.value())
+
+    def _refresh_mcp_preview(self):
+        """Refresh the endpoint URL and copy-ready client setup snippets."""
+        snippets = build_client_setup_snippets(
+            host=self._current_mcp_host(),
+            port=self._current_mcp_port(),
+            name=DEFAULT_MCP_SERVER_NAME,
+        )
+        self.mcp_endpoint_edit.setText(snippets["url"])
+        self.claude_command_edit.setText(snippets["claude_command"])
+        self.codex_command_edit.setText(snippets["codex_command"])
+        self.opencode_config_edit.setPlainText(snippets["opencode_config"])
+
+    def _refresh_mcp_status_label(self):
+        """Update the MCP status label for the currently saved server."""
+        status = dict(self._mcp_status or {})
+        enabled = bool(status.get("enabled", True))
+        running = bool(status.get("running", False))
+        error = str(status.get("error", "") or "").strip()
+        endpoint_url = str(
+            status.get(
+                "endpoint_url",
+                build_mcp_endpoint_url(
+                    host=self._settings.get("mcp_host", DEFAULT_MCP_HOST),
+                    port=self._settings.get("mcp_port", DEFAULT_MCP_PORT),
+                ),
+            ) or ""
+        )
+
+        if not enabled:
+            text = "Disabled. The embedded Spyder MCP server will not start."
+        elif running:
+            text = f"Running on {endpoint_url}"
+        elif error:
+            text = f"Not running. {error}"
+        else:
+            text = f"Not running. Expected endpoint: {endpoint_url}"
+
+        self.mcp_status_label.setText(text)
+
+    def _can_launch_client(self):
+        """Return whether the launch buttons match the running saved server."""
+        status = dict(self._mcp_status or {})
+        preview_url = self.mcp_endpoint_edit.text().strip()
+        saved_url = str(status.get("endpoint_url", "") or "").strip()
+
+        if not self.mcp_enabled_checkbox.isChecked():
+            return (
+                False,
+                "Enable the embedded MCP server and save settings before "
+                "launching a client.",
+            )
+
+        if bool(status.get("enabled", True)) != bool(self.mcp_enabled_checkbox.isChecked()):
+            return (
+                False,
+                "Save MCP settings first so Spyder restarts the embedded "
+                "server with this configuration.",
+            )
+
+        if preview_url != saved_url:
+            return (
+                False,
+                "Save MCP settings first so the running embedded server "
+                "matches the preview URL.",
+            )
+
+        if not bool(status.get("running", False)):
+            return (
+                False,
+                "The embedded MCP server is not running. Save settings or "
+                "restart Spyder first.",
+            )
+
+        return True, ""
+
+    def _launch_client(self, client_id):
+        """Launch one supported MCP-aware client through the plugin callback."""
+        allowed, message = self._can_launch_client()
+        if not allowed:
+            self._set_mcp_action_feedback(message)
+            return False
+
+        launcher = self._mcp_client_launcher
+        if not callable(launcher):
+            self._set_mcp_action_feedback(
+                "MCP client launch support is not available in this build."
+            )
+            return False
+
+        client_label = get_mcp_client_label(client_id)
+        try:
+            result = launcher(client_id, self.mcp_endpoint_edit.text().strip())
+        except Exception as error:
+            self._set_mcp_action_feedback(
+                f"Could not launch {client_label}: {error}"
+            )
+            return False
+
+        self._set_mcp_action_feedback(
+            str(result or f"Launching {client_label}.")
+        )
+        return True
+
     def replace_models(self, models):
         """Replace discovered models and rebuild both dropdowns."""
         current_chat = self.chat_model_combo.currentData() or {}
@@ -478,6 +728,15 @@ class AssistantSettingsDialog(QDialog):
 
         self.ollama_host_edit.setText(
             str(self._settings.get("ollama_host", "http://localhost:11434") or "")
+        )
+        self.mcp_enabled_checkbox.setChecked(
+            bool(self._settings.get("mcp_enabled", True))
+        )
+        self.mcp_host_edit.setText(
+            str(self._settings.get("mcp_host", DEFAULT_MCP_HOST) or DEFAULT_MCP_HOST)
+        )
+        self.mcp_port_spin.setValue(
+            normalize_mcp_port(self._settings.get("mcp_port", DEFAULT_MCP_PORT))
         )
         self.chat_temperature_spin.setValue(chat_temperature)
         self.chat_max_tokens_spin.setValue(
@@ -578,6 +837,8 @@ class AssistantSettingsDialog(QDialog):
 
         self._select_chat_model()
         self._refresh_completion_model_options()
+        self._refresh_mcp_preview()
+        self._refresh_mcp_status_label()
 
     def _select_chat_model(
         self,
@@ -653,8 +914,11 @@ class AssistantSettingsDialog(QDialog):
         """Return the normalized settings chosen in the dialog."""
         chat_payload = self.chat_model_combo.currentData() or {}
         completion_payload = self.completion_model_combo.currentData() or {}
-        return {
+        return AssistantSettings.from_mapping({
             "ollama_host": self.ollama_host_edit.text().strip() or "http://localhost:11434",
+            "mcp_enabled": bool(self.mcp_enabled_checkbox.isChecked()),
+            "mcp_host": self._current_mcp_host(),
+            "mcp_port": self._current_mcp_port(),
             "chat_provider": chat_payload.get(
                 "provider_kind",
                 self._settings.get("chat_provider", "ollama"),
@@ -703,4 +967,4 @@ class AssistantSettingsDialog(QDialog):
             # Behavior
             "idle_completion_delay_ms": int(self.idle_delay_spin.value()),
             "post_accept_completion_delay_ms": int(self.post_accept_delay_spin.value()),
-        }
+        }).to_conf_dict()

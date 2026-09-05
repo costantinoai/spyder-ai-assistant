@@ -16,7 +16,7 @@ spyder          # launch with the plugin
 
 Install into the same Python environment where Spyder lives (e.g., your conda env).
 
-Requires `spyder >= 6.0.0`, `ollama >= 0.4.0`, and Python 3.11+. Pygments (for syntax highlighting) ships with Spyder.
+Requires `spyder >= 6.0.0`, `ollama >= 0.4.0`, `mcp >= 1.26.0,<2`, and Python 3.11+. Pygments (for syntax highlighting) ships with Spyder.
 
 ## Architecture
 
@@ -33,7 +33,7 @@ spyder.completions →  AIChatCompletionProvider (SpyderCompletionProvider)
 The chat and completion paths share some context and prompt utilities, but the transports are intentionally separate:
 
 - Chat uses a provider registry with Ollama plus optional OpenAI-compatible backends
-- Completions stay Ollama-only and optimize for low-latency inline behavior
+- Completions use the same provider registry (Ollama or an OpenAI-compatible endpoint) but keep a separate, latency-optimised request path with debouncing, caching and candidate cycling
 
 ### Source layout
 
@@ -45,6 +45,11 @@ src/spyder_ai_assistant/
 │   ├── client.py             # OllamaClient: Ollama API wrapper
 │   ├── chat_providers.py     # Provider registry + OpenAI-compatible chat backend
 │   └── worker.py             # ChatWorker: QThread bridge for provider-aware chat
+├── mcp/
+│   ├── bridge.py             # Main-thread bridge for MCP reads/writes into Spyder
+│   ├── launch.py             # External CLI launch helpers for Claude/Codex/OpenCode
+│   ├── settings.py           # Shared server config + client setup helpers
+│   └── server.py             # Embedded HTTP FastMCP + Uvicorn transport
 ├── utils/
 │   ├── chat_exchanges.py     # Exchange browsing and deletion helpers
 │   ├── chat_inference.py     # Per-tab chat option normalization/resolution
@@ -55,8 +60,8 @@ src/spyder_ai_assistant/
 │   ├── context.py            # Editor/project context + prompt assembly
 │   ├── prompt_library.py     # Built-in per-tab chat modes
 │   ├── provider_profiles.py  # Named provider profile storage
-│   ├── runtime_bridge.py     # Read-only runtime inspection protocol
-│   └── runtime_context.py    # Live shell snapshot service
+│   ├── runtime_bridge.py     # Runtime inspection protocol
+│   └── runtime_context.py    # Live shell snapshot service + explicit console actions
 ├── widgets/
 │   ├── chat_widget.py        # Chat pane: tabs, toolbar, input
 │   ├── chat_display.py       # Message rendering: Markdown, highlighting
@@ -81,8 +86,21 @@ python -m tools.release.build_dist
 ```
 
 Live validation must be run in the real `spyder-ai` environment with Spyder
-actually launched and logs reviewed. The tracked validation harnesses live in
-`tools/spyder_validation/`.
+actually launched and logs reviewed. The validation harnesses live in
+`tools/spyder_validation/`; that directory is intentionally gitignored (local,
+machine-specific tooling), so the harnesses and their results are private to
+the developer machine and are described, not shipped, in this repository.
+Each harness runs Spyder against an isolated configuration directory under
+the system temp dir and refuses to write to the real `~/.config/spyder-py3`.
+
+For MCP validation, prefer this order:
+
+1. Confirm the embedded server is running from **AI Chat → Settings → Assistant Settings... → MCP**.
+2. Use the MCP tab's copy or launch buttons for Claude Code, Codex, and OpenCode.
+3. Verify read tools first: current file, open files, project tree, variables, traceback, and console output.
+4. Verify guarded write tools next:
+   preview a file edit, apply it with the returned document hash, and optionally save it through Spyder
+   execute explicit code in the active or selected `shell_id` console
 
 Typical validation commands:
 
@@ -119,9 +137,10 @@ The pipeline runs in three stages:
 
 The release workflow uses the Node 24-ready major versions of the official GitHub actions. If you mirror it to self-hosted runners, keep them on Actions Runner `2.329.0+`.
 
-Both local release checks and the GitHub build job use
-`python -m tools.release.build_dist`. That helper removes stale `build/`,
-`dist/`, and `.egg-info` artifacts before rebuilding.
+Local release checks use `python -m tools.release.build_dist`, which removes
+stale `build/`, `dist/`, and `.egg-info` artifacts before rebuilding. The
+GitHub build job runs plain `python -m build` instead, because `tools/` is
+gitignored and therefore not available on CI.
 
 See [docs/release-workflow.md](docs/release-workflow.md) for the exact workflow components and the post-release verification checklist.
 

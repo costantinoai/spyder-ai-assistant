@@ -37,7 +37,8 @@ n messages on every one of m streaming tokens.
 import logging
 import re
 
-from qtpy.QtCore import Qt, QTimer, Signal, QSize
+from qtpy.QtGui import QColor
+from qtpy.QtCore import QTimer, Signal, QSize, QEvent
 from qtpy.QtWidgets import QApplication, QTextEdit, QToolButton
 
 from spyder_ai_assistant.utils.chat_themes import (
@@ -82,60 +83,11 @@ class ChatDisplay(QTextEdit):
     # Carries the raw code text to preview in the active editor.
     sig_apply_code_requested = Signal(str)
 
-    # Theme color presets for light and dark Spyder themes.
-    # Selected at runtime based on the widget's background luminance.
-    # Theme color presets — designed for clear visual distinction between
-    # user messages (accent color, right-aligned feel) and AI responses
-    # (neutral, left-aligned). Colors are inspired by modern chat UIs
-    # (Slack, Discord, Cursor) while respecting Spyder's theme.
-    _LIGHT_THEME = {
-        "user_bg": "#d4e6f9", "user_text": "#1a1a1a",
-        "user_label": "#2962a1",
-        "assistant_bg": "#f0f0f0", "assistant_text": "#1a1a1a",
-        "assistant_label": "#4a4a4a",
-        "error_bg": "#fde8e8", "error_text": "#b71c1c",
-        "error_label": "#c62828",
-        "code_block_bg": "#282c34", "code_block_text": "#abb2bf",
-        "inline_code_bg": "#e8e8e8", "inline_code_text": "#1a1a1a",
-        "link_color": "#1565c0",
-        # Thinking blocks: dimmed, italic, with a subtle left border
-        "thinking_bg": "#f5f5f5", "thinking_text": "#888888",
-        "thinking_border": "#cccccc",
-        # Scroll-to-bottom button styling
-        "scroll_btn_bg": "rgba(0, 0, 0, 150)",
-        "scroll_btn_text": "#ffffff",
-        # Blockquote: subtle left border and light background
-        "blockquote_bg": "#f5f5f0", "blockquote_border": "#c0c0c0",
-        "blockquote_text": "#555555",
-        # Table: light grid lines for data tables
-        "table_border": "#cccccc", "table_header_bg": "#e0e0e0",
-        # Horizontal rule
-        "hr_color": "#cccccc",
-    }
-    _DARK_THEME = {
-        "user_bg": "#1e3a5f", "user_text": "#e8e8e8",
-        "user_label": "#7ab3ef",
-        "assistant_bg": "#252525", "assistant_text": "#e0e0e0",
-        "assistant_label": "#999999",
-        "error_bg": "#3d1515", "error_text": "#ff8a80",
-        "error_label": "#ff6b6b",
-        "code_block_bg": "#1a1d23", "code_block_text": "#abb2bf",
-        "inline_code_bg": "#383838", "inline_code_text": "#e0e0e0",
-        "link_color": "#64b5f6",
-        # Thinking blocks: dimmed, italic, with a subtle left border
-        "thinking_bg": "#1a1a1a", "thinking_text": "#777777",
-        "thinking_border": "#444444",
-        # Scroll-to-bottom button styling
-        "scroll_btn_bg": "rgba(255, 255, 255, 150)",
-        "scroll_btn_text": "#000000",
-        # Blockquote: subtle left border on dark background
-        "blockquote_bg": "#2a2a2a", "blockquote_border": "#555555",
-        "blockquote_text": "#aaaaaa",
-        # Table: darker grid lines for data tables
-        "table_border": "#444444", "table_header_bg": "#333333",
-        # Horizontal rule
-        "hr_color": "#555555",
-    }
+    sig_theme_changed = Signal()
+
+    # Resolve all palettes through the shared schema.
+    _LIGHT_THEME = get_theme_colors("default", False)
+    _DARK_THEME = get_theme_colors("default", True)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -176,11 +128,13 @@ class ChatDisplay(QTextEdit):
         # This is the "stable" portion that does not need re-rendering
         # on each streaming token — only the streaming bubble changes.
         self._html_content = ""
+        self._render_messages = []
 
         # Extracted code blocks from assistant messages, indexed by
         # position. Used to look up code when user clicks code-apply
         # links (which reference blocks by index).
         self._code_blocks = []
+        self._batch_render = False
 
         # --- Smart auto-scroll state ---
         # Tracks whether the user has manually scrolled away from the
@@ -254,6 +208,9 @@ class ChatDisplay(QTextEdit):
 
         # Handle theme preset and color overrides
         theme_changed = False
+        if "is_dark" in kwargs and bool(kwargs["is_dark"]) != self._is_dark:
+            self._is_dark = bool(kwargs["is_dark"])
+            theme_changed = True
         if "theme_preset" in kwargs and kwargs["theme_preset"] != self._theme_preset:
             self._theme_preset = kwargs["theme_preset"]
             theme_changed = True
@@ -281,20 +238,48 @@ class ChatDisplay(QTextEdit):
         Called after appearance settings change so the new fonts, sizes,
         and geometry are applied to all existing messages.
         """
-        # Re-render is done by reconstructing _html_content from the
-        # message list maintained by ChatSession. The session calls
-        # reload_messages() which clears and re-appends each message.
-        # We emit a signal so the owning session can drive the reload.
-        # For now, just refresh the current HTML (layout values are
-        # read live from instance attributes, so a setHtml re-render
-        # with the same content picks up the new values).
-        if self._is_streaming:
-            # During streaming, the next token append will use the new
-            # values. Don't interrupt the stream.
+        messages = list(self._render_messages)
+        streaming, buffer = self._is_streaming, self._streaming_buffer
+        position = self.verticalScrollBar().value()
+        scrolled_away = self._user_scrolled_away
+        self._batch_render = True
+        try:
+            self.clear_conversation()
+            for role, text in messages:
+                if role == "streamed":
+                    self.start_assistant_message()
+                    self._streaming_buffer = text
+                    self.finish_assistant_message()
+                else:
+                    getattr(self, f"append_{role}")(text)
+        finally:
+            self._batch_render = False
+        self._user_scrolled_away = scrolled_away
+        if streaming:
+            self.start_assistant_message()
+            self.append_chunk(buffer)
+        else:
+            self._set_document_html(self._html_content)
+        if scrolled_away:
+            self.verticalScrollBar().setValue(position)
+        else:
+            self._do_scroll_to_bottom()
+
+    def changeEvent(self, event):
+        """Refresh existing bubbles when the application palette changes."""
+        super().changeEvent(event)
+        if event.type() != QEvent.PaletteChange or not hasattr(self, "_scroll_btn"):
             return
-        # Re-set the same HTML to force Qt to re-render with new styles.
-        # This works because _wrap_message reads from instance attributes.
-        self.setHtml(self._html_content)
+        is_dark = self.palette().color(self.backgroundRole()).lightness() < 128
+        if is_dark == self._is_dark:
+            return
+        self._is_dark = is_dark
+        self._theme = get_theme_colors(
+            self._theme_preset, is_dark, self._theme_color_overrides,
+        )
+        self._apply_scroll_button_style()
+        self._full_rerender()
+        self.sig_theme_changed.emit()
 
     # --- Scroll-to-bottom button positioning and styling ---
 
@@ -405,13 +390,25 @@ class ChatDisplay(QTextEdit):
         self._scroll_btn.hide()
         self._do_scroll_to_bottom()
 
+    def _ensure_layout_finished(self):
+        """Complete any pending document layout without changing its width.
+
+        ``QTextDocument.adjustSize()`` also forces layout, but it sets the
+        document text width to its *ideal* width. Bubbles are 100%-width
+        tables, so that ideal width exceeds the viewport and every later
+        paint wraps at the wider size, producing a permanent horizontal
+        scrollbar. Asking the layout for its size finishes the lazy layout
+        while QTextEdit keeps the text width pinned to the viewport.
+        """
+        self.document().documentLayout().documentSize()
+
     def _do_scroll_to_bottom(self):
         """Perform the actual scroll-to-bottom operation.
 
         Forces the document layout to complete before reading the
         scrollbar maximum, because setHtml() triggers asynchronous
         layout and the maximum may not yet reflect the full document
-        height. Without adjustSize(), we might scroll to a stale
+        height. Without forcing layout, we might scroll to a stale
         maximum and end up short of the true bottom.
 
         Sets the programmatic scroll guard to prevent the scrollbar
@@ -422,9 +419,11 @@ class ChatDisplay(QTextEdit):
         the flag immediately would leave a timing window where the
         deferred signal sees _programmatic_scroll=False.
         """
+        if self._batch_render:
+            return
         self._programmatic_scroll = True
         # Force layout completion so scrollbar.maximum() is accurate.
-        self.document().adjustSize()
+        self._ensure_layout_finished()
         scrollbar = self.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
         QTimer.singleShot(0, self._clear_programmatic_scroll)
@@ -491,7 +490,8 @@ class ChatDisplay(QTextEdit):
         return (
             f'<table width="100%" cellpadding="{pad}" cellspacing="0"'
             f' style="margin-top:{sp}px; margin-bottom:{sp}px;">'
-            f'<tr><td style="background-color:{bg}; color:{text_color};'
+            f'<tr><td width="5" style="background-color:{lc};"></td>'
+            f'<td style="background-color:{bg}; color:{text_color};'
             f' font-family:{ff}; font-size:{fs}pt;'
             f' border-radius:{br}px; line-height:{lh};">'
             f'<span style="font-size:{label_fs}pt; font-weight:bold;'
@@ -511,6 +511,7 @@ class ChatDisplay(QTextEdit):
         Args:
             text: The user's message (plain text, will be HTML-escaped).
         """
+        self._render_messages.append(("user_message", text))
         escaped = self._escape_html(text)
         # Preserve newlines in the user's message
         escaped = escaped.replace("\n", "<br>")
@@ -524,15 +525,14 @@ class ChatDisplay(QTextEdit):
         # of previous scroll position, and reset scroll-away state.
         self._user_scrolled_away = False
         self._scroll_btn.hide()
-        # Force the document layout to complete before scrolling.
-        # Without this, setHtml() triggers asynchronous layout and
-        # the scrollbar maximum may increase after we set the value,
-        # leaving us slightly above the true bottom.
-        self.document().adjustSize()
+        # Force the document layout to complete before scrolling, so the
+        # scrollbar maximum already reflects the whole document.
+        self._ensure_layout_finished()
         self._do_scroll_to_bottom()
 
     def append_assistant_message(self, text):
         """Add a finalized assistant message to the display."""
+        self._render_messages.append(("assistant_message", text))
         rendered = self._render_markdown(text or "", track_code_blocks=True)
         self._html_content += self._wrap_message(
             self._theme["assistant_bg"], self._theme["assistant_text"],
@@ -628,6 +628,7 @@ class ChatDisplay(QTextEdit):
         if not self._is_streaming:
             return
 
+        self._render_messages.append(("streamed", self._streaming_buffer))
         # Parse thinking vs response for the final version
         thinking, response, _ = self._parse_thinking(self._streaming_buffer)
 
@@ -692,14 +693,29 @@ class ChatDisplay(QTextEdit):
         Args:
             message: The error description (will be HTML-escaped).
         """
-        escaped = self._escape_html(message)
+        self._append_notice("error", message)
+
+    def append_warning(self, message):
+        """Show a nonfatal operational warning."""
+        self._append_notice("warning", message)
+
+    def append_info(self, message):
+        """Show an informational notice without error styling."""
+        self._append_notice("info", message)
+
+    def _append_notice(self, level, message):
+        """Render all notice levels with the same escaping and layout."""
+        self._render_messages.append((level, message))
         self._html_content += self._wrap_message(
-            self._theme["error_bg"], self._theme["error_text"],
-            "ERROR", escaped,
-            label_color=self._theme["error_label"],
+            self._theme[f"{level}_bg"], self._theme[f"{level}_text"],
+            level.upper(), self._escape_html(message),
+            label_color=self._theme[f"{level}_label"],
         )
-        self._set_document_html(self._html_content)
-        self._scroll_to_bottom()
+        if self._is_streaming:
+            self.append_chunk("")
+        else:
+            self._set_document_html(self._html_content)
+            self._scroll_to_bottom()
 
     def clear_conversation(self):
         """Remove all messages and reset the display to empty."""
@@ -707,6 +723,7 @@ class ChatDisplay(QTextEdit):
         self._streaming_buffer = ""
         self._is_streaming = False
         self._code_blocks.clear()
+        self._render_messages.clear()
         # Reset scroll state on clear — fresh conversation
         self._user_scrolled_away = False
         self._scroll_btn.hide()
@@ -714,14 +731,22 @@ class ChatDisplay(QTextEdit):
 
     def rebuild_from_messages(self, messages):
         """Re-render the full conversation from authoritative history."""
-        self.clear_conversation()
-        for message in messages:
-            role = message.get("role")
-            content = message.get("content", "")
-            if role == "user":
-                self.append_user_message(content)
-            elif role == "assistant":
-                self.append_assistant_message(content)
+        # Restoring a long history should lay out the document once, instead
+        # of laying out every growing prefix of the transcript.
+        self._batch_render = True
+        try:
+            self.clear_conversation()
+            for message in messages:
+                role = message.get("role")
+                content = message.get("content", "")
+                if role == "user":
+                    self.append_user_message(content)
+                elif role == "assistant":
+                    self.append_assistant_message(content)
+        finally:
+            self._batch_render = False
+        self._set_document_html(self._html_content)
+        self._do_scroll_to_bottom()
 
     # --- HTML document update ---
 
@@ -739,8 +764,12 @@ class ChatDisplay(QTextEdit):
         Args:
             html: The full HTML content to render in the document.
         """
+        if self._batch_render:
+            return
+        position = self.verticalScrollBar().value()
         self._programmatic_scroll = True
         self.setHtml(html)
+        self.verticalScrollBar().setValue(position)
         # Clear the guard via QTimer.singleShot(0) to ensure it
         # persists through any deferred valueChanged signals that Qt
         # delivers on the next event loop tick after setHtml().
@@ -838,6 +867,49 @@ class ChatDisplay(QTextEdit):
 
     # --- Private rendering helpers ---
 
+    @staticmethod
+    def _drop_paragraph_spacer(output_lines):
+        """Remove a trailing ``<br>`` spacer before a block element opens.
+
+        Blank markdown lines become ``<br>`` for paragraph spacing, but a
+        list is already a block in Qt's layout, so keeping the spacer
+        renders as two empty lines above the list.
+        """
+        if output_lines and output_lines[-1] == "<br>":
+            output_lines.pop()
+
+    def _code_block_html(self, lang, escaped_code, highlighted):
+        """Return the styled ``<pre>`` block for one fenced code snippet.
+
+        Shared by complete and partial (still streaming) fences so both
+        render identically. ``highlighted`` is Pygments output when a
+        language was recognised; otherwise the already-escaped source is
+        shown in the plain code colour.
+
+        Args:
+            lang: Language hint from the fence (may be empty).
+            escaped_code: HTML-escaped source, used when not highlighted.
+            highlighted: Pygments HTML or ``None``.
+        """
+        t = self._theme
+        lang_label = (
+            f'<span style="color:{t["lang_label"]}; font-size:0.85em;">'
+            f'{lang}</span><br>'
+            if lang else ""
+        )
+        body = highlighted if highlighted else escaped_code
+        # Plain blocks need an explicit text colour; Pygments spans carry
+        # their own colours.
+        color = "" if highlighted else f' color:{t["code_block_text"]};'
+        return (
+            f'<pre style="background-color:{t["code_block_bg"]};{color}'
+            f' font-family:{self._code_font_family},monospace;'
+            f' font-size:{self._code_font_size}pt;'
+            f' padding:8px 12px; white-space:pre-wrap;'
+            f' word-wrap:break-word;">'
+            f'{lang_label}{body}</pre>'
+        )
+
     def _render_markdown(self, text, track_code_blocks=False):
         """Convert markdown to HTML for chat display.
 
@@ -893,8 +965,6 @@ class ChatDisplay(QTextEdit):
         # later transformations. Code blocks use <pre> with inline styles.
         # Since the parent message is a <table> cell, <pre> inside <td>
         # renders correctly (see lessons.md Qt HTML constraints).
-        cb_bg = self._theme["code_block_bg"]
-        cb_text = self._theme["code_block_text"]
         link_color = self._theme["link_color"]
 
         def _replace_code_block(match):
@@ -917,39 +987,7 @@ class ChatDisplay(QTextEdit):
             # Falls back to plain <pre> for unknown languages or no hint.
             highlighted = self._highlight_code(raw_code, lang)
 
-            # Code font from configurable appearance settings
-            cff = self._code_font_family
-            cfs = self._code_font_size
-
-            if highlighted:
-                # Pygments output is highlighted <span> elements.
-                # Wrap in our styled <pre> for consistent appearance.
-                lang_label = (
-                    f'<span style="color:#888; font-size:0.85em;">'
-                    f'{lang}</span><br>'
-                    if lang else ""
-                )
-                block_html = (
-                    f'<pre style="background-color:{cb_bg};'
-                    f' font-family:{cff},monospace; font-size:{cfs}pt;'
-                    f' padding:8px 12px; white-space:pre-wrap;'
-                    f' word-wrap:break-word;">'
-                    f'{lang_label}{highlighted}</pre>'
-                )
-            else:
-                # Fallback: plain monochrome code block (no highlighting)
-                lang_label = (
-                    f'<span style="color:#888; font-size:0.85em;">'
-                    f'{lang}</span><br>'
-                    if lang else ""
-                )
-                block_html = (
-                    f'<pre style="background-color:{cb_bg}; color:{cb_text};'
-                    f' font-family:{cff},monospace; font-size:{cfs}pt;'
-                    f' padding:8px 12px; white-space:pre-wrap;'
-                    f' word-wrap:break-word;">'
-                    f'{lang_label}{code}</pre>'
-                )
+            block_html = self._code_block_html(lang, code, highlighted)
 
             if track_code_blocks:
                 # Store the raw code for code-apply actions and "Copy"
@@ -959,11 +997,11 @@ class ChatDisplay(QTextEdit):
                 # Action links below the code block: Copy + Apply preview
                 block_html += (
                     f'<a href="copy://{index}" style="color:{link_color};'
-                    f' font-size:0.85em; text-decoration:none;">'
+                    f' font-size:10pt; font-weight:600; text-decoration:underline;">'
                     f'Copy</a>'
-                    f'&nbsp;&nbsp;'
+                    f'&nbsp;&nbsp;│&nbsp;&nbsp;'
                     f'<a href="apply://{index}" style="color:{link_color};'
-                    f' font-size:0.85em; text-decoration:none;">'
+                    f' font-size:10pt; font-weight:600; text-decoration:underline;">'
                     f'Apply...</a>'
                 )
 
@@ -1004,36 +1042,7 @@ class ChatDisplay(QTextEdit):
             # Syntax-highlight with Pygments if a language is specified.
             highlighted = self._highlight_code(raw_code, lang)
 
-            # Code font from configurable appearance settings
-            cff = self._code_font_family
-            cfs = self._code_font_size
-
-            if highlighted:
-                lang_label = (
-                    f'<span style="color:#888; font-size:0.85em;">'
-                    f'{lang}</span><br>'
-                    if lang else ""
-                )
-                block_html = (
-                    f'<pre style="background-color:{cb_bg};'
-                    f' font-family:{cff},monospace; font-size:{cfs}pt;'
-                    f' padding:8px 12px; white-space:pre-wrap;'
-                    f' word-wrap:break-word;">'
-                    f'{lang_label}{highlighted}</pre>'
-                )
-            else:
-                lang_label = (
-                    f'<span style="color:#888; font-size:0.85em;">'
-                    f'{lang}</span><br>'
-                    if lang else ""
-                )
-                block_html = (
-                    f'<pre style="background-color:{cb_bg}; color:{cb_text};'
-                    f' font-family:{cff},monospace; font-size:{cfs}pt;'
-                    f' padding:8px 12px; white-space:pre-wrap;'
-                    f' word-wrap:break-word;">'
-                    f'{lang_label}{code}</pre>'
-                )
+            block_html = self._code_block_html(lang, code, highlighted)
 
             placeholder = f"\x00CODEBLOCK{len(protected_blocks)}\x00"
             protected_blocks.append(block_html)
@@ -1258,6 +1267,7 @@ class ChatDisplay(QTextEdit):
                 if not list_indent_stack:
                     # Start a new ordered list (no list currently open)
                     list_indent_stack = [(indent_level, "ol")]
+                    self._drop_paragraph_spacer(output_lines)
                     output_lines.append(
                         '<ol style="margin:4px 0; padding-left:24px;">'
                     )
@@ -1289,6 +1299,7 @@ class ChatDisplay(QTextEdit):
                 if not list_indent_stack:
                     # Start a new unordered list (no list currently open)
                     list_indent_stack = [(indent_level, "ul")]
+                    self._drop_paragraph_spacer(output_lines)
                     output_lines.append(
                         '<ul style="margin:4px 0; padding-left:24px;">'
                     )
@@ -1505,6 +1516,13 @@ class ChatDisplay(QTextEdit):
             closing_tags.append(f"</{tag_type}>")
         return "".join(closing_tags)
 
+    def _code_card_is_dark(self):
+        """Return True when the theme's code block background is dark."""
+        color = QColor(self._theme.get("code_block_bg", ""))
+        if not color.isValid():
+            return self._is_dark
+        return color.lightness() < 128
+
     def _highlight_code(self, code, language=""):
         """Syntax-highlight code using Pygments with inline styles.
 
@@ -1531,9 +1549,10 @@ class ChatDisplay(QTextEdit):
 
             lexer = get_lexer_by_name(language, stripall=True)
 
-            # Pick a Pygments style based on user configuration.
-            # Falls back to the current theme-appropriate default.
-            style = (self._pygments_style_dark if self._is_dark
+            # Token colours must match the code card, not the interface:
+            # several light presets deliberately keep dark code cards, and a
+            # light Pygments style on a dark card is unreadable.
+            style = (self._pygments_style_dark if self._code_card_is_dark()
                      else self._pygments_style_light)
 
             # nowrap=True gives us just the highlighted <span> elements

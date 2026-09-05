@@ -9,6 +9,8 @@ All methods are synchronous (blocking).
 import logging
 
 import httpx
+
+from spyder_ai_assistant.utils.provider_profiles import compatible_api_url
 from ollama import Client
 
 logger = logging.getLogger(__name__)
@@ -473,7 +475,7 @@ class OpenAICompatibleCompletionClient:
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         self._client = httpx.Client(
-            base_url=f"{self._base_url}/v1",
+            base_url=compatible_api_url(self._base_url),
             headers=headers,
             timeout=30.0,
         )

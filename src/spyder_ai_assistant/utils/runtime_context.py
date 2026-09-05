@@ -9,6 +9,7 @@ Runtime snapshots include:
 - recent console output
 - latest extracted traceback/error block
 - structured variable summaries built from Spyder kernel state
+- explicit code submissions when a caller intentionally writes to a console
 """
 
 from __future__ import annotations
@@ -40,6 +41,8 @@ MAX_RUNTIME_REQUEST_VARIABLES = 12
 MAX_RUNTIME_REQUEST_NAMES = 5
 MAX_RUNTIME_REQUEST_TIMEOUT = 2
 MAX_RUNTIME_SHELLS = 12
+MAX_RUNTIME_EXECUTE_CODE_CHARS = 12_000
+MAX_RUNTIME_EXECUTE_PREVIEW_CHARS = 240
 
 
 # --- Spyder namespace-view defaults -----------------------------------------
@@ -345,7 +348,7 @@ class RuntimeContextService(QObject):
         return self._build_shell_records(), self._selected_shell_id
 
     def execute_request(self, request):
-        """Execute one read-only runtime inspection request."""
+        """Execute one runtime inspection or explicit console-action request."""
         tool = (request or {}).get("tool", "")
         args = (request or {}).get("args") or {}
         logger.info(
@@ -412,6 +415,10 @@ class RuntimeContextService(QObject):
             ]
             result = self._build_inspect_variables_result(
                 tool, shellwidget, runtime_context, names, shell_note
+            )
+        elif tool == "runtime.execute_code":
+            result = self._build_execute_code_result(
+                tool, shellwidget, runtime_context, args, shell_note
             )
         else:
             result = self._build_result_base(
@@ -931,6 +938,78 @@ class RuntimeContextService(QObject):
         }
         return result
 
+    def _build_execute_code_result(
+        self,
+        tool,
+        shellwidget,
+        runtime_context,
+        args,
+        query_note,
+    ):
+        """Submit explicit code to one Spyder IPython console."""
+        code = str((args or {}).get("code", "") or "")
+        hidden = bool((args or {}).get("hidden", False))
+        result = self._build_result_base(
+            tool,
+            runtime_context,
+            source="submitted",
+            query_note=query_note,
+        )
+        result["payload"] = {
+            "hidden": hidden,
+            "queued": False,
+            "submitted_chars": len(code),
+            "submitted_code_preview": _preview_runtime_code(code),
+        }
+
+        if not code.strip():
+            result["ok"] = False
+            result["source"] = "unavailable"
+            result["error"] = "No code was provided to execute."
+            return result
+
+        if len(code) > MAX_RUNTIME_EXECUTE_CODE_CHARS:
+            result["ok"] = False
+            result["source"] = "unavailable"
+            result["error"] = (
+                "The submitted code is too large for one MCP execution request."
+            )
+            return result
+
+        if self._is_shell_busy(shellwidget):
+            result["ok"] = False
+            result["source"] = "snapshot"
+            result["error"] = (
+                "The target Spyder IPython console is busy or waiting for "
+                "debugger input. Wait for the prompt to return before "
+                "executing more code."
+            )
+            return result
+
+        if not getattr(shellwidget, "spyder_kernel_ready", False):
+            result["ok"] = False
+            result["source"] = "snapshot"
+            result["error"] = (
+                "The target Spyder IPython console is not ready to execute "
+                "code yet."
+            )
+            return result
+
+        try:
+            shellwidget.execute(code, hidden=hidden, interactive=False)
+        except Exception as error:
+            result["ok"] = False
+            result["source"] = "unavailable"
+            result["error"] = (
+                f"Spyder failed to submit the code for execution: {error}"
+            )
+            return result
+
+        self._refresh_console_snapshot(shellwidget, reason="execute-code")
+        result["ok"] = True
+        result["payload"]["queued"] = True
+        return result
+
     def _query_namespace_state(self, shellwidget, tool):
         snapshot = self._get_or_create_snapshot(shellwidget)
         cached_namespace = snapshot.get("_namespace_view", {}) or {}
@@ -1167,6 +1246,14 @@ def summarize_console_text(console_text):
         "console_output": recent_text,
         "latest_error": latest_error,
     }
+
+
+def _preview_runtime_code(code):
+    """Return one bounded preview of submitted runtime code."""
+    normalized = " ".join(str(code or "").split())
+    if len(normalized) <= MAX_RUNTIME_EXECUTE_PREVIEW_CHARS:
+        return normalized
+    return normalized[:MAX_RUNTIME_EXECUTE_PREVIEW_CHARS].rstrip() + "..."
 
 
 def build_runtime_variable_summaries(namespace_view, var_properties):

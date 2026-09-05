@@ -104,6 +104,44 @@ This is **on-demand, not automatic** — ordinary questions stay file-focused an
 
 When more than one IPython console is open, the runtime target selector in the chat toolbar lets you choose **Follow Active Console** or pin the debugging context to a specific console. The runtime tooltip shows which console is currently active and which one is actually being inspected.
 
+### Claude, Codex, and OpenCode via MCP
+
+The plugin now also exposes Spyder as a local MCP server on `http://127.0.0.1:8769/mcp`. When Spyder starts, Claude Code, Codex, and OpenCode can connect to the live editor and console state without any extra manual server process.
+
+Open **AI Chat → Settings → Assistant Settings... → MCP** to enable or disable the server, change the host or port, view current status, and either copy ready-to-paste setup snippets or launch Claude Code, Codex, or OpenCode directly from Spyder.
+
+When you use the launch buttons, Spyder opens the selected CLI in your active Spyder project directory when possible, otherwise it falls back to the current file's directory. If you edit the MCP host or port in the dialog, save those settings first so Spyder restarts the embedded server on the new endpoint before launching a client.
+
+```bash
+claude mcp add --transport http spyder http://127.0.0.1:8769/mcp
+```
+
+```bash
+codex mcp add spyder --url http://127.0.0.1:8769/mcp
+```
+
+Available MCP tools:
+
+- `get_current_file` — active file path, full content, cursor, and selection
+- `get_open_files` — summaries of the other open editor tabs
+- `get_project_tree` — active project root and bounded file tree
+- `get_consoles` — available Spyder IPython console targets and their `shell_id` values
+- `get_variables` — variable list from the selected Spyder IPython console
+- `inspect_variable` — detailed inspection for one named variable
+- `get_traceback` — latest traceback or exception block
+- `get_console_output` — recent visible console output
+- `preview_file_edit` — build a diff preview for an editor mutation without changing the file
+- `apply_file_edit` — apply the previewed editor mutation after explicit confirmation, with optional save-to-disk through Spyder
+- `execute_console_code` — submit explicit code to the active or selected Spyder IPython console
+
+MCP writes are guarded instead of blind:
+
+- file edits are stateless compare-and-apply operations: preview first, then apply with `confirm=true`, the `expected_document_sha256` returned by the preview, and the previewed cursor/selection positions
+- console execution accepts an optional `shell_id` so clients can target a specific open Spyder console instead of following the active one
+- save-on-apply goes through Spyder's editor stack, not raw file I/O
+
+The MCP settings tab also includes an `opencode.json` snippet for OpenCode's remote-server config, plus one-click launch buttons that generate temporary client config instead of overwriting your saved CLI setup.
+
 ### Editor integration
 
 The AI automatically sees your current file, cursor position, selection, other open tabs, and your project's file tree. Right-click any selection for AI actions:
