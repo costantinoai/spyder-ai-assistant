@@ -36,8 +36,9 @@ n messages on every one of m streaming tokens.
 
 import logging
 import re
+import time
 
-from qtpy.QtGui import QColor
+from qtpy.QtGui import QColor, QTextCursor, QTextFrameFormat
 from qtpy.QtCore import QTimer, Signal, QSize, QEvent
 from qtpy.QtWidgets import QApplication, QTextEdit, QToolButton
 
@@ -52,6 +53,11 @@ logger = logging.getLogger(__name__)
 # within this many pixels of the maximum, we consider the user to
 # be "at the bottom" and auto-scroll will continue during streaming.
 _SCROLL_BOTTOM_THRESHOLD_PX = 30
+
+# Streaming re-renders are coalesced to this cadence (about 30 fps). Tokens
+# arrive far faster than the eye can follow, and every render re-parses the
+# streaming markdown, so rendering each token is pure waste.
+_STREAM_RENDER_INTERVAL_S = 0.033
 
 
 class ChatDisplay(QTextEdit):
@@ -124,6 +130,19 @@ class ChatDisplay(QTextEdit):
         self._streaming_buffer = ""
         # Whether an assistant response is currently being streamed
         self._is_streaming = False
+        # The streaming bubble lives in its own frame at the end of the
+        # document; only that frame is replaced per render, so the cost of
+        # a chunk no longer grows with the length of the transcript.
+        self._stream_frame = None
+        self._stream_dirty = False
+        self._last_stream_render = 0.0
+        self._stream_render_timer = QTimer(self)
+        self._stream_render_timer.setSingleShot(True)
+        self._stream_render_timer.setInterval(int(_STREAM_RENDER_INTERVAL_S * 1000))
+        self._stream_render_timer.timeout.connect(self._render_stream)
+        # The transcript is read-only; an undo stack would only retain every
+        # streamed revision in memory.
+        self.document().setUndoRedoEnabled(False)
         # All finalized message HTML (persists across streaming cycles).
         # This is the "stable" portion that does not need re-rendering
         # on each streaming token — only the streaming bubble changes.
@@ -258,6 +277,7 @@ class ChatDisplay(QTextEdit):
         if streaming:
             self.start_assistant_message()
             self.append_chunk(buffer)
+            self._render_stream()
         else:
             self._set_document_html(self._html_content)
         if scrolled_away:
@@ -545,25 +565,23 @@ class ChatDisplay(QTextEdit):
     def start_assistant_message(self):
         """Begin a new assistant response. Call before streaming chunks.
 
-        Resets the streaming buffer and enables streaming mode. The
+        Resets the streaming buffer, enables streaming mode and opens the
+        streaming frame at the end of the stable transcript. The
         scroll-away state is NOT reset here — if the user was reading
         earlier content, they should continue undisturbed.
         """
         self._streaming_buffer = ""
         self._is_streaming = True
+        self._stream_dirty = False
+        if not self._batch_render:
+            self._open_stream_frame()
 
     def append_chunk(self, text):
         """Append a streaming token to the current assistant response.
 
-        Accumulates text in a buffer and re-renders the current message
-        on each chunk. Detects <think>...</think> blocks and renders them
-        separately from the main response in a dimmed style.
-
-        Rendering optimization: Only the streaming message's markdown is
-        re-rendered on each chunk. The completed messages in _html_content
-        are pre-built HTML that is simply concatenated — no re-processing
-        of earlier messages occurs. This keeps per-chunk cost proportional
-        to the streaming buffer size, not the total conversation length.
+        Accumulates text in a buffer and schedules a re-render of the
+        streaming frame. Renders happen at most every
+        ``_STREAM_RENDER_INTERVAL_S``; a burst of tokens is drawn once.
 
         Args:
             text: The next token from the LLM.
@@ -572,43 +590,74 @@ class ChatDisplay(QTextEdit):
             return
 
         self._streaming_buffer += text
+        self._stream_dirty = True
+        if self._batch_render:
+            return
 
-        # Parse the buffer to separate thinking from response content.
-        # This runs on every chunk because <think> tags can arrive
-        # split across multiple tokens.
+        elapsed = time.monotonic() - self._last_stream_render
+        if elapsed >= _STREAM_RENDER_INTERVAL_S:
+            self._render_stream()
+        elif not self._stream_render_timer.isActive():
+            self._stream_render_timer.start()
+
+    def _streaming_html(self):
+        """Render the streaming buffer (thinking block + response bubble).
+
+        Detects <think>...</think> blocks and renders them separately from
+        the main response in a dimmed style. Runs on every render because
+        <think> tags can arrive split across tokens.
+        """
         thinking, response, thinking_done = self._parse_thinking(
             self._streaming_buffer
         )
-
-        # Build the streaming HTML: thinking block (if any) + response.
-        # Only this portion is re-rendered each chunk; _html_content
-        # is stable pre-built HTML from completed messages.
-        streaming_html = ""
-
+        html = ""
         if thinking:
-            # Render thinking in a dimmed block with "Thinking..." label
             label = "Thinking..." if not thinking_done else "Thought"
-            streaming_html += self._wrap_thinking(thinking, label)
-
-        if response:
-            # Render the main response normally
-            rendered = self._render_markdown(response)
-            streaming_html += self._wrap_message(
+            html += self._wrap_thinking(thinking, label)
+        if response or not thinking:
+            # Response bubble, or an empty AI bubble while nothing arrived.
+            rendered = self._render_markdown(response) if response else ""
+            html += self._wrap_message(
                 self._theme["assistant_bg"], self._theme["assistant_text"],
                 "AI", rendered,
                 label_color=self._theme["assistant_label"],
             )
-        elif not thinking:
-            # No thinking and no response yet — show empty AI bubble
-            streaming_html += self._wrap_message(
-                self._theme["assistant_bg"], self._theme["assistant_text"],
-                "AI", "",
-                label_color=self._theme["assistant_label"],
-            )
+        return html
 
-        # Combine stable completed HTML with the streaming portion.
-        # _html_content is pre-built and doesn't need re-rendering.
-        self._set_document_html(self._html_content + streaming_html)
+    def _open_stream_frame(self):
+        """Load the stable transcript once and append the streaming frame.
+
+        Everything before the frame is the pre-built HTML of completed
+        messages; it is laid out once here and never touched again during
+        the response.
+        """
+        self._set_document_html(self._html_content)
+        cursor = QTextCursor(self.document())
+        cursor.movePosition(QTextCursor.End)
+        frame_format = QTextFrameFormat()
+        frame_format.setBorder(0)
+        frame_format.setMargin(0)
+        frame_format.setPadding(0)
+        self._stream_frame = cursor.insertFrame(frame_format)
+
+    def _render_stream(self):
+        """Replace the streaming frame with the current buffer's HTML."""
+        self._stream_render_timer.stop()
+        if not self._is_streaming or self._batch_render:
+            return
+        self._stream_dirty = False
+        self._last_stream_render = time.monotonic()
+        if self._stream_frame is None:
+            self._open_stream_frame()
+        cursor = self._stream_frame.firstCursorPosition()
+        cursor.setPosition(
+            self._stream_frame.lastCursorPosition().position(),
+            QTextCursor.KeepAnchor,
+        )
+        cursor.beginEditBlock()
+        cursor.removeSelectedText()
+        cursor.insertHtml(self._streaming_html())
+        cursor.endEditBlock()
         # Smart scroll: only auto-scroll if user is at/near bottom
         self._scroll_to_bottom()
 
@@ -628,6 +677,7 @@ class ChatDisplay(QTextEdit):
         if not self._is_streaming:
             return
 
+        self._stream_render_timer.stop()
         self._render_messages.append(("streamed", self._streaming_buffer))
         # Parse thinking vs response for the final version
         thinking, response, _ = self._parse_thinking(self._streaming_buffer)
@@ -682,6 +732,7 @@ class ChatDisplay(QTextEdit):
         if not self._is_streaming:
             return
 
+        self._stream_render_timer.stop()
         self._streaming_buffer = ""
         self._is_streaming = False
         self._set_document_html(self._html_content)
@@ -711,14 +762,20 @@ class ChatDisplay(QTextEdit):
             level.upper(), self._escape_html(message),
             label_color=self._theme[f"{level}_label"],
         )
+        if self._batch_render:
+            return
         if self._is_streaming:
-            self.append_chunk("")
+            # The notice belongs before the streaming bubble: reload the
+            # stable transcript and re-open the frame below it.
+            self._open_stream_frame()
+            self._render_stream()
         else:
             self._set_document_html(self._html_content)
             self._scroll_to_bottom()
 
     def clear_conversation(self):
         """Remove all messages and reset the display to empty."""
+        self._stream_render_timer.stop()
         self._html_content = ""
         self._streaming_buffer = ""
         self._is_streaming = False
@@ -766,6 +823,10 @@ class ChatDisplay(QTextEdit):
         """
         if self._batch_render:
             return
+        # setHtml replaces the whole document, so any streaming frame
+        # created earlier no longer exists.
+        self._stream_frame = None
+        self._stream_render_timer.stop()
         position = self.verticalScrollBar().value()
         self._programmatic_scroll = True
         self.setHtml(html)

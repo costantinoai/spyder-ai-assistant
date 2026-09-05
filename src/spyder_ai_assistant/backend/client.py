@@ -7,6 +7,7 @@ All methods are synchronous (blocking).
 """
 
 import logging
+import time
 
 import httpx
 
@@ -14,6 +15,12 @@ from spyder_ai_assistant.utils.provider_profiles import compatible_api_url
 from ollama import Client
 
 logger = logging.getLogger(__name__)
+
+# How long Ollama keeps the model resident after a request. Ollama's default
+# is five minutes, after which the next completion pays a full model load
+# (several seconds for a 9 GB model). Inline completions are bursty with
+# long idle gaps, so keep the model warm for a full working session.
+MODEL_KEEP_ALIVE = "30m"
 
 
 def _blank_line_after_complete_statement(prefix):
@@ -235,6 +242,7 @@ class OllamaClient:
             messages=messages,
             stream=True,
             options=options or {},
+            keep_alive=MODEL_KEEP_ALIVE,
         )
         for chunk in stream:
             result = {
@@ -255,6 +263,30 @@ class OllamaClient:
                     chunk, "prompt_eval_count", 0
                 ) or 0
             yield result
+
+    def warm_up(self, model):
+        """Load ``model`` into memory so the first real request is fast.
+
+        Ollama treats a generate call with an empty prompt as "load the
+        model and return"; nothing is generated. Returns the elapsed
+        seconds. Raises on connection or model errors so the caller can
+        surface them.
+        """
+        started = time.monotonic()
+        self._client.generate(
+            model=model,
+            prompt="",
+            stream=False,
+            keep_alive=MODEL_KEEP_ALIVE,
+        )
+        elapsed = time.monotonic() - started
+        logger.info(
+            "Ollama model warm-up complete: host=%s model=%s elapsed=%.2fs",
+            self._host,
+            model,
+            elapsed,
+        )
+        return elapsed
 
     def generate_completion(self, model, prefix, suffix="",
                             system=None, options=None, single_line=False):
@@ -330,6 +362,7 @@ class OllamaClient:
                     system=default_system,
                     options=merged_options,
                     stream=False,
+                    keep_alive=MODEL_KEEP_ALIVE,
                 )
                 logger.info(
                     "Ollama completion response received via FIM: model=%s chars=%d",
@@ -409,6 +442,7 @@ class OllamaClient:
             system=default_system,
             options=merged_options,
             stream=False,
+            keep_alive=MODEL_KEEP_ALIVE,
         )
         response_text = getattr(response, "response", "") or ""
         logger.info(
@@ -455,6 +489,7 @@ class OllamaClient:
             messages=messages,
             options=options,
             stream=False,
+            keep_alive=MODEL_KEEP_ALIVE,
         )
         message = getattr(response, "message", None)
         if message is None and isinstance(response, dict):

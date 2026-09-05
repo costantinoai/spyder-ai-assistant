@@ -1017,6 +1017,10 @@ class CompletionWorker(QObject):
     # Args: (req_id, model, prefix, suffix, options)
     sig_perform_completion = Signal(int, str, str, str, dict)
     sig_update_backend_settings = Signal(dict)
+    # sig_warm_up(backend settings incl. "model") — load the model off the
+    # main thread; sig_warm_up_done(model, ok, detail) reports the outcome.
+    sig_warm_up = Signal(dict)
+    sig_warm_up_done = Signal(str, bool, str)
     # Output signals: consumed by the provider on the main thread
     # sig_completion_ready(req_id, completion_text, suffix) — text for ghost display
     sig_completion_ready = Signal(int, str, str)
@@ -1044,6 +1048,7 @@ class CompletionWorker(QObject):
         self.sig_update_backend_settings.connect(
             self._handle_update_backend_settings
         )
+        self.sig_warm_up.connect(self._handle_warm_up)
 
     # --- Thread lifecycle ---
 
@@ -1173,6 +1178,34 @@ class CompletionWorker(QObject):
             (settings or {}).get("endpoint", ""),
         )
         self.sig_update_backend_settings.emit(dict(settings or {}))
+
+    @Slot(dict)
+    def _handle_warm_up(self, settings):
+        """Load the completion model on the worker thread.
+
+        Runs through the same queued-signal path as completions, so a
+        completion requested during the load simply waits behind it (the
+        model has to load either way). Only Ollama needs this; hosted
+        OpenAI-compatible endpoints have no local model to load.
+        """
+        settings = dict(settings or {})
+        model = str(settings.get("model", "") or "")
+        provider_kind = str(settings.get("provider_kind", PROVIDER_KIND_OLLAMA))
+        if not model or provider_kind != PROVIDER_KIND_OLLAMA:
+            self.sig_warm_up_done.emit(model, True, "warm-up not needed")
+            return
+        try:
+            client = self._get_client(
+                provider_kind,
+                settings.get("endpoint", ""),
+                settings.get("api_key", ""),
+            )
+            elapsed = client.warm_up(model)
+        except Exception as error:
+            logger.warning("AI completion model warm-up failed for %s: %s", model, error)
+            self.sig_warm_up_done.emit(model, False, str(error))
+            return
+        self.sig_warm_up_done.emit(model, True, f"loaded in {elapsed:.1f}s")
 
     @Slot(dict)
     def _handle_update_backend_settings(self, settings):
@@ -1305,6 +1338,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             "debounced_dropped": 0,
             "queued_dropped": 0,
             "dispatched": 0,
+            "warm_ups": 0,
             "cache_hits": 0,
             "cache_misses": 0,
             "shown": 0,
@@ -1339,6 +1373,21 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         # Connect worker output to our response handler
         self._worker.sig_completion_ready.connect(self._on_completion_ready)
         self._worker.sig_error.connect(self._on_completion_error)
+        self._worker.sig_warm_up_done.connect(self._on_warm_up_done)
+        # Model currently being loaded, or "" when idle. Late results for a
+        # model the user already switched away from are ignored.
+        self._warming_model = ""
+        self._last_warm_up_detail = ""
+        # (endpoint, model) that finished loading; unchanged settings do not
+        # trigger another load.
+        self._warmed_signature = None
+        # Settings changes arrive in bursts (host, provider, model...); one
+        # warm-up per burst is enough and keeps the worker queue short for
+        # the completion that usually follows.
+        self._warm_up_timer = QTimer(self)
+        self._warm_up_timer.setSingleShot(True)
+        self._warm_up_timer.setInterval(250)
+        self._warm_up_timer.timeout.connect(self._dispatch_model_warm_up)
 
         # --- State ---
         self._started = False
@@ -1371,9 +1420,11 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._worker.start()
         self._started = True
 
-        # Show the active model name in the status bar
+        # Show the active model name in the status bar, then load the model
+        # so the first completion does not pay the cold start.
         backend_settings = self._resolve_completion_backend_settings()
         self._update_status(self._ready_status_text(backend_settings))
+        self._request_model_warm_up(backend_settings)
 
         logger.info(
             "AI completion provider started: model=%s provider=%s endpoint=%s "
@@ -1960,6 +2011,57 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
         self._update_status(self._ready_status_text())
 
+    def _request_model_warm_up(self, backend_settings=None):
+        """Schedule a model load for the current settings (coalesced).
+
+        Called on start and whenever the backend or model changes. Only
+        the most recent request matters: the status returns to ready when
+        the worker reports the model currently expected.
+        """
+        del backend_settings  # resolved fresh when the timer fires
+        if not self._started:
+            return
+        self._warm_up_timer.start()
+
+    def _dispatch_model_warm_up(self):
+        """Send one warm-up for the current backend/model to the worker."""
+        if not self._started or not self.get_conf("completions_enabled"):
+            return
+        backend_settings = self._resolve_completion_backend_settings()
+        model = self._resolved_completion_model()
+        if not model or backend_settings.get("provider_kind") != PROVIDER_KIND_OLLAMA:
+            return
+        signature = (backend_settings.get("endpoint", ""), model)
+        if signature == self._warmed_signature:
+            logger.info("AI completion model %s already loaded; warm-up skipped", model)
+            return
+        self._warming_model = model
+        self._last_warm_up_detail = ""
+        self._update_status(f"AI: loading {_short_completion_model_label(model)}…")
+        logger.info("Requesting AI completion model warm-up for %s", model)
+        self._worker.sig_warm_up.emit({**backend_settings, "model": model})
+
+    def _on_warm_up_done(self, model, ok, detail):
+        """Return to the ready status once the expected model is loaded."""
+        if model != self._warming_model:
+            logger.info("Ignoring stale warm-up result for %s (%s)", model, detail)
+            return
+        self._warming_model = ""
+        self._last_warm_up_detail = "" if ok else detail
+        if ok:
+            self._warmed_signature = (
+                self._resolve_completion_backend_settings().get("endpoint", ""),
+                model,
+            )
+            self._increment_metric("warm_ups")
+            logger.info("AI completion model %s ready (%s)", model, detail)
+            self._set_ready_status()
+        else:
+            self._warmed_signature = None
+            self._update_status(
+                f"AI: {_short_completion_model_label(model)} unavailable"
+            )
+
     def _emit_empty_response(self, req_id):
         """Emit an empty completion response for a request id."""
         logger.debug("Emitting empty AI completion response for req_id=%d", req_id)
@@ -2028,6 +2130,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._shown_candidates.clear()
         if self.get_conf("completions_enabled"):
             self._set_ready_status()
+            self._request_model_warm_up(backend_settings)
 
     def _resolved_completion_model(self):
         """Return the configured live completion model after light healing."""
@@ -2094,6 +2197,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._candidate_store.clear()
         if self.get_conf("completions_enabled"):
             self._set_ready_status()
+            self._request_model_warm_up()
 
     @on_conf_change(option="completion_temperature")
     def on_completion_temperature_changed(self, _value):
@@ -2452,6 +2556,11 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             "",
             f"Model: {model_name or 'unconfigured'}",
             f"Endpoint: {backend_settings.get('endpoint', '') or 'unknown'}",
+            *(
+                [f"Last model load error: {self._last_warm_up_detail}"]
+                if getattr(self, "_last_warm_up_detail", "")
+                else []
+            ),
             "",
             f"Requests: {metrics['requests_received']}",
             (

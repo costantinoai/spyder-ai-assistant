@@ -1,8 +1,9 @@
 # Session handoff — repository review, native completion UX, validation hardening
 
-Updated 2026-09-05 (second session). Nothing was committed, pushed, merged or
-published. Working tree holds all changes on
-`refactor/task-016-optimization-simplification-mcp-hardening`.
+Updated 2026-09-06. Work is committed on
+`refactor/task-016-optimization-simplification-mcp-hardening` (commit
+`a80e337` review/hardening pass, plus the streaming/warm-up commit that
+follows). Nothing pushed, merged or published.
 
 ## User steering (verbatim intent)
 
@@ -127,6 +128,22 @@ run with the real LSP provider enabled yet (see follow-ups).
 - `tasks/001-architecture-spec.md` §5.3 and §8, `tasks/002-shipping-plan.md`
   §6, `tasks/todo.md`, `tasks/lessons.md` (new harness and Qt lessons),
   `tasks/scratchpad.md` refreshed.
+
+## Second commit (2026-09-06): streaming performance and model warm-up
+
+- `widgets/chat_display.py`: streaming bubble rendered in a `QTextFrame` at
+  the end of the document and replaced per render, coalesced to ~30 fps;
+  stable transcript loaded once per response. Measured: 400 tokens on a
+  120-message transcript 3 ms total (before: ~25 ms per token). Undo stack
+  disabled on the read-only display.
+- `backend/client.py`: `MODEL_KEEP_ALIVE = "30m"` on every Ollama call;
+  `warm_up(model)` (empty-prompt generate).
+- `completion_provider.py`: worker `sig_warm_up`/`sig_warm_up_done`;
+  provider requests one coalesced warm-up (250 ms timer, skipped when the
+  endpoint/model pair is already loaded) on start and on backend/model
+  change; status "AI: loading <model>…" → ready, or "<model> unavailable"
+  with the error in the status tooltip. Live harness: all expectations met,
+  offline recovery ok, warm-up observed on the real host.
 
 ## Follow-ups (not blocking, listed in tasks/todo.md)
 
