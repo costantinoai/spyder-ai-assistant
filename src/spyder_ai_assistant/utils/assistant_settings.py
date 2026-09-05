@@ -77,6 +77,7 @@ ASSISTANT_CONF_DEFAULTS = {
     "openai_compatible_api_key": DEFAULT_OPENAI_COMPATIBLE_API_KEY,
     "completion_model": DEFAULT_COMPLETION_MODEL,
     "mcp_enabled": True,
+    "project_tools_enabled": True,
     "mcp_host": DEFAULT_MCP_HOST,
     "mcp_port": DEFAULT_MCP_PORT,
     # Stored as "temperature x10" for the current preferences UI.
@@ -133,6 +134,7 @@ COMPLETION_PROVIDER_CONF_DEFAULTS = [
         ASSISTANT_CONF_DEFAULTS["completion_max_tokens"],
     ),
     ("completions_enabled", ASSISTANT_CONF_DEFAULTS["completions_enabled"]),
+    ("project_tools_enabled", ASSISTANT_CONF_DEFAULTS["project_tools_enabled"]),
     ("debounce_ms", ASSISTANT_CONF_DEFAULTS["debounce_ms"]),
 ]
 
@@ -236,6 +238,7 @@ class AssistantSettings:
     openai_compatible_api_key: str = DEFAULT_OPENAI_COMPATIBLE_API_KEY
     completion_model: str = DEFAULT_COMPLETION_MODEL
     mcp_enabled: bool = True
+    project_tools_enabled: bool = True
     mcp_host: str = DEFAULT_MCP_HOST
     mcp_port: int = DEFAULT_MCP_PORT
     chat_temperature: int = 5
@@ -315,6 +318,9 @@ class AssistantSettings:
                 values.get("completion_model", DEFAULT_COMPLETION_MODEL),
                 DEFAULT_COMPLETION_MODEL,
                 default_on_blank=True,
+            ),
+            project_tools_enabled=_normalize_bool(
+                values.get("project_tools_enabled", True),
             ),
             mcp_enabled=_normalize_bool(
                 values.get("mcp_enabled", True),
@@ -546,6 +552,7 @@ class AssistantSettings:
             "completion_temperature": self.completion_temperature,
             "completion_max_tokens": self.completion_max_tokens,
             "completions_enabled": self.completions_enabled,
+            "project_tools_enabled": self.project_tools_enabled,
             "debounce_ms": self.debounce_ms,
         }
 

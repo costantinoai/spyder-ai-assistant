@@ -41,10 +41,12 @@ class SpyderMCPBridge(QObject):
 
     sig_invoke = Signal(object)
 
-    def __init__(self, plugin, runtime_context, context_service, parent=None):
+    def __init__(self, plugin, runtime_context, context_service, project_tools,
+                 parent=None):
         super().__init__(parent or plugin)
         self._plugin = plugin
         self._runtime_context = runtime_context
+        self._project_tools = project_tools
         # Read handlers call the context service unconditionally, so it is a
         # required collaborator rather than an optional default.
         if context_service is None:
@@ -88,6 +90,12 @@ class SpyderMCPBridge(QObject):
     def get_project_tree(self):
         """Return the active Spyder project tree."""
         return self.invoke_main_thread("get_project_tree")
+
+    def execute_project_request(self, tool_name, **args):
+        """Run one read-only project/git tool on the main thread."""
+        return self.invoke_main_thread(
+            "execute_project_request", tool_name=tool_name, args=dict(args)
+        )
 
     def execute_runtime_request(self, tool_name, **args):
         """Execute one runtime-context request on the main thread."""
@@ -178,6 +186,10 @@ class SpyderMCPBridge(QObject):
 
     def _handle_get_project_tree(self):
         return self._context_service.get_project_tree()
+
+    def _handle_execute_project_request(self, tool_name, args):
+        request = {"tool": str(tool_name or "").strip(), "args": dict(args or {})}
+        return self._project_tools.execute_request(request)
 
     def _handle_execute_runtime_request(self, tool_name, args):
         request = {

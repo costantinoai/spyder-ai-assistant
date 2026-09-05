@@ -294,6 +294,55 @@ class SpyderMCPServer:
             return self._bridge.get_project_tree()
 
         @mcp.tool()
+        def list_project_files(subdir: str = "", glob: str = "",
+                               max_entries: int = 300) -> dict[str, Any]:
+            """List files under the Spyder project root (bounded, skips caches/VCS dirs)."""
+            return self._normalize_runtime_result(self._bridge.execute_project_request(
+                "project.list_files", subdir=subdir, glob=glob, max_entries=max_entries,
+            ))
+
+        @mcp.tool()
+        def read_project_file(path: str, start_line: int = 1, end_line: int = 0,
+                              max_chars: int = 20000) -> dict[str, Any]:
+            """Read one text file under the Spyder project root (relative path, optional line range)."""
+            args = {"path": path, "start_line": start_line, "max_chars": max_chars}
+            if end_line > 0:
+                args["end_line"] = end_line
+            return self._normalize_runtime_result(
+                self._bridge.execute_project_request("project.read_file", **args)
+            )
+
+        @mcp.tool()
+        def search_project(pattern: str, glob: str = "",
+                           max_results: int = 50) -> dict[str, Any]:
+            """Regex-search text files under the Spyder project root."""
+            return self._normalize_runtime_result(self._bridge.execute_project_request(
+                "project.search", pattern=pattern, glob=glob, max_results=max_results,
+            ))
+
+        @mcp.tool()
+        def git_status() -> dict[str, Any]:
+            """Short git status (with branch) of the Spyder project."""
+            return self._normalize_runtime_result(
+                self._bridge.execute_project_request("git.status")
+            )
+
+        @mcp.tool()
+        def git_diff(path: str = "", staged: bool = False,
+                     max_chars: int = 20000) -> dict[str, Any]:
+            """Uncommitted (or staged) git diff of the Spyder project, optionally for one path."""
+            return self._normalize_runtime_result(self._bridge.execute_project_request(
+                "git.diff", path=path, staged=staged, max_chars=max_chars,
+            ))
+
+        @mcp.tool()
+        def git_log(max_count: int = 10, path: str = "") -> dict[str, Any]:
+            """Recent git commits of the Spyder project, optionally for one path."""
+            return self._normalize_runtime_result(self._bridge.execute_project_request(
+                "git.log", max_count=max_count, path=path,
+            ))
+
+        @mcp.tool()
         def get_consoles() -> dict[str, Any]:
             """List the available Spyder IPython console targets."""
             result = self._bridge.execute_runtime_request("runtime.list_shells")

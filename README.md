@@ -104,6 +104,16 @@ This is **on-demand, not automatic** — ordinary questions stay file-focused an
 
 When more than one IPython console is open, the runtime target selector in the chat toolbar lets you choose **Follow Active Console** or pin the debugging context to a specific console. The runtime tooltip shows which console is currently active and which one is actually being inspected.
 
+### Project files and git
+
+On request, the model can read other files in your project and look at git history, using the same on-demand protocol as runtime inspection:
+
+- **Project files** — list files, read a file (or a line range), and search the project with a regular expression
+- **Git** — `git status`, the uncommitted or staged diff (optionally for one file), and recent commits
+- **Review Changes** — a Debug-menu action that asks the model to review your uncommitted changes
+
+Access is read-only and bounded: only files under the active project (or the folder of the current file when no project is open), never `.git`, virtual environments, caches or build output, with size caps on files, search results and diffs. Switch it off in **Settings → Assistant Settings… → Behavior → Project access**. The same tools are exposed to external agents through MCP (`read_project_file`, `search_project`, `git_diff`, …).
+
 ### Claude, Codex, and OpenCode via MCP
 
 The plugin now also exposes Spyder as a local MCP server on `http://127.0.0.1:8769/mcp`. When Spyder starts, Claude Code, Codex, and OpenCode can connect to the live editor and console state without any extra manual server process.

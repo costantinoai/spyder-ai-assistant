@@ -332,12 +332,7 @@ class ChatWidget(PluginMainWidget):
                 text=DEBUG_ACTION_LABELS.get(action, action),
                 triggered=lambda checked=False, action=action: self._send_debug_prompt(action),
             )
-            for action in (
-                "explain_error",
-                "fix_traceback",
-                "use_variables",
-                "use_console",
-            )
+            for action in DEBUG_ACTION_LABELS
         }
         self.debug_menu_btn = QToolButton(self)
         self.debug_menu_btn.setText("Debug")
@@ -347,11 +342,7 @@ class ChatWidget(PluginMainWidget):
             "Runtime-aware debugging actions for the active chat tab"
         )
         debug_menu = QMenu(self.debug_menu_btn)
-        for action in (
-                "explain_error",
-                "fix_traceback",
-                "use_variables",
-                "use_console"):
+        for action in DEBUG_ACTION_LABELS:
             debug_menu.addAction(self._debug_actions[action])
         self.debug_menu_btn.setMenu(debug_menu)
 
@@ -1570,7 +1561,7 @@ class ChatWidget(PluginMainWidget):
         system_prompt = (
             f"{system_prompt}\n\n"
             f"{build_chat_prompt_preset_block(preset_id)}\n\n"
-            f"{build_runtime_bridge_instructions()}"
+            f"{build_runtime_bridge_instructions(include_project_tools=bool(self.get_conf('project_tools_enabled', default=True)))}"
         )
         logger.debug(
             "Building chat system prompt with preset %s for session %s",

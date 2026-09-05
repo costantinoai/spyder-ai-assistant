@@ -367,6 +367,19 @@ class AssistantSettingsDialog(QDialog):
         ghost_form.addRow("Idle completion delay", self.idle_delay_spin)
         ghost_form.addRow("Post-accept delay", self.post_accept_delay_spin)
         behavior_layout.addWidget(ghost_group)
+
+        access_group = QGroupBox("Project access", behavior_tab)
+        access_form = QFormLayout(access_group)
+        self.project_tools_checkbox = QCheckBox(
+            "Let the assistant read project files and git history on request",
+            access_group,
+        )
+        self.project_tools_checkbox.setToolTip(
+            "Read-only. Limited to files under the active project (or the "
+            "current file's folder), with size caps; also exposed as MCP tools."
+        )
+        access_form.addRow(self.project_tools_checkbox)
+        behavior_layout.addWidget(access_group)
         behavior_note = QLabel(
             "Idle delay: how long after you stop typing before ghost text "
             "appears. Post-accept delay: pause after accepting a suggestion "
@@ -745,6 +758,9 @@ class AssistantSettingsDialog(QDialog):
         self.completions_enabled_checkbox.setChecked(
             bool(self._settings.get("completions_enabled", True))
         )
+        self.project_tools_checkbox.setChecked(
+            bool(self._settings.get("project_tools_enabled", True))
+        )
         self.completion_temperature_spin.setValue(
             float(self._settings.get("completion_temperature", 0.15) or 0.15)
         )
@@ -937,6 +953,7 @@ class AssistantSettingsDialog(QDialog):
             "chat_temperature": int(round(self.chat_temperature_spin.value() * 10)),
             "max_tokens": int(self.chat_max_tokens_spin.value()),
             "completions_enabled": bool(self.completions_enabled_checkbox.isChecked()),
+            "project_tools_enabled": bool(self.project_tools_checkbox.isChecked()),
             "completion_temperature": float(self.completion_temperature_spin.value()),
             "completion_max_tokens": int(self.completion_max_tokens_spin.value()),
             "debounce_ms": int(self.debounce_spin.value()),

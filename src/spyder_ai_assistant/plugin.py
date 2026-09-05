@@ -40,6 +40,10 @@ from spyder_ai_assistant.utils.context import (
     build_action_prompt,
 )
 from spyder_ai_assistant.utils.context_service import EditorContextService
+from spyder_ai_assistant.utils.project_tools import (
+    ProjectToolsService,
+    dispatch_chat_tool_request,
+)
 from spyder_ai_assistant.utils.chat_persistence import (
     get_chat_session_storage_path,
     load_chat_session_state,
@@ -230,14 +234,21 @@ class AIChatPlugin(SpyderDockablePlugin):
         self._manual_completion_dispatch_pending = False
         self._last_manual_completion_at = 0.0
         self._last_manual_completion_target = None
+        # Read-only project file/git tools, scoped to the project root and
+        # shared by the chat request protocol and the MCP server.
+        self._project_tools = ProjectToolsService(
+            root_resolver=self._resolve_project_tools_root,
+            enabled_resolver=lambda: bool(self.get_conf("project_tools_enabled", True)),
+        )
         self._mcp_server = None
         self._mcp_bridge = SpyderMCPBridge(
             self,
             runtime_context=self._runtime_context,
             context_service=self._context_service,
+            project_tools=self._project_tools,
         )
         self._reconfigure_mcp_server()
-        widget.set_runtime_request_executor(self._runtime_context.execute_request)
+        widget.set_runtime_request_executor(self._execute_chat_tool_request)
         widget.set_runtime_target_handler(self._runtime_context.set_target_shell_id)
         widget.set_mcp_server_status_provider(self._get_mcp_server_status)
         widget.set_mcp_client_launcher(self._launch_mcp_client)
@@ -357,6 +368,24 @@ class AIChatPlugin(SpyderDockablePlugin):
             port=config["port"],
         )
         return self._mcp_server.start()
+
+    def _resolve_project_tools_root(self):
+        """Project root for file/git tools: active project, else file folder."""
+        project = self._context_service.get_project_tree() or {}
+        root = str(project.get("project_path", "") or "")
+        if root:
+            return root
+        current = self._context_service.get_current_file() or {}
+        filename = str(current.get("filename", "") or current.get("file", "") or "")
+        return os.path.dirname(filename) if filename else ""
+
+    def _execute_chat_tool_request(self, request):
+        """Route a model tool request to runtime inspection or project tools."""
+        return dispatch_chat_tool_request(
+            request,
+            runtime_executor=self._runtime_context.execute_request,
+            project_executor=self._project_tools.execute_request,
+        )
 
     def _get_mcp_server_status(self):
         """Return the current embedded MCP server status snapshot."""
