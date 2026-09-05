@@ -50,6 +50,7 @@ from spyder_ai_assistant.utils.chat_persistence import (
     save_chat_session_state,
 )
 from spyder_ai_assistant.utils.assistant_settings import (
+    ASSISTANT_APPEARANCE_KEYS,
     ASSISTANT_CONF_DEFAULTS,
     AssistantSettings,
 )
@@ -1467,160 +1468,52 @@ class AIChatPlugin(SpyderDockablePlugin):
         preferences = self.get_plugin(Plugins.Preferences)
         preferences.register_plugin_preferences(self)
 
-    @on_conf_change(option="ollama_host")
-    def on_host_changed(self, value):
-        """Propagate Ollama host changes to the provider-aware chat worker."""
-        del value
+    # --- Config change handlers -------------------------------------------
+    # Grouped by the reaction they trigger; Spyder passes (option, value)
+    # when a handler observes several options.
+
+    @on_conf_change(option=[
+        "ollama_host",
+        "openai_compatible_base_url",
+        "openai_compatible_api_key",
+        "provider_profiles",
+    ])
+    def on_chat_backend_option_changed(self, option, value):
+        """Any provider/endpoint change rebuilds the chat provider settings."""
+        del option, value
         self._refresh_chat_provider_settings()
 
-    @on_conf_change(option="mcp_enabled")
-    def on_mcp_enabled_changed(self, value):
-        """Restart the embedded MCP server after enable/disable changes."""
-        del value
+    @on_conf_change(option=["mcp_enabled", "mcp_host", "mcp_port"])
+    def on_mcp_option_changed(self, option, value):
+        """Any MCP option change restarts the embedded server."""
+        del option, value
         self._reconfigure_mcp_server()
 
-    @on_conf_change(option="mcp_host")
-    def on_mcp_host_changed(self, value):
-        """Restart the embedded MCP server after host changes."""
-        del value
-        self._reconfigure_mcp_server()
-
-    @on_conf_change(option="mcp_port")
-    def on_mcp_port_changed(self, value):
-        """Restart the embedded MCP server after port changes."""
-        del value
-        self._reconfigure_mcp_server()
-
-    @on_conf_change(option="openai_compatible_base_url")
-    def on_openai_compatible_base_url_changed(self, value):
-        """Refresh chat providers after the compatible base URL changes."""
-        del value
-        self._refresh_chat_provider_settings()
-
-    @on_conf_change(option="openai_compatible_api_key")
-    def on_openai_compatible_api_key_changed(self, value):
-        """Refresh chat providers after the compatible API key changes."""
-        del value
-        self._refresh_chat_provider_settings()
-
-    @on_conf_change(option="provider_profiles")
-    def on_provider_profiles_changed(self, value):
-        """Refresh chat providers after profile definitions change."""
-        del value
-        self._refresh_chat_provider_settings()
-
-    @on_conf_change(option="chat_provider")
-    def on_chat_provider_changed(self, value):
-        """Refresh model selection after the default provider changes."""
+    @on_conf_change(option=["chat_provider", "chat_model"])
+    def on_chat_model_option_changed(self, option, value):
+        """Selected provider/model drive both the chat toolbar and completions."""
         del value
         self._sync_chat_model_selection_from_conf()
+        if option == "chat_provider":
+            self._sync_completion_provider_settings()
+
+    @on_conf_change(option=[
+        "chat_provider_profile_id",
+        "completion_model",
+        "completion_temperature",
+        "completion_max_tokens",
+        "completions_enabled",
+        "debounce_ms",
+    ])
+    def on_completion_option_changed(self, option, value):
+        """Completion-related options are pushed to the completion provider."""
+        del option, value
         self._sync_completion_provider_settings()
 
-    @on_conf_change(option="chat_provider_profile_id")
-    def on_chat_provider_profile_id_changed(self, value):
-        """Keep the live completion provider aligned with profile changes."""
-        del value
-        self._sync_completion_provider_settings()
-
-    @on_conf_change(option="chat_model")
-    def on_chat_model_changed(self, value):
-        """Refresh model selection after the default chat model changes."""
-        del value
-        self._sync_chat_model_selection_from_conf()
-
-    @on_conf_change(option="completion_model")
-    def on_completion_model_changed(self, value):
-        """Keep the live completion provider aligned with pane settings."""
-        del value
-        self._sync_completion_provider_settings()
-
-    @on_conf_change(option="completion_temperature")
-    def on_completion_temperature_changed(self, value):
-        """Keep completion temperature aligned with the live provider."""
-        del value
-        self._sync_completion_provider_settings()
-
-    @on_conf_change(option="completion_max_tokens")
-    def on_completion_max_tokens_changed(self, value):
-        """Keep completion token budget aligned with the live provider."""
-        del value
-        self._sync_completion_provider_settings()
-
-    @on_conf_change(option="completions_enabled")
-    def on_completions_enabled_changed(self, value):
-        """Keep the live completion enable/disable state aligned."""
-        del value
-        self._sync_completion_provider_settings()
-
-    @on_conf_change(option="debounce_ms")
-    def on_completion_debounce_changed(self, value):
-        """Keep completion debounce aligned with the live provider."""
-        del value
-        self._sync_completion_provider_settings()
-
-    # --- Appearance config change handlers ---
-    # These propagate appearance settings to all active ChatDisplay widgets
-    # so the user sees changes immediately without restarting.
-
-    @on_conf_change(option="chat_font_family")
-    def on_chat_font_family_changed(self, value):
-        """Propagate chat font family change to all chat displays."""
-        self._propagate_appearance_setting("chat_font_family", value)
-
-    @on_conf_change(option="chat_font_size")
-    def on_chat_font_size_changed(self, value):
-        """Propagate chat font size change to all chat displays."""
-        self._propagate_appearance_setting("chat_font_size", value)
-
-    @on_conf_change(option="chat_line_height")
-    def on_chat_line_height_changed(self, value):
-        """Propagate chat line height change to all chat displays."""
-        self._propagate_appearance_setting("chat_line_height", value)
-
-    @on_conf_change(option="code_font_family")
-    def on_code_font_family_changed(self, value):
-        """Propagate code font family change to all chat displays."""
-        self._propagate_appearance_setting("code_font_family", value)
-
-    @on_conf_change(option="code_font_size")
-    def on_code_font_size_changed(self, value):
-        """Propagate code font size change to all chat displays."""
-        self._propagate_appearance_setting("code_font_size", value)
-
-    @on_conf_change(option="pygments_style_dark")
-    def on_pygments_dark_changed(self, value):
-        """Propagate dark Pygments style change to all chat displays."""
-        self._propagate_appearance_setting("pygments_style_dark", value)
-
-    @on_conf_change(option="pygments_style_light")
-    def on_pygments_light_changed(self, value):
-        """Propagate light Pygments style change to all chat displays."""
-        self._propagate_appearance_setting("pygments_style_light", value)
-
-    @on_conf_change(option="bubble_padding")
-    def on_bubble_padding_changed(self, value):
-        """Propagate bubble padding change to all chat displays."""
-        self._propagate_appearance_setting("bubble_padding", value)
-
-    @on_conf_change(option="bubble_border_radius")
-    def on_bubble_radius_changed(self, value):
-        """Propagate bubble border radius change to all chat displays."""
-        self._propagate_appearance_setting("bubble_border_radius", value)
-
-    @on_conf_change(option="bubble_spacing")
-    def on_bubble_spacing_changed(self, value):
-        """Propagate bubble spacing change to all chat displays."""
-        self._propagate_appearance_setting("bubble_spacing", value)
-
-    @on_conf_change(option="theme_preset")
-    def on_theme_preset_changed(self, value):
-        """Propagate theme preset change to all chat displays."""
-        self._propagate_appearance_setting("theme_preset", value)
-
-    @on_conf_change(option="theme_color_overrides")
-    def on_theme_overrides_changed(self, value):
-        """Propagate theme color overrides to all chat displays."""
-        self._propagate_appearance_setting("theme_color_overrides", value)
+    @on_conf_change(option=list(ASSISTANT_APPEARANCE_KEYS))
+    def on_appearance_option_changed(self, option, value):
+        """Appearance options are applied live to every chat display."""
+        self._propagate_appearance_setting(option, value)
 
     def _propagate_appearance_setting(self, key, value):
         """Push a single appearance setting to all active chat displays."""
@@ -1633,17 +1526,12 @@ class AIChatPlugin(SpyderDockablePlugin):
     # --- Behavior config change handlers ---
     # These propagate ghost text timing to all editor ghost text managers.
 
-    @on_conf_change(option="idle_completion_delay_ms")
-    def on_idle_delay_changed(self, value):
-        """Propagate idle completion delay to all ghost text managers."""
+    @on_conf_change(option=["idle_completion_delay_ms", "post_accept_completion_delay_ms"])
+    def on_ghost_timing_changed(self, option, value):
+        """Ghost text timing applies to every editor's ghost manager."""
+        keyword = "idle_ms" if option == "idle_completion_delay_ms" else "post_accept_ms"
         for manager in self._ghost_managers.values():
-            manager.update_timing(idle_ms=value)
-
-    @on_conf_change(option="post_accept_completion_delay_ms")
-    def on_post_accept_delay_changed(self, value):
-        """Propagate post-accept delay to all ghost text managers."""
-        for manager in self._ghost_managers.values():
-            manager.update_timing(post_accept_ms=value)
+            manager.update_timing(**{keyword: value})
 
     @on_plugin_teardown(plugin=Plugins.Preferences)
     def on_preferences_teardown(self):

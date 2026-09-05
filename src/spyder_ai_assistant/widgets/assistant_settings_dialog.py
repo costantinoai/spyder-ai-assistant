@@ -51,6 +51,11 @@ from spyder_ai_assistant.utils.chat_themes import (
     parse_color_overrides,
     serialize_color_overrides,
 )
+from spyder_ai_assistant.widgets.model_selection import (
+    populate_model_combo,
+    provider_key,
+    select_model,
+)
 
 
 class ColorSwatchButton(QToolButton):
@@ -524,22 +529,6 @@ class AssistantSettingsDialog(QDialog):
         self.mcp_host_edit.textChanged.connect(self._refresh_mcp_preview)
         self.mcp_port_spin.valueChanged.connect(self._refresh_mcp_preview)
 
-    @staticmethod
-    def _model_display(payload):
-        """Return one readable provider-aware model label."""
-        provider_label = payload.get("provider_label", "Provider")
-        name = payload.get("name", "")
-        return f"[{provider_label}] {name}"
-
-    @staticmethod
-    def _provider_key(payload):
-        """Return one key grouping models by provider/profile."""
-        return (
-            payload.get("provider_kind", payload.get("provider_id", "")),
-            payload.get("profile_id", ""),
-            payload.get("provider_id", ""),
-        )
-
     def _on_theme_preset_changed(self, index):
         """Update color swatches when the user picks a different preset."""
         del index
@@ -585,11 +574,7 @@ class AssistantSettingsDialog(QDialog):
 
     def _populate_model_combos(self):
         """Fill the chat-model combo from the latest discovered models."""
-        self.chat_model_combo.blockSignals(True)
-        self.chat_model_combo.clear()
-        for payload in self._models:
-            self.chat_model_combo.addItem(self._model_display(payload), dict(payload))
-        self.chat_model_combo.blockSignals(False)
+        populate_model_combo(self.chat_model_combo, self._models, show_provider=True)
 
     def _copy_text(self, text):
         """Copy text to the system clipboard and update the feedback label."""
@@ -863,47 +848,34 @@ class AssistantSettingsDialog(QDialog):
         preferred_profile_id=None,
     ):
         """Select the configured chat model, or the first available entry."""
-        chat_model = str(
-            preferred_name
-            if preferred_name is not None
-            else self._settings.get("chat_model", "") or ""
+        select_model(
+            self.chat_model_combo,
+            name=str(
+                preferred_name
+                if preferred_name is not None
+                else self._settings.get("chat_model", "") or ""
+            ),
+            provider_kind=str(
+                preferred_provider_kind
+                if preferred_provider_kind is not None
+                else self._settings.get("chat_provider", "ollama") or "ollama"
+            ),
+            profile_id=str(
+                preferred_profile_id
+                if preferred_profile_id is not None
+                else self._settings.get("chat_provider_profile_id", "") or ""
+            ),
         )
-        provider_kind = str(
-            preferred_provider_kind
-            if preferred_provider_kind is not None
-            else self._settings.get("chat_provider", "ollama") or "ollama"
-        )
-        profile_id = str(
-            preferred_profile_id
-            if preferred_profile_id is not None
-            else self._settings.get("chat_provider_profile_id", "") or ""
-        )
-
-        for index in range(self.chat_model_combo.count()):
-            payload = self.chat_model_combo.itemData(index)
-            if not isinstance(payload, dict):
-                continue
-            if payload.get("name") != chat_model:
-                continue
-            if payload.get("provider_kind", payload.get("provider_id", "")) != provider_kind:
-                continue
-            if str(payload.get("profile_id", "") or "") != profile_id:
-                continue
-            self.chat_model_combo.setCurrentIndex(index)
-            return
-
-        if self.chat_model_combo.count() > 0:
-            self.chat_model_combo.setCurrentIndex(0)
 
     def _refresh_completion_model_options(self, preferred_name=None):
         """Rebuild the completion-model list for the selected provider."""
         chat_payload = self.chat_model_combo.currentData()
-        allowed_key = self._provider_key(chat_payload or {})
+        allowed_key = provider_key(chat_payload or {})
 
         self._completion_model_payloads = [
             dict(payload)
             for payload in self._models
-            if self._provider_key(payload) == allowed_key
+            if provider_key(payload) == allowed_key
         ]
         if not self._completion_model_payloads:
             self._completion_model_payloads = [dict(payload) for payload in self._models]
@@ -913,18 +885,16 @@ class AssistantSettingsDialog(QDialog):
             if preferred_name is not None
             else self._settings.get("completion_model", "") or ""
         )
+        populate_model_combo(
+            self.completion_model_combo,
+            self._completion_model_payloads,
+            show_provider=True,
+        )
         self.completion_model_combo.blockSignals(True)
-        self.completion_model_combo.clear()
-        selected_index = 0
-        for index, payload in enumerate(self._completion_model_payloads):
-            self.completion_model_combo.addItem(
-                self._model_display(payload),
-                dict(payload),
-            )
-            if payload.get("name") == selected_name:
-                selected_index = index
-        self.completion_model_combo.setCurrentIndex(selected_index)
-        self.completion_model_combo.blockSignals(False)
+        try:
+            select_model(self.completion_model_combo, name=selected_name)
+        finally:
+            self.completion_model_combo.blockSignals(False)
 
     def selected_settings(self):
         """Return the normalized settings chosen in the dialog."""

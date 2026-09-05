@@ -47,6 +47,11 @@ from spyder_ai_assistant.utils.provider_profiles import (
     resolve_preferred_profile,
     serialize_provider_profiles,
 )
+from spyder_ai_assistant.widgets.model_selection import (
+    format_model_tooltip,
+    populate_model_combo,
+    select_model,
+)
 from spyder_ai_assistant.utils.prompt_library import (
     build_chat_prompt_preset_block,
     get_chat_prompt_preset,
@@ -599,51 +604,6 @@ class ChatWidget(PluginMainWidget):
             return dict(payload)
         return {}
 
-    @staticmethod
-    def _format_model_display(payload, show_provider=True):
-        """Return the combo-box label for one model.
-
-        The provider prefix only earns its space when models from more
-        than one provider are listed; with a single provider it just
-        truncates the model name in a narrow dock.
-        """
-        provider_label = payload.get("provider_label", "Provider")
-        name = payload.get("name", "")
-        parameter_size = payload.get("parameter_size", "")
-        size_gb = payload.get("size_gb", 0) or 0
-
-        details = []
-        if parameter_size:
-            details.append(str(parameter_size))
-        if size_gb:
-            details.append(f"{size_gb}GB")
-        label = f"{name} ({', '.join(details)})" if details else name
-        if show_provider:
-            return f"[{provider_label}] {label}"
-        return label
-
-    @staticmethod
-    def _format_model_tooltip(payload):
-        """Return the detailed tooltip for one provider-aware model entry."""
-        lines = [
-            f"Provider: {payload.get('provider_label', 'unknown')}",
-            f"Kind: {payload.get('provider_kind', payload.get('provider_id', 'unknown'))}",
-            f"Model: {payload.get('name', '')}",
-            f"Family: {payload.get('family', 'unknown') or 'unknown'}",
-            (
-                "Parameters: "
-                f"{payload.get('parameter_size', 'unknown') or 'unknown'}"
-            ),
-            (
-                "Quantization: "
-                f"{payload.get('quantization', 'unknown') or 'unknown'}"
-            ),
-            f"Size: {payload.get('size_gb', 0) or 0} GB",
-        ]
-        if payload.get("endpoint"):
-            lines.append(f"Endpoint: {payload.get('endpoint', '')}")
-        return "\n".join(lines)
-
     def _current_model_export_name(self):
         """Return the provider-aware model label used in exports/logging."""
         payload = self._current_model_payload()
@@ -840,26 +800,17 @@ class ChatWidget(PluginMainWidget):
         ]
         previous = self.model_combo.currentData()
 
-        show_provider = len({
-            m.get("provider_id", "") for m in self._available_model_payloads
-        }) > 1
-        self.model_combo.blockSignals(True)
-        self.model_combo.clear()
-        for m in self._available_model_payloads:
-            payload = dict(m)
-            display = self._format_model_display(payload, show_provider)
-            self.model_combo.addItem(display, payload)
-            idx = self.model_combo.count() - 1
-            self.model_combo.setItemData(
-                idx,
-                self._format_model_tooltip(payload),
-                Qt.ToolTipRole,
-            )
-        if not self._available_model_payloads:
-            self.model_combo.addItem("No models — open Settings", None)
+        populate_model_combo(
+            self.model_combo,
+            self._available_model_payloads,
+            placeholder="No models — open Settings",
+        )
         self.model_combo.setEnabled(bool(self._available_model_payloads))
-        self._select_default_model(previous)
-        self.model_combo.blockSignals(False)
+        self.model_combo.blockSignals(True)
+        try:
+            self._select_default_model(previous)
+        finally:
+            self.model_combo.blockSignals(False)
 
         self._on_model_changed(self.model_combo.currentIndex())
         self._sync_send_controls()
@@ -995,7 +946,7 @@ class ChatWidget(PluginMainWidget):
         self._current_provider_profile_id = payload.get("profile_id", "")
         self._current_model = payload.get("name", "")
         if payload:
-            self.model_combo.setToolTip(self._format_model_tooltip(payload))
+            self.model_combo.setToolTip(format_model_tooltip(payload))
             preferred_kind = payload.get(
                 "provider_kind",
                 self.get_conf("chat_provider", default="ollama"),
@@ -1676,58 +1627,16 @@ class ChatWidget(PluginMainWidget):
         ))
 
     def _select_default_model(self, previous=""):
-        """Select the best model in the combo box.
-
-        Priority: previous selection > configured default > first available.
-        """
-        if isinstance(previous, dict):
-            for i in range(self.model_combo.count()):
-                if self.model_combo.itemData(i) == previous:
-                    self.model_combo.setCurrentIndex(i)
-                    return
-
+        """Select the best model row: previous selection, then configured
+        default (provider/profile aware), then first available."""
         settings = self._assistant_settings()
-        default_provider = settings.chat_provider
-        default_profile_id = settings.chat_provider_profile_id
-        default = settings.chat_model
-        for i in range(self.model_combo.count()):
-            payload = self.model_combo.itemData(i)
-            if not isinstance(payload, dict):
-                continue
-            if payload.get("name") != default:
-                continue
-            provider_kind = payload.get("provider_kind", payload.get("provider_id", ""))
-            if provider_kind != default_provider:
-                continue
-            if (
-                provider_kind == PROVIDER_KIND_OPENAI_COMPATIBLE
-                and default_profile_id
-                and payload.get("profile_id") != default_profile_id
-            ):
-                continue
-            self.model_combo.setCurrentIndex(i)
-            return
-
-        if default_provider == PROVIDER_KIND_OPENAI_COMPATIBLE and default_profile_id:
-            for i in range(self.model_combo.count()):
-                payload = self.model_combo.itemData(i)
-                if not isinstance(payload, dict):
-                    continue
-                if payload.get("provider_kind") != PROVIDER_KIND_OPENAI_COMPATIBLE:
-                    continue
-                if payload.get("profile_id") != default_profile_id:
-                    continue
-                self.model_combo.setCurrentIndex(i)
-                return
-
-        for i in range(self.model_combo.count()):
-            payload = self.model_combo.itemData(i)
-            if isinstance(payload, dict) and payload.get("name") == default:
-                self.model_combo.setCurrentIndex(i)
-                return
-
-        if self.model_combo.count() > 0:
-            self.model_combo.setCurrentIndex(0)
+        select_model(
+            self.model_combo,
+            name=settings.chat_model,
+            provider_kind=settings.chat_provider,
+            profile_id=settings.chat_provider_profile_id,
+            previous=previous if isinstance(previous, dict) else None,
+        )
 
     # --- Cleanup ---
 
