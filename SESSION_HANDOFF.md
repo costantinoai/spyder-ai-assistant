@@ -145,18 +145,56 @@ run with the real LSP provider enabled yet (see follow-ups).
   with the error in the status tooltip. Live harness: all expectations met,
   offline recovery ok, warm-up observed on the real host.
 
+## Close-out program (2026-09-06), all steps committed
+
+Commits after `94b8905` (streaming/warm-up):
+
+1. `78dbf2c` small fixes: session timestamp helper, final-newline diffs,
+   client close on registry/worker rebuild, completion model resolution
+   configured -> chat model -> default.
+2. `4f1c90f` responsive action row (icons; icon-only below 520 px, dock
+   shrinks to 363 px) and a regenerated README chat screenshot (2x render
+   from the GUI harness, state `10-readme`).
+3. `742211b` project file and git tools (issues #2, #3): `utils/project_tools.py`
+   shared by the chat request protocol, MCP (`list_project_files`,
+   `read_project_file`, `search_project`, `git_status`, `git_diff`,
+   `git_log`) and the "Review Changes" debug action; `project_tools_enabled`
+   setting (Behavior tab). Verified live: real model called git.status then
+   git.diff and quoted the changed line.
+4. `9898a0e` shared `widgets/model_selection.py` (chat toolbar + settings
+   dialog); plugin conf handlers 29 -> 6 grouped; verified live.
+5. `7eb82bb` `replace_definition` apply mode (issues #1/#4 smallest useful
+   step), one `apply_code_plan` for dialog and MCP; manual AI requests sync
+   the ghost-free document; provider normalises request offsets past a
+   visible ghost using exact bounds from lifecycle events; new private
+   harness `run_completion_lsp_validation.py` passes all five pylsp
+   interplay scenarios.
+
+Validation state after the last commit: unit suite 323 passed; compileall,
+`git diff --check`, wheel/sdist 0.6.1.dev0 (contains project_tools,
+model_selection); live completion harness, LSP harness, MCP HTTP smoke
+(17 tools), project-tools chat smoke, apply-preview, history discovery,
+GUI capture all green; real `~/.config/spyder-py3` untouched (mtime
+2026-09-05 20:06).
+
+Private harness inventory (tools/spyder_validation, gitignored):
+`run_completion_validation` (deterministic + real model + offline),
+`run_completion_lsp_validation` (real pylsp), `run_chat_gui_visual_validation`
+(`SPYDER_AI_VALIDATION_UI_THEME=light`, `SPYDER_AI_VALIDATION_SHOT_SCALE=2`),
+`run_chat_project_tools_smoke` (real model), `run_mcp_http_smoke` (headless),
+plus the earlier phase harnesses.
+
 ## Follow-ups (not blocking, listed in tasks/todo.md)
 
-- Dedicated live harness with the real LSP provider enabled to observe
-  automatic pylsp popups racing ghost text. Logic is covered by synthetic
-  popup events and unit tests; timing with a real server is not.
-- README `docs/screenshots/chat-panel.png` still shows the previous layout
-  (staged ZeroDivisionError scenario). Fresh captures exist under the artifact
-  root; replacing the README image is a content decision for the user.
-- Streaming re-sets the whole document per chunk (roadmap); `ChatSession.touch()`
-  rebuilds the record for a timestamp; plain preview diff ignores
-  final-newline-only changes; narrow dock minimum width ~447 px.
-- Rerun apply-preview, history-discovery and MCP HTTP harnesses before merge.
+- Inline (in-editor) diff review with per-hunk accept/reject remains the
+  larger Zed-like step for issue #4; the preview dialog with insert /
+  replace selection / replace definition is the shipped flow.
+- Fresh-config default completion/chat model is still `qwen3-coder-next`;
+  on this machine only `qwen2.5-coder:14b` exists, so a fresh config shows
+  "AI: qwen3-coder-next unavailable" until Settings points at the local
+  model. Changing the packaged default is a product decision.
+- The README screenshot set for settings tabs still predates the Behavior
+  tab's "Project access" group.
 
 ## GitHub
 
