@@ -21,9 +21,10 @@ import os
 from datetime import datetime
 
 from qtpy.QtCore import Qt, Signal, QThread
+from spyder.utils.icon_manager import ima
 from qtpy.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QSplitter, QPushButton, QComboBox, QLabel,
-    QFileDialog, QMenu, QTabWidget, QToolButton,
+    QFileDialog, QMenu, QSizePolicy, QTabWidget, QToolButton,
 )
 
 from spyder.api.widgets.main_widget import PluginMainWidget
@@ -80,6 +81,19 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # ChatWidget — the main dockable pane
 # ---------------------------------------------------------------------------
+
+# Panel width (px) below which the action row shows icons only. Above it the
+# labels fit next to the icons; below it they would force a minimum dock
+# width wider than Spyder's own side panes.
+COMPACT_ACTION_ROW_WIDTH = 520
+
+
+def action_row_button_style(panel_width):
+    """Return the tool-button style for the action row at ``panel_width``."""
+    if int(panel_width) < COMPACT_ACTION_ROW_WIDTH:
+        return Qt.ToolButtonIconOnly
+    return Qt.ToolButtonTextBesideIcon
+
 
 class ChatWidget(PluginMainWidget):
     """Main widget for the AI Chat dockable pane.
@@ -187,14 +201,13 @@ class ChatWidget(PluginMainWidget):
         # Context label: shows current file and cursor line (e.g. "main.py:42")
         self.context_label = QLabel("")
         self.context_label.ID = "ai_chat_context_label"
-        self.context_label.setMinimumWidth(100)
+        self.context_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.context_label.setToolTip("Current editor file and cursor position")
 
         # Runtime label: shows the active kernel state without dumping
         # console or variable content into the normal chat prompt path.
         self.runtime_label = QLabel("Kernel: unavailable")
         self.runtime_label.ID = "ai_chat_runtime_label"
-        self.runtime_label.setMinimumWidth(130)
         self.runtime_label.setToolTip("Active IPython console runtime status")
 
         self.runtime_target_combo = QComboBox(self)
@@ -328,6 +341,7 @@ class ChatWidget(PluginMainWidget):
         }
         self.debug_menu_btn = QToolButton(self)
         self.debug_menu_btn.setText("Debug")
+        self.debug_menu_btn.setIcon(ima.icon("bug"))
         self.debug_menu_btn.setPopupMode(QToolButton.InstantPopup)
         self.debug_menu_btn.setToolTip(
             "Runtime-aware debugging actions for the active chat tab"
@@ -343,11 +357,13 @@ class ChatWidget(PluginMainWidget):
 
         self.regenerate_btn = QToolButton(self)
         self.regenerate_btn.setText("Regenerate")
+        self.regenerate_btn.setIcon(ima.icon("restart"))
         self.regenerate_btn.setToolTip(
             "Remove the last assistant answer on this tab and ask again"
         )
         self.chat_settings_btn = QToolButton(self)
         self.chat_settings_btn.setText("Settings")
+        self.chat_settings_btn.setIcon(ima.icon("configure"))
         self.chat_settings_btn.setToolTip(
             "Open assistant settings. Use the menu for tab overrides and providers."
         )
@@ -361,6 +377,7 @@ class ChatWidget(PluginMainWidget):
         self.chat_settings_btn.setMenu(settings_menu)
         self.session_btn = QToolButton(self)
         self.session_btn.setText("Sessions")
+        self.session_btn.setIcon(ima.icon("history"))
         self.session_btn.setPopupMode(QToolButton.MenuButtonPopup)
         self.session_btn.setToolTip(
             "Browse saved chats and open other session actions"
@@ -383,6 +400,18 @@ class ChatWidget(PluginMainWidget):
         for button in (self.send_btn, self.stop_btn):
             button.setMinimumHeight(30)
         self.send_btn.setEnabled(False)
+        self._action_row_buttons = (
+            self.debug_menu_btn,
+            self.regenerate_btn,
+            self.session_btn,
+            self.chat_settings_btn,
+        )
+        for button in self._action_row_buttons:
+            # An explicit minimum (icon-only size) replaces the label-based
+            # minimum size hint, so the dock can shrink below the labelled
+            # width; resizeEvent then drops the labels before anything clips.
+            button.setMinimumWidth(28)
+        self._apply_action_row_style(self.width())
         controls_layout.addWidget(self.debug_menu_btn)
         controls_layout.addWidget(self.regenerate_btn)
         controls_layout.addWidget(self.session_btn)
@@ -461,6 +490,18 @@ class ChatWidget(PluginMainWidget):
         # Start the worker thread and fetch available models
         self._thread.start()
         self.sig_list_models.emit()
+
+    def resizeEvent(self, event):
+        """Switch the action row between labelled and icon-only buttons."""
+        super().resizeEvent(event)
+        self._apply_action_row_style(event.size().width())
+
+    def _apply_action_row_style(self, panel_width):
+        """Apply the responsive tool-button style to the action row."""
+        style = action_row_button_style(panel_width)
+        for button in getattr(self, "_action_row_buttons", ()):
+            if button.toolButtonStyle() != style:
+                button.setToolButtonStyle(style)
 
     def update_actions(self):
         """Called by Spyder when the widget gains/loses focus.

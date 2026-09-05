@@ -8,7 +8,7 @@
 
 A local-first AI assistant for [Spyder IDE](https://www.spyder-ide.org/). Chat with a model about your code, get Copilot-style inline completions, inspect live variables and tracebacks, and browse your conversation history — all running on your own GPU through [Ollama](https://ollama.com/), with optional support for OpenAI-compatible endpoints.
 
-![Chat panel debugging a ZeroDivisionError — the AI reads the console traceback and explains the fix](docs/screenshots/chat-panel.png)
+![Chat panel: a question about the current file, the answer with a highlighted code block and Copy/Apply actions, model and mode selectors above, Debug/Regenerate/Sessions/Settings actions below](docs/screenshots/chat-panel.png)
 
 ---
 
