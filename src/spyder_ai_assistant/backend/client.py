@@ -264,6 +264,16 @@ class OllamaClient:
                 ) or 0
             yield result
 
+    def close(self):
+        """Release the underlying HTTP connection pool."""
+        inner = getattr(self._client, "_client", None)
+        closer = getattr(inner, "close", None) or getattr(self._client, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception as error:  # pragma: no cover - best effort
+                logger.debug("Ignoring Ollama client close error: %s", error)
+
     def warm_up(self, model):
         """Load ``model`` into memory so the first real request is fast.
 
@@ -514,6 +524,13 @@ class OpenAICompatibleCompletionClient:
             headers=headers,
             timeout=30.0,
         )
+
+    def close(self):
+        """Release the underlying HTTP connection pool."""
+        try:
+            self._client.close()
+        except Exception as error:  # pragma: no cover - best effort
+            logger.debug("Ignoring compatible client close error: %s", error)
 
     def generate_completion(
         self,

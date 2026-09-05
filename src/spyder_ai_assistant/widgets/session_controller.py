@@ -9,6 +9,7 @@ from spyder_ai_assistant.utils.chat_exchanges import (
     delete_chat_exchange,
 )
 from spyder_ai_assistant.utils.chat_persistence import (
+    current_timestamp,
     build_chat_session_history_rows,
     make_chat_session_record,
     merge_chat_session_history,
@@ -103,15 +104,7 @@ class ChatSession:
 
     def touch(self):
         """Refresh the session updated timestamp after a state change."""
-        self.updated_at = make_chat_session_record(
-            title=self.title,
-            messages=self.messages,
-            session_id=self.session_id,
-            created_at=self.created_at,
-            prompt_preset_id=self.prompt_preset_id,
-            temperature_override=self.temperature_override,
-            max_tokens_override=self.max_tokens_override,
-        )["updated_at"]
+        self.updated_at = current_timestamp()
 
     def to_state(self):
         """Return one persisted session payload."""

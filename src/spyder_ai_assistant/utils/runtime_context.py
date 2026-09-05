@@ -503,7 +503,8 @@ class RuntimeContextService(QObject):
             return
 
         shell_id = self._shell_id(shellwidget)
-        snapshot = self._get_or_create_snapshot(shellwidget)
+        # Ensure a snapshot slot exists before any signal can fire for it.
+        self._get_or_create_snapshot(shellwidget)
         if shell_id in self._tracked_shell_ids:
             self._refresh_console_snapshot(shellwidget, reason="track-existing")
             return

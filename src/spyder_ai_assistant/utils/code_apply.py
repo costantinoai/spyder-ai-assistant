@@ -101,8 +101,10 @@ def build_code_apply_plan(
 
 def build_code_apply_diff(before_text, after_text, context_lines=3):
     """Return a unified diff preview for one editor mutation."""
-    before_lines = (before_text or "").splitlines()
-    after_lines = (after_text or "").splitlines()
+    # keepends=True so a change that only adds or removes the final newline
+    # is still a change (splitlines() alone would report "(no changes)").
+    before_lines = (before_text or "").splitlines(keepends=True)
+    after_lines = (after_text or "").splitlines(keepends=True)
     diff = list(
         difflib.unified_diff(
             before_lines,
@@ -110,12 +112,18 @@ def build_code_apply_diff(before_text, after_text, context_lines=3):
             fromfile="before",
             tofile="after",
             n=max(0, int(context_lines)),
-            lineterm="",
         )
     )
     if not diff:
         return "(no changes)"
-    return "\n".join(diff)
+    rendered = []
+    for line in diff:
+        if line.endswith("\n"):
+            rendered.append(line)
+        else:
+            # Same marker git uses, so the difference is visible.
+            rendered.append(line + "\n\\ No newline at end of file\n")
+    return "".join(rendered).rstrip("\n")
 
 
 def preview_text(text, limit=MAX_APPLY_PREVIEW_CHARS):

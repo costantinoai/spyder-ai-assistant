@@ -39,6 +39,10 @@ class ChatWorker(QObject):
     def update_settings(self, settings):
         """Replace the provider settings snapshot on the worker thread."""
         self._settings = dict(settings or {})
+        # The previous registry owns HTTP connection pools; release them
+        # instead of leaving them to the garbage collector.
+        if self._registry is not None:
+            self._registry.close()
         self._registry = ChatProviderRegistry(self._settings)
         logger.info(
             "Chat worker provider settings updated: ollama=%s, profile_count=%d",

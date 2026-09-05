@@ -1211,13 +1211,20 @@ class CompletionWorker(QObject):
     def _handle_update_backend_settings(self, settings):
         """Update the worker-owned backend settings on the worker thread."""
         self._backend_settings = dict(settings or {})
-        self._client = None
-        self._client_signature = None
+        self._close_client()
         logger.info(
             "AI completion worker backend refreshed: provider=%s endpoint=%s",
             self._backend_settings.get("provider_kind", "-"),
             self._backend_settings.get("endpoint", ""),
         )
+
+    def _close_client(self):
+        """Release the current client's connection pool, if any."""
+        closer = getattr(self._client, "close", None)
+        if callable(closer):
+            closer()
+        self._client = None
+        self._client_signature = None
 
     def _get_client(self, provider_kind, endpoint, api_key):
         """Return a backend client matching the requested endpoint."""
@@ -1234,6 +1241,7 @@ class CompletionWorker(QObject):
             )
             return self._client
 
+        self._close_client()
         if provider_kind == PROVIDER_KIND_OPENAI_COMPATIBLE:
             self._client = OpenAICompatibleCompletionClient(
                 base_url=endpoint,
@@ -2133,10 +2141,22 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             self._request_model_warm_up(backend_settings)
 
     def _resolved_completion_model(self):
-        """Return the configured live completion model after light healing."""
+        """Return the live completion model.
+
+        Resolution order: the configured completion model, then the chat
+        model (a separate completion model is optional), then the packaged
+        default. Generic placeholder names count as unset.
+        """
         model = str(self.get_conf("completion_model") or "").strip()
         if model not in _GENERIC_COMPLETION_MODEL_NAMES:
             return model
+        chat_model = str(self.get_conf("chat_model", default="") or "").strip()
+        if chat_model and chat_model not in _GENERIC_COMPLETION_MODEL_NAMES:
+            logger.info(
+                "No separate completion model configured; using chat model %r",
+                chat_model,
+            )
+            return chat_model
         default_model = dict(self.CONF_DEFAULTS).get("completion_model", "")
         logger.warning(
             "Completion model config was generic/invalid (%r); falling back to %r",

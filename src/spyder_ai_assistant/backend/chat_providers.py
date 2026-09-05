@@ -84,6 +84,16 @@ class BaseChatProvider:
         """Yield streaming chat chunks in the worker's common format."""
         raise NotImplementedError
 
+    def close(self):
+        """Release network resources; providers without a client do nothing."""
+        client = getattr(self, "_client", None)
+        closer = getattr(client, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception as error:  # pragma: no cover - best effort
+                logger.debug("Ignoring provider client close error: %s", error)
+
     def describe(self):
         """Return one UI-facing provider diagnostic record."""
         return {
@@ -277,6 +287,11 @@ class ChatProviderRegistry:
     def __init__(self, settings=None):
         self._settings = dict(settings or {})
         self._providers = self._build_providers()
+
+    def close(self):
+        """Close every provider's client (called before a registry rebuild)."""
+        for provider in self._providers.values():
+            provider.close()
 
     def list_models(self):
         """Return all models from configured providers in one flat list."""
