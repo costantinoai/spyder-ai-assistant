@@ -254,9 +254,15 @@ pylsp on Xvfb (two new scenarios: `ai_first_hides_automatic_popup`,
 - The README screenshot set for settings tabs still predates the Behavior
   tab's "Project access" group.
 
-## GitHub
+## GitHub / release (2026-09-06)
 
-No open PRs. Open issues #1-#4 unchanged; nothing posted. Issue #4
-(completion suggestions interfering with scrolling) is addressed by the
-scroll/focus pause rework plus the popup-focus fix; do not close it without
-the user's say.
+- Branch `refactor/task-016-optimization-simplification-mcp-hardening` merged
+  into `main` via PR #5 (merge commit 44b20f6); remote branch deleted.
+- Tag `v0.7.0` pushed; publish workflow run 34026838157 succeeded; GitHub
+  Release v0.7.0 exists; PyPI serves 0.7.0. The `spyder-ai` env now has the
+  published wheel (not the editable checkout); the completion harness and the
+  MCP smoke passed against it on Xvfb.
+- Issues: #2 (project files) and #3 (git log/diff) closed with pointers to
+  PR #5 / 742211b. #1 (model edits files) and #4 (Zed look and feel) kept
+  open with comments; open asks there: autonomous edits to arbitrary project
+  files, a manual-trigger-only completion mode, inline diff review.
