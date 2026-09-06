@@ -2,6 +2,77 @@
 
 ## Unreleased
 
+## 0.7.0 - 2026-09-06
+
+### Inline completions
+
+- ghost text now owns the editor by default: while the AI model is available,
+  Spyder's automatic completion popup (pylsp) stays hidden and ghost text is
+  the only automatic suggestion; `Ctrl+Space` still opens the native popup.
+  New `native_popup_policy` setting (Settings > Behavior) with
+  `ai_first` (default), `ai_replaces`, and `native_first`
+- when the configured completion model is not installed, completions fall
+  back to the chat model at runtime; the status bar shows the model in use
+  and explains the fallback in its tooltip
+- the completion model is warmed up at startup and kept resident
+  (`keep_alive`), so the first suggestion no longer waits for a cold load
+- fixed ghost text being paused by the native popup taking focus, stale
+  anchors while a ghost was visible, lost targets on dismissal, and duplicate
+  manual requests from the two shortcut filters
+- manual AI requests sync the document without the visible ghost text
+- live validation against a real language server (`run_completion_lsp_validation`)
+
+### Chat
+
+- streaming renders into a document frame with coalesced 33 ms updates
+  (no per-token re-layout, no horizontal scrollbar from `adjustSize()`)
+- code blocks pick the Pygments style from the code-card luminance so light
+  themes stay readable
+- **Apply** gained a "replace the existing function/class of the same name"
+  mode (AST-based, decorators included) next to insert / replace selection,
+  with a unified-diff preview that handles newline-only changes
+- the chat mode (Coding, Debugging, Review, Data Analysis, Explanation,
+  Documentation) moved from the toolbar into the per-tab Chat Settings dialog;
+  the `Settings` button reads `Settings*` while a tab deviates from defaults
+- responsive action row with icons; new tabs are titled "Chat 1", "Chat 2", ...
+  and session timestamps are refreshed on activity
+- model selection shares one labelling/priority helper between the toolbar
+  and the settings dialog; the provider prefix only appears with several
+  providers
+
+### Project files and git
+
+- the model can, on request, list/read/search project files and read
+  `git status` / `git diff` / `git log`, bounded to the project root with
+  size caps (`project_tools_enabled` in Settings > Behavior)
+- a **Review Changes** action in the Debug menu asks the model to review the
+  uncommitted changes
+- the same tools are exposed over the embedded MCP server (17 tools total);
+  `uvicorn` runs with `log_config=None` so Spyder's logging setup cannot
+  break it
+
+### Reliability
+
+- provider clients are closed on settings changes and shutdown
+- plugin logging is initialised in real sessions
+  (`~/.config/spyder-py3/spyder-ai-assistant.log`)
+- unit tests and live harnesses never touch the real Spyder config
+  (`SPYDER_PYTEST`, audit hook); harnesses run on a private Xvfb display
+
+## 0.6.0 - 2026-03-13
+
+- appearance, behavior, and theme settings in the assistant dialog
+- refreshed README screenshots for chat, completions, and settings
+- prefix-replay stripping for ghost text completions
+
+## 0.5.0 - 2026-03-13
+
+- multi-provider completion backend (Ollama and OpenAI-compatible profiles)
+  with a settings dialog and ghost text enhancements
+- robust manual completion shortcut handling
+- smart scroll and markdown rendering improvements in the chat display
+- CI build fixed to use `python -m build`
+
 ## 0.4.0 - 2026-03-12
 
 ### Integration fixes

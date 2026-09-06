@@ -31,15 +31,16 @@ If you ever mirror this workflow to self-hosted runners, keep the runner version
 ```bash
 git checkout main
 git pull --ff-only
-python -m tools.release.build_dist
+rm -rf build dist src/*.egg-info
+python -m build
 git tag -a vX.Y.Z -m "vX.Y.Z"
 git push origin main
 git push origin vX.Y.Z
 ```
 
-The tracked build helper removes stale `build/`, `dist/`, and generated
-`.egg-info` directories before rebuilding. That avoids local contamination from
-older package names and keeps CI and local release checks aligned.
+Remove stale `build/`, `dist/`, and generated `.egg-info` directories before
+rebuilding so older package names cannot contaminate the local check; CI
+builds from a clean checkout with the same `python -m build` command.
 
 ## Post-release checks
 
