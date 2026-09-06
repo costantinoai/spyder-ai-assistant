@@ -18,54 +18,47 @@ Multi-tab design:
 
 import logging
 import os
-from dataclasses import dataclass
 from datetime import datetime
 
 from qtpy.QtCore import Qt, Signal, QThread
+from spyder.utils.icon_manager import ima
 from qtpy.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QSplitter, QPushButton, QComboBox, QLabel,
-    QFileDialog, QMenu, QTabWidget, QToolButton,
+    QFileDialog, QMenu, QSizePolicy, QTabWidget, QToolButton,
 )
 
 from spyder.api.widgets.main_widget import PluginMainWidget
+from spyder.config.gui import is_dark_interface
 
 from spyder_ai_assistant.backend.worker import ChatWorker
-from spyder_ai_assistant.utils.chat_exchanges import (
-    build_chat_exchange_rows,
-    delete_chat_exchange,
+from spyder_ai_assistant.utils.assistant_settings import (
+    ASSISTANT_APPEARANCE_KEYS,
+    AssistantSettings,
 )
 from spyder_ai_assistant.utils.chat_inference import (
     describe_chat_inference_source,
     format_chat_temperature,
     make_chat_inference_record,
-    normalize_chat_max_tokens,
-    normalize_chat_temperature,
     resolve_chat_inference_options,
-)
-from spyder_ai_assistant.utils.chat_persistence import (
-    build_chat_session_history_rows,
-    make_chat_session_record,
-    merge_chat_session_history,
-    remove_chat_session_from_history,
 )
 from spyder_ai_assistant.utils.context import build_system_context_block
 from spyder_ai_assistant.utils.provider_profiles import (
     PROVIDER_KIND_OPENAI_COMPATIBLE,
     resolve_preferred_profile,
     serialize_provider_profiles,
-    normalize_provider_profiles,
+)
+from spyder_ai_assistant.widgets.model_selection import (
+    format_model_tooltip,
+    populate_model_combo,
+    select_model,
 )
 from spyder_ai_assistant.utils.prompt_library import (
     build_chat_prompt_preset_block,
     get_chat_prompt_preset,
-    list_chat_prompt_presets,
     normalize_chat_prompt_preset,
 )
 from spyder_ai_assistant.utils.runtime_bridge import (
-    MAX_RUNTIME_TOOL_CALLS_PER_TURN,
     build_runtime_bridge_instructions,
-    format_runtime_observation,
-    parse_runtime_request,
 )
 from spyder_ai_assistant.utils.chat_workflows import (
     DEBUG_ACTION_LABELS,
@@ -77,138 +70,34 @@ from spyder_ai_assistant.widgets.assistant_settings_dialog import (
 )
 from spyder_ai_assistant.widgets.chat_input import ChatInput
 from spyder_ai_assistant.widgets.chat_settings_dialog import ChatSettingsDialog
-from spyder_ai_assistant.widgets.exchange_delete_dialog import ExchangeDeleteDialog
 from spyder_ai_assistant.widgets.provider_profiles_dialog import (
     ProviderProfilesDialog,
 )
-from spyder_ai_assistant.widgets.session_history_dialog import SessionHistoryDialog
-from spyder_ai_assistant.widgets.chat_display import ChatDisplay
+from spyder_ai_assistant.widgets.session_controller import (
+    ChatSession,
+    SessionController,
+)
+from spyder_ai_assistant.widgets.turn_controller import TurnController
 
 logger = logging.getLogger(__name__)
-
-
-class ChatSessionStore:
-    """Track chat sessions by their display widget instead of tab index."""
-
-    def __init__(self):
-        self._by_widget = {}
-
-    def add(self, session):
-        """Register a new session by its display widget."""
-        self._by_widget[session.display] = session
-
-    def get_for_widget(self, widget):
-        """Return the session bound to a display widget, if any."""
-        return self._by_widget.get(widget)
-
-    def get_for_index(self, tab_widget, index):
-        """Return the session currently shown at a tab index."""
-        return self.get_for_widget(tab_widget.widget(index))
-
-    def remove_for_widget(self, widget):
-        """Forget the session associated with a display widget."""
-        return self._by_widget.pop(widget, None)
-
-    def index_of(self, tab_widget, session):
-        """Return the current tab index for a session, or -1."""
-        for index in range(tab_widget.count()):
-            if tab_widget.widget(index) is session.display:
-                return index
-        return -1
-
-    def ordered_sessions(self, tab_widget):
-        """Return sessions in the current visible tab order."""
-        sessions = []
-        for index in range(tab_widget.count()):
-            session = self.get_for_index(tab_widget, index)
-            if session is not None:
-                sessions.append(session)
-        return sessions
-
-
-# ---------------------------------------------------------------------------
-# ChatSession — one conversation tab
-# ---------------------------------------------------------------------------
-
-class ChatSession:
-    """State for a single chat conversation tab.
-
-    Bundles a ChatDisplay widget with its conversation history. Each tab
-    in the QTabWidget owns one ChatSession. The widget handles the display;
-    the messages list is the authoritative conversation state for API calls.
-
-    Attributes:
-        display: The ChatDisplay widget for this tab.
-        messages: List of role/content dicts (user + assistant messages).
-        title: Short label for the tab (auto-generated or user-set).
-    """
-
-    # Counter for auto-naming new tabs ("Chat 1", "Chat 2", ...)
-    _counter = 0
-
-    def __init__(self, parent=None, title=None, messages=None, session_id=None,
-                 created_at=None, updated_at=None, prompt_preset_id=None,
-                 temperature_override=None, max_tokens_override=None):
-        ChatSession._counter += 1
-        default_title = title or f"Chat {ChatSession._counter}"
-        record = make_chat_session_record(
-            title=default_title,
-            messages=messages or [],
-            session_id=session_id,
-            created_at=created_at,
-            updated_at=updated_at,
-            prompt_preset_id=prompt_preset_id,
-            temperature_override=temperature_override,
-            max_tokens_override=max_tokens_override,
-        )
-        self.display = ChatDisplay(parent)
-        self.session_id = record["session_id"]
-        self.title = record["title"]
-        self.messages = record["messages"]
-        self.created_at = record["created_at"]
-        self.updated_at = record["updated_at"]
-        self.prompt_preset_id = record["prompt_preset_id"]
-        self.temperature_override = record["temperature_override"]
-        self.max_tokens_override = record["max_tokens_override"]
-
-    def touch(self):
-        """Refresh the session updated timestamp after a state change."""
-        self.updated_at = make_chat_session_record(
-            title=self.title,
-            messages=self.messages,
-            session_id=self.session_id,
-            created_at=self.created_at,
-            prompt_preset_id=self.prompt_preset_id,
-            temperature_override=self.temperature_override,
-            max_tokens_override=self.max_tokens_override,
-        )["updated_at"]
-
-    def to_state(self):
-        """Return one persisted session payload."""
-        return make_chat_session_record(
-            title=self.title,
-            messages=self.messages,
-            session_id=self.session_id,
-            created_at=self.created_at,
-            updated_at=self.updated_at,
-            prompt_preset_id=self.prompt_preset_id,
-            temperature_override=self.temperature_override,
-            max_tokens_override=self.max_tokens_override,
-        )
-
-
-@dataclass
-class ChatTurnState:
-    """Internal per-turn state used for runtime inspection loops."""
-
-    session: ChatSession
-    request_messages: list
-    tool_calls: int = 0
 
 
 # ---------------------------------------------------------------------------
 # ChatWidget — the main dockable pane
 # ---------------------------------------------------------------------------
+
+# Panel width (px) below which the action row shows icons only. Above it the
+# labels fit next to the icons; below it they would force a minimum dock
+# width wider than Spyder's own side panes.
+COMPACT_ACTION_ROW_WIDTH = 520
+
+
+def action_row_button_style(panel_width):
+    """Return the tool-button style for the action row at ``panel_width``."""
+    if int(panel_width) < COMPACT_ACTION_ROW_WIDTH:
+        return Qt.ToolButtonIconOnly
+    return Qt.ToolButtonTextBesideIcon
+
 
 class ChatWidget(PluginMainWidget):
     """Main widget for the AI Chat dockable pane.
@@ -243,9 +132,6 @@ class ChatWidget(PluginMainWidget):
     def __init__(self, name, plugin, parent=None):
         super().__init__(name, plugin, parent)
 
-        # Whether the LLM is currently generating a response
-        self._generating = False
-
         # Currently selected provider-aware model entry from the combo box.
         self._current_provider = self.get_conf("chat_provider", default="ollama")
         self._current_provider_label = ""
@@ -259,35 +145,25 @@ class ChatWidget(PluginMainWidget):
         # When set, _send_message() enriches the system prompt with
         # the current file content and cursor position.
         self._context_provider = None
-        # Callable that executes one runtime inspection request.
-        self._runtime_request_executor = None
         # Callable that changes the explicit runtime target shell.
         self._runtime_target_handler = None
-
-        # The session that initiated the current generation.
-        # Streaming tokens and the final response are routed here,
-        # even if the user switches tabs mid-generation.
-        self._generating_session = None
-        # Hidden per-turn state used when the model asks for runtime data.
-        self._pending_turn = None
+        # Extracted controllers for session/history and turn lifecycle.
+        self._session_ctrl = None
+        self._turn_ctrl = None
         # Cached public runtime snapshot for toolbar status and exports.
         self._runtime_context_snapshot = {}
         # Cached runtime shell-target records used by the toolbar selector.
         self._runtime_shells = []
-        # Optional callback invoked when chat-session state changes and
-        # should be persisted by the plugin layer.
-        self._session_state_changed_callback = None
-        # Callable returning the current persistence-scope metadata used by
-        # the history browser dialog.
-        self._session_scope_provider = None
-        # Cached saved-session history for the current project/global scope.
-        self._history_sessions = []
         # Latest provider diagnostics emitted by the worker after model refresh.
         self._provider_diagnostics = []
         # Latest provider-aware model payloads emitted by the worker.
         self._available_model_payloads = []
         # Currently open global assistant settings dialog, if any.
         self._assistant_settings_dialog = None
+        # Callable returning the embedded MCP server status snapshot.
+        self._mcp_server_status_provider = None
+        # Callable launching one external MCP-aware client terminal.
+        self._mcp_client_launcher = None
 
     # --- PluginMainWidget interface ---
 
@@ -305,15 +181,16 @@ class ChatWidget(PluginMainWidget):
         """
         # --- Model selector in the main toolbar ---
         self.model_combo = QComboBox(self)
-        self.model_combo.setMinimumWidth(200)
+        self.model_combo.setMinimumWidth(140)
+        self.model_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        # Long enough for a typical "name (size)" label without truncation
+        # while still fitting a narrow dock next to the mode selector.
+        self.model_combo.setMinimumContentsLength(24)
+        self.model_combo.setAccessibleName("Chat model")
+        self.model_combo.addItem("Loading models…", None)
+        self.model_combo.setEnabled(False)
         self.model_combo.setToolTip("Select the AI model for chat")
         self.model_combo.ID = "ai_chat_model_selector"
-
-        self.prompt_preset_combo = QComboBox(self)
-        self.prompt_preset_combo.setMinimumWidth(170)
-        self.prompt_preset_combo.setToolTip("Select the active chat mode for this tab")
-        self.prompt_preset_combo.ID = "ai_chat_prompt_preset_selector"
-        self._populate_prompt_preset_combo()
 
         self.status_label = QLabel("Connecting...")
         self.status_label.ID = "ai_chat_status_label"
@@ -321,18 +198,20 @@ class ChatWidget(PluginMainWidget):
         # Context label: shows current file and cursor line (e.g. "main.py:42")
         self.context_label = QLabel("")
         self.context_label.ID = "ai_chat_context_label"
-        self.context_label.setMinimumWidth(100)
+        self.context_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.context_label.setToolTip("Current editor file and cursor position")
 
         # Runtime label: shows the active kernel state without dumping
         # console or variable content into the normal chat prompt path.
         self.runtime_label = QLabel("Kernel: unavailable")
         self.runtime_label.ID = "ai_chat_runtime_label"
-        self.runtime_label.setMinimumWidth(130)
         self.runtime_label.setToolTip("Active IPython console runtime status")
 
         self.runtime_target_combo = QComboBox(self)
-        self.runtime_target_combo.setMinimumWidth(190)
+        self.runtime_target_combo.setMinimumWidth(120)
+        self.runtime_target_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.runtime_target_combo.setMinimumContentsLength(12)
+        self.runtime_target_combo.hide()
         self.runtime_target_combo.setToolTip(
             "Choose which Spyder IPython console the runtime bridge should inspect"
         )
@@ -343,21 +222,12 @@ class ChatWidget(PluginMainWidget):
         self.add_item_to_toolbar(
             self.model_combo, toolbar=toolbar, section="main",
         )
-        self.add_item_to_toolbar(
-            self.prompt_preset_combo, toolbar=toolbar, section="preset",
-        )
-        self.add_item_to_toolbar(
-            self.context_label, toolbar=toolbar, section="context",
-        )
-        self.add_item_to_toolbar(
-            self.runtime_label, toolbar=toolbar, section="runtime",
-        )
-        self.add_item_to_toolbar(
-            self.runtime_target_combo, toolbar=toolbar, section="runtime_target",
-        )
-        self.add_item_to_toolbar(
-            self.status_label, toolbar=toolbar, section="status",
-        )
+        # Secondary context belongs below the model selector so a narrow dock
+        # does not hide all controls in the toolbar overflow menu.
+        context_row = QHBoxLayout()
+        context_row.addWidget(self.context_label, 1)
+        context_row.addWidget(self.runtime_label)
+        context_row.addWidget(self.runtime_target_combo)
 
         # --- Options menu actions (hamburger menu in corner toolbar) ---
         refresh_action = self.create_action(
@@ -426,9 +296,12 @@ class ChatWidget(PluginMainWidget):
         add_tab_btn.clicked.connect(self._add_new_tab)
         self._tab_widget.setCornerWidget(add_tab_btn, Qt.TopRightCorner)
 
-        # Track sessions by their display widget so tab moves do not
-        # corrupt the mapping between visible tabs and conversations.
-        self._sessions = ChatSessionStore()
+        self._session_ctrl = SessionController(
+            self._tab_widget,
+            appearance_applier=self._apply_current_appearance,
+            generating_session_getter=lambda: self._generating_session,
+            session_initializer=self._initialize_session,
+        )
 
         # Create the first tab
         self._add_new_tab()
@@ -453,35 +326,29 @@ class ChatWidget(PluginMainWidget):
                 text=DEBUG_ACTION_LABELS.get(action, action),
                 triggered=lambda checked=False, action=action: self._send_debug_prompt(action),
             )
-            for action in (
-                "explain_error",
-                "fix_traceback",
-                "use_variables",
-                "use_console",
-            )
+            for action in DEBUG_ACTION_LABELS
         }
         self.debug_menu_btn = QToolButton(self)
         self.debug_menu_btn.setText("Debug")
+        self.debug_menu_btn.setIcon(ima.icon("bug"))
         self.debug_menu_btn.setPopupMode(QToolButton.InstantPopup)
         self.debug_menu_btn.setToolTip(
             "Runtime-aware debugging actions for the active chat tab"
         )
         debug_menu = QMenu(self.debug_menu_btn)
-        for action in (
-                "explain_error",
-                "fix_traceback",
-                "use_variables",
-                "use_console"):
+        for action in DEBUG_ACTION_LABELS:
             debug_menu.addAction(self._debug_actions[action])
         self.debug_menu_btn.setMenu(debug_menu)
 
         self.regenerate_btn = QToolButton(self)
         self.regenerate_btn.setText("Regenerate")
+        self.regenerate_btn.setIcon(ima.icon("restart"))
         self.regenerate_btn.setToolTip(
             "Remove the last assistant answer on this tab and ask again"
         )
         self.chat_settings_btn = QToolButton(self)
         self.chat_settings_btn.setText("Settings")
+        self.chat_settings_btn.setIcon(ima.icon("configure"))
         self.chat_settings_btn.setToolTip(
             "Open assistant settings. Use the menu for tab overrides and providers."
         )
@@ -495,6 +362,7 @@ class ChatWidget(PluginMainWidget):
         self.chat_settings_btn.setMenu(settings_menu)
         self.session_btn = QToolButton(self)
         self.session_btn.setText("Sessions")
+        self.session_btn.setIcon(ima.icon("history"))
         self.session_btn.setPopupMode(QToolButton.MenuButtonPopup)
         self.session_btn.setToolTip(
             "Browse saved chats and open other session actions"
@@ -502,7 +370,6 @@ class ChatWidget(PluginMainWidget):
         session_menu = QMenu(self.session_btn)
         session_menu.addAction(self._history_action)
         session_menu.addAction(self._new_tab_action)
-        session_menu.addAction(self._provider_profiles_action)
         session_menu.addAction(self._delete_exchange_action)
         session_menu.addAction(self._export_action)
         self.session_btn.setMenu(session_menu)
@@ -512,6 +379,24 @@ class ChatWidget(PluginMainWidget):
         self.stop_btn = QPushButton("Stop")
         self.send_btn = QPushButton("Send")
         self.stop_btn.setEnabled(False)
+        self.stop_btn.hide()
+        self.stop_btn.setToolTip("Stop the current response")
+        self.send_btn.setToolTip("Send message (Enter)")
+        for button in (self.send_btn, self.stop_btn):
+            button.setMinimumHeight(30)
+        self.send_btn.setEnabled(False)
+        self._action_row_buttons = (
+            self.debug_menu_btn,
+            self.regenerate_btn,
+            self.session_btn,
+            self.chat_settings_btn,
+        )
+        for button in self._action_row_buttons:
+            # An explicit minimum (icon-only size) replaces the label-based
+            # minimum size hint, so the dock can shrink below the labelled
+            # width; resizeEvent then drops the labels before anything clips.
+            button.setMinimumWidth(28)
+        self._apply_action_row_style(self.width())
         controls_layout.addWidget(self.debug_menu_btn)
         controls_layout.addWidget(self.regenerate_btn)
         controls_layout.addWidget(self.session_btn)
@@ -522,8 +407,20 @@ class ChatWidget(PluginMainWidget):
 
         # Assemble the content layout (splitter + compact controls)
         content_layout = QVBoxLayout()
+        content_layout.setContentsMargins(6, 4, 6, 4)
+        content_layout.setSpacing(6)
+        content_layout.addLayout(context_row)
         content_layout.addWidget(splitter)
         content_layout.addLayout(controls_layout)
+        footer = QHBoxLayout()
+        input_hint = QLabel("Enter to send · Shift+Enter for a new line")
+        hint_font = input_hint.font()
+        hint_font.setPointSizeF(max(8, hint_font.pointSizeF() - 1))
+        input_hint.setFont(hint_font)
+        footer.addWidget(input_hint)
+        footer.addStretch()
+        footer.addWidget(self.status_label)
+        content_layout.addLayout(footer)
 
         self.setLayout(content_layout)
 
@@ -531,6 +428,12 @@ class ChatWidget(PluginMainWidget):
         self._thread = QThread(None)
         self._worker = ChatWorker(settings=self._chat_provider_settings())
         self._worker.moveToThread(self._thread)
+        self._turn_ctrl = TurnController(
+            send_chat_emitter=self.sig_send_chat.emit,
+            worker_abort=self._worker.abort,
+        )
+        self._turn_ctrl.context_provider = self._context_provider
+        self._turn_ctrl.runtime_status_notifier = self.status_label.setText
 
         # Main thread → worker: dispatch work requests via signals
         self.sig_send_chat.connect(self._worker.send_chat)
@@ -550,6 +453,7 @@ class ChatWidget(PluginMainWidget):
         self._worker.status_changed.connect(self._on_status_changed)
 
         # UI signal connections
+        self.chat_input.textChanged.connect(self._sync_send_controls)
         self.chat_input.submit_requested.connect(self._send_message)
         self.send_btn.clicked.connect(self._send_message)
         self.stop_btn.clicked.connect(self._stop_generation)
@@ -562,15 +466,24 @@ class ChatWidget(PluginMainWidget):
         self.runtime_target_combo.currentIndexChanged.connect(
             self._on_runtime_target_changed
         )
-        self.prompt_preset_combo.currentIndexChanged.connect(
-            self._on_prompt_preset_changed
-        )
         self._tab_widget.currentChanged.connect(self._on_current_tab_changed)
         self._sync_session_controls()
 
         # Start the worker thread and fetch available models
         self._thread.start()
         self.sig_list_models.emit()
+
+    def resizeEvent(self, event):
+        """Switch the action row between labelled and icon-only buttons."""
+        super().resizeEvent(event)
+        self._apply_action_row_style(event.size().width())
+
+    def _apply_action_row_style(self, panel_width):
+        """Apply the responsive tool-button style to the action row."""
+        style = action_row_button_style(panel_width)
+        for button in getattr(self, "_action_row_buttons", ()):
+            if button.toolButtonStyle() != style:
+                button.setToolButtonStyle(style)
 
     def update_actions(self):
         """Called by Spyder when the widget gains/loses focus.
@@ -579,41 +492,6 @@ class ChatWidget(PluginMainWidget):
         actions to update.
         """
         pass
-
-    def _populate_prompt_preset_combo(self):
-        """Fill the shared preset selector with built-in prompt presets."""
-        self.prompt_preset_combo.blockSignals(True)
-        self.prompt_preset_combo.clear()
-        for preset in list_chat_prompt_presets():
-            self.prompt_preset_combo.addItem(preset["label"], preset["id"])
-            index = self.prompt_preset_combo.count() - 1
-            self.prompt_preset_combo.setItemData(
-                index,
-                preset["description"],
-                Qt.ToolTipRole,
-            )
-        self.prompt_preset_combo.blockSignals(False)
-
-    def _sync_prompt_preset_combo(self, session=None):
-        """Reflect the active session preset in the shared combo box."""
-        if session is None:
-            session = self._active_session
-
-        preset = get_chat_prompt_preset(
-            getattr(session, "prompt_preset_id", None)
-        )
-        combo_index = 0
-        for index in range(self.prompt_preset_combo.count()):
-            if self.prompt_preset_combo.itemData(index) == preset["id"]:
-                combo_index = index
-                break
-
-        self.prompt_preset_combo.blockSignals(True)
-        self.prompt_preset_combo.setCurrentIndex(combo_index)
-        self.prompt_preset_combo.setToolTip(
-            f"{preset['label']}: {preset['description']}"
-        )
-        self.prompt_preset_combo.blockSignals(False)
 
     def _sync_chat_settings_button(self, session=None):
         """Reflect assistant settings entrypoint and active tab overrides."""
@@ -628,9 +506,11 @@ class ChatWidget(PluginMainWidget):
             return
 
         metadata = self._chat_option_metadata(session)
+        mode = get_chat_prompt_preset(getattr(session, "prompt_preset_id", None))
         has_override = (
             metadata["temperature_source"] == "override"
             or metadata["num_predict_source"] == "override"
+            or mode["id"] != normalize_chat_prompt_preset(None)
         )
         self.chat_settings_btn.setText("Settings*" if has_override else "Settings")
         self.chat_settings_btn.setToolTip(
@@ -654,14 +534,15 @@ class ChatWidget(PluginMainWidget):
             "Open chat history and session actions.\n"
             f"Scope: {scope_label}\n"
             f"Active tab: {active_title}\n"
-            f"Saved sessions: {len(self._history_sessions or [])}"
+            f"Saved sessions: {len(self._session_ctrl.history_sessions)}"
         )
 
     def _sync_session_controls(self, session=None):
         """Refresh the shared per-tab controls from the active session."""
-        self._sync_prompt_preset_combo(session=session)
         self._sync_chat_settings_button(session=session)
         self._sync_session_menu_button(session=session)
+        if hasattr(self, "send_btn"):
+            self._sync_send_controls()
 
     def _on_current_tab_changed(self, index):
         """Update shared tab-scoped controls when the active tab changes."""
@@ -674,45 +555,6 @@ class ChatWidget(PluginMainWidget):
         if isinstance(payload, dict):
             return dict(payload)
         return {}
-
-    @staticmethod
-    def _format_model_display(payload):
-        """Return the provider-aware combo-box label for one model."""
-        provider_label = payload.get("provider_label", "Provider")
-        name = payload.get("name", "")
-        parameter_size = payload.get("parameter_size", "")
-        size_gb = payload.get("size_gb", 0) or 0
-
-        details = []
-        if parameter_size:
-            details.append(str(parameter_size))
-        if size_gb:
-            details.append(f"{size_gb}GB")
-        if details:
-            return f"[{provider_label}] {name} ({', '.join(details)})"
-        return f"[{provider_label}] {name}"
-
-    @staticmethod
-    def _format_model_tooltip(payload):
-        """Return the detailed tooltip for one provider-aware model entry."""
-        lines = [
-            f"Provider: {payload.get('provider_label', 'unknown')}",
-            f"Kind: {payload.get('provider_kind', payload.get('provider_id', 'unknown'))}",
-            f"Model: {payload.get('name', '')}",
-            f"Family: {payload.get('family', 'unknown') or 'unknown'}",
-            (
-                "Parameters: "
-                f"{payload.get('parameter_size', 'unknown') or 'unknown'}"
-            ),
-            (
-                "Quantization: "
-                f"{payload.get('quantization', 'unknown') or 'unknown'}"
-            ),
-            f"Size: {payload.get('size_gb', 0) or 0} GB",
-        ]
-        if payload.get("endpoint"):
-            lines.append(f"Endpoint: {payload.get('endpoint', '')}")
-        return "\n".join(lines)
 
     def _current_model_export_name(self):
         """Return the provider-aware model label used in exports/logging."""
@@ -733,17 +575,7 @@ class ChatWidget(PluginMainWidget):
 
     def _provider_profiles(self):
         """Return normalized provider profiles from config."""
-        return normalize_provider_profiles(
-            self.get_conf("provider_profiles", default="[]"),
-            legacy_base_url=self.get_conf(
-                "openai_compatible_base_url",
-                default="",
-            ),
-            legacy_api_key=self.get_conf(
-                "openai_compatible_api_key",
-                default="",
-            ),
-        )
+        return self._assistant_settings().provider_profiles_list()
 
     def _build_provider_diagnostics_tooltip(self):
         """Render the latest provider diagnostics as a tooltip block."""
@@ -767,7 +599,10 @@ class ChatWidget(PluginMainWidget):
     def _sync_provider_status_label(self, models_available=None):
         """Refresh the status-label summary from provider diagnostics."""
         if models_available is None:
-            models_available = self.model_combo.count() > 0
+            # The combo always holds one row (a placeholder while loading or
+            # when discovery found nothing), so count() is not a signal of
+            # availability. Use the discovered payloads instead.
+            models_available = bool(self._available_model_payloads)
         diagnostics = list(self._provider_diagnostics)
         error_count = sum(
             1 for record in diagnostics if record.get("status") == "error"
@@ -788,7 +623,30 @@ class ChatWidget(PluginMainWidget):
     @property
     def _active_session(self):
         """The ChatSession for the currently visible tab."""
-        return self._sessions.get_for_widget(self._tab_widget.currentWidget())
+        if self._session_ctrl is None:
+            return None
+        return self._session_ctrl.active_session
+
+    @property
+    def _generating(self):
+        """Return whether one assistant response is in flight."""
+        if self._turn_ctrl is None:
+            return False
+        return self._turn_ctrl.generating
+
+    @property
+    def _generating_session(self):
+        """Return the session receiving streamed assistant output."""
+        if self._turn_ctrl is None:
+            return None
+        return self._turn_ctrl.generating_session
+
+    @property
+    def _pending_turn(self):
+        """Return the current hidden runtime-loop state."""
+        if self._turn_ctrl is None:
+            return None
+        return self._turn_ctrl.pending_turn
 
     @property
     def chat_display(self):
@@ -811,36 +669,7 @@ class ChatWidget(PluginMainWidget):
         Args:
             index: Tab index to close.
         """
-        # Don't close the last tab — always keep at least one
-        if self._tab_widget.count() <= 1:
-            session = self._sessions.get_for_index(self._tab_widget, index)
-            if session and session.messages:
-                self._history_sessions = merge_chat_session_history(
-                    [session.to_state()],
-                    self._history_sessions,
-                )
-            self._clear_all_tabs()
-            self._add_new_tab(notify=False)
-            self._notify_session_state_changed("tab-clear")
-            return
-
-        # Don't close a tab that's currently generating
-        session = self._sessions.get_for_index(self._tab_widget, index)
-        if session is self._generating_session:
-            return
-
-        if session and session.messages:
-            self._history_sessions = merge_chat_session_history(
-                [session.to_state()],
-                self._history_sessions,
-            )
-
-        # Remove the tab and clean up the session
-        widget = self._tab_widget.widget(index)
-        self._tab_widget.removeTab(index)
-        self._sessions.remove_for_widget(widget)
-        widget.deleteLater()
-        self._notify_session_state_changed("tab-close")
+        self._session_ctrl.close_tab(index)
 
     # --- Worker signal handlers (called on main thread) ---
 
@@ -863,14 +692,21 @@ class ChatWidget(PluginMainWidget):
         Strips <think>...</think> blocks from the saved history.
         """
         session = self._generating_session
-        clean_text = self._strip_thinking(full_text)
-        runtime_request = parse_runtime_request(clean_text)
+        action, payload = self._turn_ctrl.process_response(full_text, session)
 
-        if session and runtime_request is not None:
-            if self._handle_runtime_request(session, runtime_request):
-                return
+        if action == "error":
+            self._on_error(payload)
+            return
 
-        if session and not clean_text.strip():
+        if action == "runtime_continue":
+            self._dispatch_messages(
+                session,
+                payload,
+                tool_calls=self._turn_ctrl.pending_tool_calls,
+            )
+            return
+
+        if session and action == "empty":
             logger.warning(
                 "Chat model %s/%s returned an empty response",
                 self._current_provider or "<provider>",
@@ -881,7 +717,7 @@ class ChatWidget(PluginMainWidget):
                 "The selected chat model returned an empty response. "
                 "Try another chat model."
             )
-            self._pending_turn = None
+            self._turn_ctrl.finish_turn()
             self._set_generating(False)
             self.status_label.setText("Empty response")
             return
@@ -889,13 +725,13 @@ class ChatWidget(PluginMainWidget):
         if session:
             session.display.finish_assistant_message()
             session.messages.append({
-                "role": "assistant", "content": clean_text
+                "role": "assistant", "content": payload
             })
             session.touch()
             self._refresh_session_title(session)
             self._notify_session_state_changed("assistant-response")
 
-        self._pending_turn = None
+        self._turn_ctrl.finish_turn()
         self._set_generating(False)
 
         # Display generation speed if metrics are available
@@ -916,22 +752,20 @@ class ChatWidget(PluginMainWidget):
         ]
         previous = self.model_combo.currentData()
 
+        populate_model_combo(
+            self.model_combo,
+            self._available_model_payloads,
+            placeholder="No models — open Settings",
+        )
+        self.model_combo.setEnabled(bool(self._available_model_payloads))
         self.model_combo.blockSignals(True)
-        self.model_combo.clear()
-        for m in models:
-            payload = dict(m)
-            display = self._format_model_display(payload)
-            self.model_combo.addItem(display, payload)
-            idx = self.model_combo.count() - 1
-            self.model_combo.setItemData(
-                idx,
-                self._format_model_tooltip(payload),
-                Qt.ToolTipRole,
-            )
-        self._select_default_model(previous)
-        self.model_combo.blockSignals(False)
+        try:
+            self._select_default_model(previous)
+        finally:
+            self.model_combo.blockSignals(False)
 
         self._on_model_changed(self.model_combo.currentIndex())
+        self._sync_send_controls()
         self._sync_provider_status_label(models_available=bool(models))
         if self._assistant_settings_dialog is not None:
             self._assistant_settings_dialog.replace_models(
@@ -952,7 +786,7 @@ class ChatWidget(PluginMainWidget):
         if session:
             session.display.finish_assistant_message()
             session.display.append_error(message)
-        self._pending_turn = None
+        self._turn_ctrl.finish_turn()
         self._set_generating(False)
         self.status_label.setText("Error")
         self.status_label.setToolTip(self._build_provider_diagnostics_tooltip())
@@ -991,11 +825,10 @@ class ChatWidget(PluginMainWidget):
 
     def _stop_generation(self):
         """Abort the current LLM generation."""
-        self._worker.abort()
         session = self._generating_session
+        self._turn_ctrl.abort_generation()
         if session:
             session.display.finish_assistant_message()
-        self._pending_turn = None
         self._set_generating(False)
         self.status_label.setText("Stopped")
 
@@ -1008,7 +841,7 @@ class ChatWidget(PluginMainWidget):
         session = self._active_session
         if session is None or not session.messages:
             if session:
-                session.display.append_error("No messages to export.")
+                session.display.append_info("No messages to export.")
             return
 
         model_short = self._current_model.split("/")[-1].split(":")[0]
@@ -1065,7 +898,7 @@ class ChatWidget(PluginMainWidget):
         self._current_provider_profile_id = payload.get("profile_id", "")
         self._current_model = payload.get("name", "")
         if payload:
-            self.model_combo.setToolTip(self._format_model_tooltip(payload))
+            self.model_combo.setToolTip(format_model_tooltip(payload))
             preferred_kind = payload.get(
                 "provider_kind",
                 self.get_conf("chat_provider", default="ollama"),
@@ -1082,19 +915,20 @@ class ChatWidget(PluginMainWidget):
                 self.set_conf("chat_provider", preferred_kind)
             if self.get_conf("chat_model", default="") != self._current_model:
                 self.set_conf("chat_model", self._current_model)
+        # Send/Regenerate depend on a real model being selected, so every
+        # selection change (manual or programmatic) re-evaluates them.
+        self._sync_send_controls()
 
     # --- Appearance config keys that map to ChatDisplay.update_appearance ---
-    _APPEARANCE_KEYS = (
-        "chat_font_family", "chat_font_size", "chat_line_height",
-        "code_font_family", "code_font_size",
-        "pygments_style_dark", "pygments_style_light",
-        "bubble_padding", "bubble_border_radius", "bubble_spacing",
-        "theme_preset", "theme_color_overrides",
-    )
+    _APPEARANCE_KEYS = ASSISTANT_APPEARANCE_KEYS
+
+    def _initialize_session(self, session):
+        """Attach widget-owned signal wiring to one chat session."""
+        session.display.sig_apply_code_requested.connect(self.sig_apply_code)
 
     def _apply_current_appearance(self, display):
         """Apply all current appearance config values to one ChatDisplay."""
-        kwargs = {}
+        kwargs = {"is_dark": is_dark_interface()}
         for key in self._APPEARANCE_KEYS:
             try:
                 kwargs[key] = self.get_conf(key)
@@ -1110,12 +944,14 @@ class ChatWidget(PluginMainWidget):
         changes appearance settings (font, code font, bubble geometry, etc.).
         Iterates all chat sessions and calls update_appearance on each display.
         """
-        for session in self._sessions._by_widget.values():
+        for session in self._session_ctrl.ordered_sessions():
             session.display.update_appearance(**kwargs)
 
     def sync_model_selection_from_conf(self):
         """Apply the configured provider/model preference without relisting."""
-        if self.model_combo.count() <= 0:
+        if not self._available_model_payloads:
+            # Only the placeholder row exists: nothing to select yet, so
+            # push the new settings to the worker and let discovery relist.
             self.update_chat_provider_settings()
             return False
 
@@ -1127,41 +963,9 @@ class ChatWidget(PluginMainWidget):
         self._on_model_changed(self.model_combo.currentIndex())
         return True
 
-    def _on_prompt_preset_changed(self, index):
-        """Persist the selected prompt preset on the active session."""
-        del index
-        session = self._active_session
-        if session is None:
-            return
-
-        preset_id = normalize_chat_prompt_preset(
-            self.prompt_preset_combo.currentData()
-        )
-        if session.prompt_preset_id == preset_id:
-            self._sync_prompt_preset_combo(session)
-            return
-
-        session.prompt_preset_id = preset_id
-        session.touch()
-        preset = get_chat_prompt_preset(preset_id)
-        logger.info(
-            "Chat prompt preset set to %s for session %s",
-            preset["label"],
-            session.session_id,
-        )
-        self._sync_prompt_preset_combo(session)
-        self._notify_session_state_changed("prompt-preset")
-
     def _chat_default_options(self):
         """Return the normalized global chat defaults from preferences."""
-        return {
-            "temperature": normalize_chat_temperature(
-                self._chat_temperature_conf_value()
-            ),
-            "num_predict": normalize_chat_max_tokens(
-                self.get_conf("max_tokens", default=1024)
-            ),
-        }
+        return self._assistant_settings().chat_default_options()
 
     def _discovered_models_snapshot(self):
         """Return the latest provider-aware model payloads for settings UI."""
@@ -1177,109 +981,19 @@ class ChatWidget(PluginMainWidget):
 
     def _assistant_settings_snapshot(self):
         """Return the global assistant settings exposed from the pane."""
-        return {
-            "ollama_host": self.get_conf(
-                "ollama_host",
-                default="http://localhost:11434",
-            ),
-            "chat_provider": self.get_conf("chat_provider", default="ollama"),
-            "chat_provider_profile_id": self.get_conf(
-                "chat_provider_profile_id",
-                default="",
-            ),
-            "chat_model": self.get_conf(
-                "chat_model",
-                default="gpt-oss-20b-abliterated",
-            ),
-            "completion_model": self.get_conf("completion_model", default=""),
-            "chat_temperature": self._chat_temperature_conf_value(),
-            "max_tokens": normalize_chat_max_tokens(
-                self.get_conf("max_tokens", default=1024)
-            ),
-            "completions_enabled": bool(
-                self.get_conf("completions_enabled", default=True)
-            ),
-            "completion_temperature": float(
-                self.get_conf("completion_temperature", default=0.15) or 0.15
-            ),
-            "completion_max_tokens": int(
-                self.get_conf("completion_max_tokens", default=256) or 256
-            ),
-            "debounce_ms": int(self.get_conf("debounce_ms", default=300) or 300),
-            "completion_shortcut": self.get_conf(
-                "completion_shortcut",
-                default="Ctrl+Shift+Space",
-            ),
-            "completion_accept_word_shortcut": self.get_conf(
-                "completion_accept_word_shortcut",
-                default="Alt+Right",
-            ),
-            "completion_accept_line_shortcut": self.get_conf(
-                "completion_accept_line_shortcut",
-                default="Alt+Shift+Right",
-            ),
-            "chat_system_prompt": self.get_conf(
-                "chat_system_prompt",
-                default="",
-            ),
-            "prompt_explain": self.get_conf("prompt_explain", default=""),
-            "prompt_fix": self.get_conf("prompt_fix", default=""),
-            "prompt_docstring": self.get_conf("prompt_docstring", default=""),
-            "prompt_ask": self.get_conf("prompt_ask", default=""),
-            # Appearance
-            "chat_font_family": self.get_conf(
-                "chat_font_family", default="sans-serif",
-            ),
-            "chat_font_size": int(
-                self.get_conf("chat_font_size", default=10) or 10
-            ),
-            "chat_line_height": float(
-                self.get_conf("chat_line_height", default=1.5) or 1.5
-            ),
-            "code_font_family": self.get_conf(
-                "code_font_family", default="Courier New",
-            ),
-            "code_font_size": int(
-                self.get_conf("code_font_size", default=9) or 9
-            ),
-            "pygments_style_dark": self.get_conf(
-                "pygments_style_dark", default="monokai",
-            ),
-            "pygments_style_light": self.get_conf(
-                "pygments_style_light", default="default",
-            ),
-            "bubble_padding": int(
-                self.get_conf("bubble_padding", default=12) or 12
-            ),
-            "bubble_border_radius": int(
-                self.get_conf("bubble_border_radius", default=8) or 8
-            ),
-            "bubble_spacing": int(
-                self.get_conf("bubble_spacing", default=4) or 4
-            ),
-            # Theme
-            "theme_preset": self.get_conf(
-                "theme_preset", default="default",
-            ),
-            "theme_color_overrides": self.get_conf(
-                "theme_color_overrides", default="{}",
-            ),
-            # Behavior
-            "idle_completion_delay_ms": int(
-                self.get_conf("idle_completion_delay_ms", default=1000) or 1000
-            ),
-            "post_accept_completion_delay_ms": int(
-                self.get_conf(
-                    "post_accept_completion_delay_ms", default=75,
-                ) or 75
-            ),
-        }
+        return self._assistant_settings().to_conf_dict()
+
+    def _assistant_settings(self):
+        """Return the current assistant settings as one normalized snapshot."""
+        return AssistantSettings.from_conf(self.get_conf)
 
     def _create_assistant_settings_dialog(self):
         """Build the global assistant settings dialog from current state."""
         dialog = AssistantSettingsDialog(
             models=self._discovered_models_snapshot(),
             settings=self._assistant_settings_snapshot(),
+            mcp_status=self._mcp_server_status_snapshot(),
+            mcp_client_launcher=self._mcp_client_launcher,
             parent=self,
         )
         dialog.manage_profiles_requested.connect(
@@ -1296,14 +1010,16 @@ class ChatWidget(PluginMainWidget):
 
     def _apply_assistant_settings(self, settings):
         """Persist the global assistant settings exposed from the pane."""
-        settings = dict(settings or {})
-        current = self._assistant_settings_snapshot()
+        current = self._assistant_settings()
+        updated = AssistantSettings.from_mapping(settings)
+        current_dict = current.to_conf_dict()
+        updated_dict = updated.to_conf_dict()
         changed_provider = False
         changed_model = False
         changed_any = False
 
-        for key, value in settings.items():
-            if current.get(key) == value:
+        for key, value in updated_dict.items():
+            if current_dict.get(key) == value:
                 continue
             self.set_conf(key, value)
             changed_any = True
@@ -1317,13 +1033,10 @@ class ChatWidget(PluginMainWidget):
 
         logger.info(
             "Saved assistant settings: provider=%s profile=%s chat_model=%s completion_model=%s",
-            settings.get("chat_provider", current.get("chat_provider", "")),
-            settings.get(
-                "chat_provider_profile_id",
-                current.get("chat_provider_profile_id", ""),
-            ) or "<none>",
-            settings.get("chat_model", current.get("chat_model", "")),
-            settings.get("completion_model", current.get("completion_model", "")),
+            updated.chat_provider,
+            updated.chat_provider_profile_id or "<none>",
+            updated.chat_model,
+            updated.completion_model,
         )
 
         if changed_provider:
@@ -1348,15 +1061,7 @@ class ChatWidget(PluginMainWidget):
 
     def _chat_temperature_conf_value(self):
         """Return one safe config-backed chat temperature source value."""
-        try:
-            return self.get_conf("chat_temperature", default=5)
-        except (TypeError, ValueError) as error:
-            logger.warning(
-                "Invalid chat_temperature config value; resetting to 5 (0.5): %s",
-                error,
-            )
-            self.set_conf("chat_temperature", 5)
-            return 5
+        return self._assistant_settings().chat_temperature
 
     def _chat_option_metadata(self, session=None):
         """Return resolved request options plus source metadata for one tab."""
@@ -1398,8 +1103,28 @@ class ChatWidget(PluginMainWidget):
             session_title=getattr(session, "title", ""),
             defaults=self._chat_default_options(),
             overrides=overrides,
+            prompt_preset_id=getattr(session, "prompt_preset_id", None),
             parent=self,
         )
+
+    def set_prompt_preset(self, preset_id, session=None):
+        """Set the chat mode (prompt preset) of one tab; returns True on change."""
+        session = session or self._active_session
+        if session is None:
+            return False
+        normalized = normalize_chat_prompt_preset(preset_id)
+        if session.prompt_preset_id == normalized:
+            return False
+        session.prompt_preset_id = normalized
+        session.touch()
+        logger.info(
+            "Chat prompt preset set to %s for session %s",
+            get_chat_prompt_preset(normalized)["label"],
+            session.session_id,
+        )
+        self._sync_chat_settings_button(session)
+        self._notify_session_state_changed("prompt-preset")
+        return True
 
     def _apply_chat_settings(self, session, overrides):
         """Persist one set of per-tab inference overrides."""
@@ -1443,7 +1168,8 @@ class ChatWidget(PluginMainWidget):
             self._sync_chat_settings_button(session)
             return False
 
-        return self._apply_chat_settings(session, dialog.selected_overrides())
+        changed = self.set_prompt_preset(dialog.selected_prompt_preset_id(), session)
+        return self._apply_chat_settings(session, dialog.selected_overrides()) or changed
 
     # --- Public API (called by plugin) ---
 
@@ -1455,10 +1181,12 @@ class ChatWidget(PluginMainWidget):
                 empty dict if no editor is active.
         """
         self._context_provider = provider
+        if self._turn_ctrl is not None:
+            self._turn_ctrl.context_provider = provider
 
     def set_runtime_request_executor(self, executor):
         """Set the callable that executes one runtime inspection request."""
-        self._runtime_request_executor = executor
+        self._turn_ctrl.runtime_request_executor = executor
 
     def set_runtime_target_handler(self, handler):
         """Set the callable that changes the explicit runtime target shell."""
@@ -1466,11 +1194,19 @@ class ChatWidget(PluginMainWidget):
 
     def set_session_state_changed_callback(self, callback):
         """Set the callback invoked when chat session state changes."""
-        self._session_state_changed_callback = callback
+        self._session_ctrl.session_state_changed_callback = callback
 
     def set_session_scope_provider(self, provider):
         """Set the callable that returns the current history-browser scope."""
-        self._session_scope_provider = provider
+        self._session_ctrl.session_scope_provider = provider
+
+    def set_mcp_server_status_provider(self, provider):
+        """Set the callable that returns the embedded MCP server status."""
+        self._mcp_server_status_provider = provider
+
+    def set_mcp_client_launcher(self, launcher):
+        """Set the callable that launches one external MCP-aware client."""
+        self._mcp_client_launcher = launcher
 
     def update_toolbar_context(self, context_str):
         """Update the toolbar context label with the current file info.
@@ -1493,6 +1229,17 @@ class ChatWidget(PluginMainWidget):
             self._build_runtime_tooltip(detail=detail)
         )
         logger.debug("Updated runtime toolbar status: %s", label)
+
+    def _mcp_server_status_snapshot(self):
+        """Return the latest available MCP server status from the plugin."""
+        provider = self._mcp_server_status_provider
+        if not callable(provider):
+            return {}
+        try:
+            return dict(provider() or {})
+        except Exception:
+            logger.exception("Failed to fetch embedded MCP server status")
+            return {}
 
     def update_runtime_shell_targets(self, shell_records, selected_shell_id=""):
         """Refresh the runtime-target combo from the runtime service."""
@@ -1519,6 +1266,7 @@ class ChatWidget(PluginMainWidget):
                 break
         self.runtime_target_combo.setCurrentIndex(target_index)
         self.runtime_target_combo.blockSignals(False)
+        self.runtime_target_combo.setVisible(len(self._runtime_shells) > 1)
         logger.debug(
             "Updated runtime shell targets with %d option(s); selected=%s",
             len(self._runtime_shells),
@@ -1527,20 +1275,7 @@ class ChatWidget(PluginMainWidget):
 
     def _chat_provider_settings(self):
         """Return one snapshot of provider settings for the worker."""
-        return {
-            "ollama_host": self.get_conf(
-                "ollama_host", default="http://localhost:11434"
-            ),
-            "provider_profiles": self._provider_profiles(),
-            "openai_compatible_base_url": self.get_conf(
-                "openai_compatible_base_url",
-                default="",
-            ),
-            "openai_compatible_api_key": self.get_conf(
-                "openai_compatible_api_key",
-                default="",
-            ),
-        }
+        return self._assistant_settings().chat_provider_settings()
 
     def update_ollama_host(self, host):
         """Backward-compatible wrapper for chat-provider refreshes."""
@@ -1609,347 +1344,41 @@ class ChatWidget(PluginMainWidget):
 
     def serialize_session_state(self):
         """Return the current chat sessions as a persisted payload."""
-        sessions = self._serialize_open_sessions()
-        history = merge_chat_session_history(sessions, self._history_sessions)
-        self._history_sessions = list(history)
+        return self._session_ctrl.serialize_session_state()
 
-        return {
-            "active_index": max(0, self._tab_widget.currentIndex()),
-            "sessions": sessions,
-            "history": history,
-        }
+    def clear_all_tabs(self):
+        """Close every chat tab and forget its session (used before a restore)."""
+        self._session_ctrl.clear_all_tabs()
 
     def restore_session_state(self, state):
         """Restore tabs and messages from persisted state."""
-        if self._generating:
-            logger.warning(
-                "Skipping chat session restore while a response is generating"
-            )
-            return False
-
-        sessions = []
-        history = []
-        if isinstance(state, dict):
-            sessions = state.get("sessions", [])
-            history = state.get("history", [])
-
-        self._clear_all_tabs()
-        self._history_sessions = merge_chat_session_history(sessions, history)
-        if not sessions:
-            self._add_new_tab(notify=False)
-            return True
-
-        for session_state in sessions:
-            if not isinstance(session_state, dict):
-                continue
-            session = ChatSession(
-                parent=self._tab_widget,
-                title=session_state.get("title", ""),
-                messages=session_state.get("messages", []),
-                session_id=session_state.get("session_id"),
-                created_at=session_state.get("created_at"),
-                updated_at=session_state.get("updated_at"),
-                prompt_preset_id=session_state.get("prompt_preset_id"),
-                temperature_override=session_state.get("temperature_override"),
-                max_tokens_override=session_state.get("max_tokens_override"),
-            )
-            self._add_session(session, notify=False)
-            session.display.rebuild_from_messages(session.messages)
-
-        if self._tab_widget.count() == 0:
-            self._add_new_tab(notify=False)
-            return True
-
-        active_index = 0
-        if isinstance(state, dict):
-            active_index = state.get("active_index", 0)
-        if not isinstance(active_index, int):
-            active_index = 0
-        active_index = max(0, min(active_index, self._tab_widget.count() - 1))
-        self._tab_widget.setCurrentIndex(active_index)
-        return True
+        return self._session_ctrl.restore_session_state(state)
 
     # --- Internal helpers ---
 
     def _notify_session_state_changed(self, reason):
         """Notify the plugin layer that persisted session state changed."""
-        self._history_sessions = merge_chat_session_history(
-            self._serialize_open_sessions(),
-            self._history_sessions,
-        )
-        callback = self._session_state_changed_callback
-        if callback is None:
-            return
-
-        logger.debug("Chat session state changed: %s", reason)
-        callback()
+        self._session_ctrl.notify_session_state_changed(reason)
 
     def _add_session(self, session, notify=True):
         """Insert one chat session into the tab widget."""
-        session.display.sig_apply_code_requested.connect(
-            self.sig_apply_code
-        )
-
-        # Apply current appearance config to the new display so it
-        # matches the user's settings immediately.
-        self._apply_current_appearance(session.display)
-
-        idx = self._tab_widget.addTab(session.display, session.title)
-        self._sessions.add(session)
-        self._tab_widget.setCurrentIndex(idx)
-        logger.debug("New chat tab: %s (index %d)", session.title, idx)
-        if notify:
-            self._notify_session_state_changed("tab-add")
-        return session
-
-    def _serialize_open_sessions(self):
-        """Return the current visible tabs as persisted session records."""
-        sessions = []
-        for session in self._sessions.ordered_sessions(self._tab_widget):
-            sessions.append(session.to_state())
-        return sessions
-
-    def _clear_all_tabs(self):
-        """Remove all tabs and forget their tracked sessions."""
-        while self._tab_widget.count():
-            widget = self._tab_widget.widget(0)
-            self._tab_widget.removeTab(0)
-            self._sessions.remove_for_widget(widget)
-            widget.deleteLater()
+        return self._session_ctrl.add_session(session, notify=notify)
 
     def _refresh_session_title(self, session):
         """Keep the tab title aligned with the first visible user message."""
-        title = "Chat"
-        for msg in session.messages:
-            if msg.get("role") != "user":
-                continue
-            short = msg.get("content", "")[:30].strip()
-            if len(msg.get("content", "")) > 30:
-                short += "..."
-            title = short.replace("\n", " ") or "Chat"
-            break
-
-        if session.title == title:
-            return
-
-        session.title = title
-        index = self._sessions.index_of(self._tab_widget, session)
-        if index >= 0:
-            self._tab_widget.setTabText(index, title)
-
-    def _find_session_by_id(self, session_id):
-        """Return the currently open session with one persisted id."""
-        for session in self._sessions.ordered_sessions(self._tab_widget):
-            if session.session_id == session_id:
-                return session
-        return None
+        self._session_ctrl.refresh_session_title(session)
 
     def _session_scope_info(self):
         """Return metadata for the current chat history scope."""
-        if self._session_scope_provider is None:
-            return {"scope_label": "Global", "storage_path": ""}
-        try:
-            return dict(self._session_scope_provider() or {})
-        except Exception:
-            logger.exception("Failed to query chat session scope info")
-            return {"scope_label": "Global", "storage_path": ""}
-
-    def _create_history_browser_dialog(self):
-        """Build the modal history browser for the current persistence scope."""
-        open_session_ids = {
-            session.session_id
-            for session in self._sessions.ordered_sessions(self._tab_widget)
-        }
-        rows = build_chat_session_history_rows(
-            self._history_sessions,
-            open_session_ids=open_session_ids,
-        )
-        logger.info(
-            "Built chat history browser with %d saved session(s)",
-            len(rows),
-        )
-        return SessionHistoryDialog(
-            rows=rows,
-            scope_info=self._session_scope_info(),
-            parent=self,
-        )
+        return self._session_ctrl.session_scope_info()
 
     def _open_history_browser(self):
         """Open the saved-session history browser and apply one chosen action."""
-        dialog = self._create_history_browser_dialog()
-        logger.info(
-            "Opened chat history browser for %s scope",
-            self._session_scope_info().get("scope_label", "unknown"),
-        )
-        if dialog.exec_() != dialog.Accepted:
-            return
-
-        session_id = dialog.selected_session_id()
-        action = dialog.selected_action()
-        if not session_id or not action:
-            return
-
-        logger.info(
-            "History browser selected action '%s' for session %s",
-            action,
-            session_id,
-        )
-
-        if action == "open":
-            self._open_session_from_history(session_id, duplicate=False)
-        elif action == "duplicate":
-            self._open_session_from_history(session_id, duplicate=True)
-        elif action == "delete":
-            self._delete_session_from_history(session_id)
-
-    def _history_session_by_id(self, session_id):
-        """Return one saved history record by id."""
-        for session_state in self._history_sessions:
-            if session_state.get("session_id") == session_id:
-                return session_state
-        return None
-
-    def _open_session_from_history(self, session_id, duplicate=False):
-        """Reopen or duplicate one saved history session into the tab widget."""
-        session_state = self._history_session_by_id(session_id)
-        if session_state is None:
-            if self.chat_display:
-                self.chat_display.append_error("Saved chat session no longer exists.")
-            return False
-
-        if not duplicate:
-            existing = self._find_session_by_id(session_id)
-            if existing is not None:
-                index = self._sessions.index_of(self._tab_widget, existing)
-                if index >= 0:
-                    self._tab_widget.setCurrentIndex(index)
-                logger.info("Focused already-open chat session from history: %s", session_id)
-                return True
-
-        title = session_state.get("title", "")
-        if duplicate and title:
-            title = f"{title} (copy)"
-
-        session = ChatSession(
-            parent=self._tab_widget,
-            title=title,
-            messages=session_state.get("messages", []),
-            session_id=None if duplicate else session_state.get("session_id"),
-            created_at=None if duplicate else session_state.get("created_at"),
-            updated_at=None if duplicate else session_state.get("updated_at"),
-            prompt_preset_id=session_state.get("prompt_preset_id"),
-            temperature_override=session_state.get("temperature_override"),
-            max_tokens_override=session_state.get("max_tokens_override"),
-        )
-        self._add_session(session, notify=True)
-        session.display.rebuild_from_messages(session.messages)
-        if duplicate:
-            logger.info(
-                "Duplicated chat session from history: %s -> %s",
-                session_id,
-                session.session_id,
-            )
-        else:
-            logger.info("Reopened chat session from history: %s", session_id)
-        return True
-
-    def _delete_session_from_history(self, session_id):
-        """Delete one saved history session and close any matching open tab."""
-        open_session = self._find_session_by_id(session_id)
-        if open_session is self._generating_session:
-            if self.chat_display:
-                self.chat_display.append_error(
-                    "Stop the active response before deleting this session."
-                )
-            return False
-
-        updated_history, removed = remove_chat_session_from_history(
-            self._history_sessions,
-            session_id,
-        )
-        if not removed:
-            if self.chat_display:
-                self.chat_display.append_error("Saved chat session no longer exists.")
-            return False
-
-        self._history_sessions = updated_history
-
-        if open_session is not None:
-            index = self._sessions.index_of(self._tab_widget, open_session)
-            if index >= 0:
-                widget = self._tab_widget.widget(index)
-                self._tab_widget.removeTab(index)
-                self._sessions.remove_for_widget(widget)
-                widget.deleteLater()
-            if self._tab_widget.count() == 0:
-                self._add_new_tab(notify=False)
-
-        logger.info("Deleted chat session from history: %s", session_id)
-        self._notify_session_state_changed("history-delete")
-        return True
-
-    def _create_exchange_delete_dialog(self, session=None):
-        """Build the delete-exchange browser for the active session."""
-        session = session or self._active_session
-        rows = build_chat_exchange_rows(getattr(session, "messages", []))
-        logger.info(
-            "Built exchange delete browser with %d exchange(s) for session %s",
-            len(rows),
-            getattr(session, "session_id", "<unknown>"),
-        )
-        return ExchangeDeleteDialog(
-            rows=rows,
-            session_title=getattr(session, "title", ""),
-            parent=self,
-        )
+        return self._session_ctrl.open_history_browser()
 
     def _open_exchange_delete_dialog(self):
         """Open the delete-exchange browser for the active chat tab."""
-        session = self._active_session
-        if session is None or not session.messages:
-            if session:
-                session.display.append_error("No exchanges are available to delete.")
-            return False
-        if session is self._generating_session:
-            session.display.append_error(
-                "Stop the active response before deleting an exchange."
-            )
-            return False
-
-        dialog = self._create_exchange_delete_dialog(session)
-        logger.info(
-            "Opened exchange delete browser for session %s",
-            session.session_id,
-        )
-        if dialog.exec_() != dialog.Accepted:
-            return False
-
-        exchange_index = dialog.selected_exchange_index()
-        if exchange_index is None:
-            return False
-        return self._delete_exchange_from_session(session, exchange_index)
-
-    def _delete_exchange_from_session(self, session, exchange_index):
-        """Delete one selected exchange from a chat session."""
-        updated_messages, removed = delete_chat_exchange(
-            session.messages,
-            exchange_index,
-        )
-        if not removed:
-            session.display.append_error("The selected exchange no longer exists.")
-            return False
-
-        session.messages = updated_messages
-        session.touch()
-        session.display.rebuild_from_messages(session.messages)
-        self._refresh_session_title(session)
-        logger.info(
-            "Deleted exchange %d from session %s",
-            exchange_index + 1,
-            session.session_id,
-        )
-        self._notify_session_state_changed("exchange-delete")
-        return True
+        return self._session_ctrl.open_exchange_delete_dialog()
 
     def _send_prompt_text(self, text):
         """Append one user prompt to the active session and dispatch it."""
@@ -1991,14 +1420,7 @@ class ChatWidget(PluginMainWidget):
             )
             return False
 
-        self._generating_session = session
-        self._pending_turn = ChatTurnState(
-            session=session,
-            request_messages=list(request_messages),
-            tool_calls=tool_calls,
-        )
         session.display.start_assistant_message()
-        self._set_generating(True)
         options = self._chat_options(session)
         logger.info(
             "Dispatching chat request for session %s via %s/%s with options %s",
@@ -2007,19 +1429,23 @@ class ChatWidget(PluginMainWidget):
             self._current_model or "<model>",
             options,
         )
-        self.sig_send_chat.emit(
+        dispatched = self._turn_ctrl.dispatch_messages(
+            session,
+            request_messages,
             self._current_provider,
             self._current_model,
-            list(request_messages),
             options,
+            tool_calls=tool_calls,
         )
-        return True
+        if dispatched:
+            self._set_generating(True)
+        return dispatched
 
     def _build_request_messages(self, session):
         """Build the full request payload for the current chat session."""
-        return (
-            [{"role": "system", "content": self._build_system_prompt(session)}]
-            + session.messages
+        return self._turn_ctrl.build_request_messages(
+            session,
+            self._build_system_prompt(session),
         )
 
     def _build_system_prompt(self, session):
@@ -2038,7 +1464,7 @@ class ChatWidget(PluginMainWidget):
         system_prompt = (
             f"{system_prompt}\n\n"
             f"{build_chat_prompt_preset_block(preset_id)}\n\n"
-            f"{build_runtime_bridge_instructions()}"
+            f"{build_runtime_bridge_instructions(include_project_tools=bool(self.get_conf('project_tools_enabled', default=True)))}"
         )
         logger.debug(
             "Building chat system prompt with preset %s for session %s",
@@ -2073,27 +1499,17 @@ class ChatWidget(PluginMainWidget):
             return
 
         session = self._active_session
-        if session is None or not session.messages:
-            if session:
-                session.display.append_error("No conversation is available to regenerate.")
+        request_messages = self._turn_ctrl.regenerate_last_turn(
+            session,
+            self._build_system_prompt(session) if session is not None else "",
+        )
+        if request_messages is None:
             return
-
-        if session.messages and session.messages[-1].get("role") == "assistant":
-            session.messages.pop()
-
-        if not session.messages or session.messages[-1].get("role") != "user":
-            session.display.append_error(
-                "Regenerate needs a previous user message on this tab."
-            )
-            return
-
-        session.display.rebuild_from_messages(session.messages)
-        session.touch()
         logger.info("Regenerating the last assistant answer for the active chat tab")
         self._notify_session_state_changed("regenerate")
         self._dispatch_messages(
             session,
-            self._build_request_messages(session),
+            request_messages,
         )
 
     def _build_runtime_tooltip(self, detail=""):
@@ -2138,242 +1554,40 @@ class ChatWidget(PluginMainWidget):
         )
         self._runtime_target_handler(shell_id)
 
-    @staticmethod
-    def _strip_thinking(text):
-        """Remove <think>...</think> blocks from text.
-
-        Used to clean the assistant response before saving it to
-        conversation history. Thinking tokens are displayed in the UI
-        but shouldn't be sent back to the model in future turns.
-
-        Args:
-            text: Raw assistant response that may contain thinking blocks.
-
-        Returns:
-            Text with thinking blocks removed and leading whitespace stripped.
-        """
-        import re
-        cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-        return cleaned.lstrip("\n")
-
     def _set_generating(self, generating):
         """Update UI controls for generation-in-progress state."""
-        self._generating = generating
-        self.send_btn.setEnabled(not generating)
+        self.send_btn.setVisible(not generating)
+        self.stop_btn.setVisible(generating)
         self.stop_btn.setEnabled(generating)
         self.chat_input.setEnabled(not generating)
         self.session_btn.setEnabled(not generating)
         self.chat_settings_btn.setEnabled(not generating)
         self.debug_menu_btn.setEnabled(not generating)
-        self.regenerate_btn.setEnabled(not generating)
+        self._sync_send_controls()
         if generating:
             self.start_spinner()
         else:
             self.stop_spinner()
-            self._generating_session = None
-            self._pending_turn = None
+
+    def _sync_send_controls(self):
+        """Keep action availability aligned with the active session and input."""
+        ready = not self._generating and bool(self._current_model)
+        self.send_btn.setEnabled(ready and bool(self.chat_input.peek_text()))
+        session = self._active_session
+        self.regenerate_btn.setEnabled(ready and bool(
+            session and any(m.get("role") == "user" for m in session.messages)
+        ))
 
     def _select_default_model(self, previous=""):
-        """Select the best model in the combo box.
-
-        Priority: previous selection > configured default > first available.
-        """
-        if isinstance(previous, dict):
-            for i in range(self.model_combo.count()):
-                if self.model_combo.itemData(i) == previous:
-                    self.model_combo.setCurrentIndex(i)
-                    return
-
-        default_provider = self.get_conf("chat_provider", default="ollama")
-        default_profile_id = self.get_conf(
-            "chat_provider_profile_id",
-            default="",
-        )
-        default = self.get_conf(
-            "chat_model", default="gpt-oss-20b-abliterated"
-        )
-        for i in range(self.model_combo.count()):
-            payload = self.model_combo.itemData(i)
-            if not isinstance(payload, dict):
-                continue
-            if payload.get("name") != default:
-                continue
-            provider_kind = payload.get("provider_kind", payload.get("provider_id", ""))
-            if provider_kind != default_provider:
-                continue
-            if (
-                provider_kind == PROVIDER_KIND_OPENAI_COMPATIBLE
-                and default_profile_id
-                and payload.get("profile_id") != default_profile_id
-            ):
-                continue
-            self.model_combo.setCurrentIndex(i)
-            return
-
-        if default_provider == PROVIDER_KIND_OPENAI_COMPATIBLE and default_profile_id:
-            for i in range(self.model_combo.count()):
-                payload = self.model_combo.itemData(i)
-                if not isinstance(payload, dict):
-                    continue
-                if payload.get("provider_kind") != PROVIDER_KIND_OPENAI_COMPATIBLE:
-                    continue
-                if payload.get("profile_id") != default_profile_id:
-                    continue
-                self.model_combo.setCurrentIndex(i)
-                return
-
-        for i in range(self.model_combo.count()):
-            payload = self.model_combo.itemData(i)
-            if isinstance(payload, dict) and payload.get("name") == default:
-                self.model_combo.setCurrentIndex(i)
-                return
-
-        if self.model_combo.count() > 0:
-            self.model_combo.setCurrentIndex(0)
-
-    def _handle_runtime_request(self, session, runtime_request):
-        """Execute an internal runtime request and continue the turn."""
-        session.display.discard_assistant_message()
-
-        if self._pending_turn is None or self._pending_turn.session is not session:
-            logger.warning("Missing pending turn state for runtime request")
-            return False
-
-        logger.info(
-            "Intercepted runtime request from model: %s",
-            runtime_request.get("tool", "runtime.unknown"),
-        )
-
-        if not runtime_request.get("valid"):
-            logger.warning(
-                "Rejected malformed runtime request: %s",
-                runtime_request.get("error", "unknown error"),
-            )
-            return self._continue_after_runtime_observation(
-                session,
-                runtime_request,
-                {
-                    "ok": False,
-                    "tool": "runtime.invalid_request",
-                    "source": "unavailable",
-                    "shell_status": "unavailable",
-                    "shell_detail": "",
-                    "working_directory": "",
-                    "last_refreshed_at": "",
-                    "payload": {},
-                    "query_note": "",
-                    "error": runtime_request.get(
-                        "error", "Malformed runtime request."
-                    ),
-                },
-            )
-
-        if self._runtime_request_executor is None:
-            logger.warning(
-                "Runtime request executor is unavailable for tool %s",
-                runtime_request["tool"],
-            )
-            return self._continue_after_runtime_observation(
-                session,
-                runtime_request,
-                {
-                    "ok": False,
-                    "tool": runtime_request["tool"],
-                    "source": "unavailable",
-                    "shell_status": "unavailable",
-                    "shell_detail": "",
-                    "working_directory": "",
-                    "last_refreshed_at": "",
-                    "payload": {},
-                    "query_note": "",
-                    "error": "Runtime inspection is not currently available.",
-                },
-            )
-
-        if self._pending_turn.tool_calls >= MAX_RUNTIME_TOOL_CALLS_PER_TURN:
-            logger.warning(
-                "Runtime request limit reached for this turn (%d)",
-                MAX_RUNTIME_TOOL_CALLS_PER_TURN,
-            )
-            return self._continue_after_runtime_observation(
-                session,
-                runtime_request,
-                {
-                    "ok": False,
-                    "tool": runtime_request["tool"],
-                    "source": "unavailable",
-                    "shell_status": "unavailable",
-                    "shell_detail": "",
-                    "working_directory": "",
-                    "last_refreshed_at": "",
-                    "payload": {},
-                    "query_note": "",
-                    "error": (
-                        "Runtime inspection limit reached for this turn. "
-                        "Answer with the available information."
-                    ),
-                },
-            )
-
-        self.status_label.setText("Inspecting runtime...")
-        try:
-            result = self._runtime_request_executor(runtime_request)
-        except Exception as error:
-            logger.exception(
-                "Runtime request executor crashed for tool %s",
-                runtime_request["tool"],
-            )
-            result = {
-                "ok": False,
-                "tool": runtime_request["tool"],
-                "source": "unavailable",
-                "shell_status": "unavailable",
-                "shell_detail": "",
-                "working_directory": "",
-                "last_refreshed_at": "",
-                "payload": {},
-                "query_note": "",
-                "error": f"Runtime inspection failed: {error}",
-            }
-        logger.info(
-            "Runtime request %s completed (ok=%s, source=%s)",
-            runtime_request["tool"],
-            result.get("ok"),
-            result.get("source", ""),
-        )
-        self._pending_turn.tool_calls += 1
-        return self._continue_after_runtime_observation(
-            session,
-            runtime_request,
-            result,
-        )
-
-    def _continue_after_runtime_observation(self, session, runtime_request, result):
-        """Append a hidden runtime observation and continue the same turn."""
-        if self._pending_turn is None or self._pending_turn.session is not session:
-            return False
-
-        observation = format_runtime_observation(runtime_request, result)
-        logger.info(
-            "Continuing chat turn after runtime observation for %s (tool call %d/%d)",
-            runtime_request.get("tool", "runtime.unknown"),
-            self._pending_turn.tool_calls,
-            MAX_RUNTIME_TOOL_CALLS_PER_TURN,
-        )
-        self._pending_turn.request_messages.extend([
-            {
-                "role": "assistant",
-                "content": runtime_request.get("raw_text", ""),
-            },
-            {
-                "role": "user",
-                "content": observation,
-            },
-        ])
-        return self._dispatch_messages(
-            session,
-            self._pending_turn.request_messages,
-            tool_calls=self._pending_turn.tool_calls,
+        """Select the best model row: previous selection, then configured
+        default (provider/profile aware), then first available."""
+        settings = self._assistant_settings()
+        select_model(
+            self.model_combo,
+            name=settings.chat_model,
+            provider_kind=settings.chat_provider,
+            profile_id=settings.chat_provider_profile_id,
+            previous=previous if isinstance(previous, dict) else None,
         )
 
     # --- Cleanup ---

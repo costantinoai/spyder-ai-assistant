@@ -7,11 +7,20 @@ All methods are synchronous (blocking).
 """
 
 import logging
+import time
 
 import httpx
+
+from spyder_ai_assistant.utils.provider_profiles import compatible_api_url
 from ollama import Client
 
 logger = logging.getLogger(__name__)
+
+# How long Ollama keeps the model resident after a request. Ollama's default
+# is five minutes, after which the next completion pays a full model load
+# (several seconds for a 9 GB model). Inline completions are bursty with
+# long idle gaps, so keep the model warm for a full working session.
+MODEL_KEEP_ALIVE = "30m"
 
 
 def _blank_line_after_complete_statement(prefix):
@@ -233,6 +242,7 @@ class OllamaClient:
             messages=messages,
             stream=True,
             options=options or {},
+            keep_alive=MODEL_KEEP_ALIVE,
         )
         for chunk in stream:
             result = {
@@ -253,6 +263,40 @@ class OllamaClient:
                     chunk, "prompt_eval_count", 0
                 ) or 0
             yield result
+
+    def close(self):
+        """Release the underlying HTTP connection pool."""
+        inner = getattr(self._client, "_client", None)
+        closer = getattr(inner, "close", None) or getattr(self._client, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception as error:  # pragma: no cover - best effort
+                logger.debug("Ignoring Ollama client close error: %s", error)
+
+    def warm_up(self, model):
+        """Load ``model`` into memory so the first real request is fast.
+
+        Ollama treats a generate call with an empty prompt as "load the
+        model and return"; nothing is generated. Returns the elapsed
+        seconds. Raises on connection or model errors so the caller can
+        surface them.
+        """
+        started = time.monotonic()
+        self._client.generate(
+            model=model,
+            prompt="",
+            stream=False,
+            keep_alive=MODEL_KEEP_ALIVE,
+        )
+        elapsed = time.monotonic() - started
+        logger.info(
+            "Ollama model warm-up complete: host=%s model=%s elapsed=%.2fs",
+            self._host,
+            model,
+            elapsed,
+        )
+        return elapsed
 
     def generate_completion(self, model, prefix, suffix="",
                             system=None, options=None, single_line=False):
@@ -328,6 +372,7 @@ class OllamaClient:
                     system=default_system,
                     options=merged_options,
                     stream=False,
+                    keep_alive=MODEL_KEEP_ALIVE,
                 )
                 logger.info(
                     "Ollama completion response received via FIM: model=%s chars=%d",
@@ -407,6 +452,7 @@ class OllamaClient:
             system=default_system,
             options=merged_options,
             stream=False,
+            keep_alive=MODEL_KEEP_ALIVE,
         )
         response_text = getattr(response, "response", "") or ""
         logger.info(
@@ -453,6 +499,7 @@ class OllamaClient:
             messages=messages,
             options=options,
             stream=False,
+            keep_alive=MODEL_KEEP_ALIVE,
         )
         message = getattr(response, "message", None)
         if message is None and isinstance(response, dict):
@@ -473,10 +520,17 @@ class OpenAICompatibleCompletionClient:
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         self._client = httpx.Client(
-            base_url=f"{self._base_url}/v1",
+            base_url=compatible_api_url(self._base_url),
             headers=headers,
             timeout=30.0,
         )
+
+    def close(self):
+        """Release the underlying HTTP connection pool."""
+        try:
+            self._client.close()
+        except Exception as error:  # pragma: no cover - best effort
+            logger.debug("Ignoring compatible client close error: %s", error)
 
     def generate_completion(
         self,

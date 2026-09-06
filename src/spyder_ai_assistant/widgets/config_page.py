@@ -19,9 +19,12 @@ class AIChatConfigPage(PluginConfigPage):
         body = QLabel(
             "Use the AI Chat pane and open <b>Settings</b>. "
             "<b>Assistant Settings...</b> now holds chat/completion models, "
-            "generation defaults, prompts, and shortcuts. "
+            "generation defaults, prompts, shortcuts, and the embedded MCP "
+            "server settings. "
             "Use <b>Settings → Provider Profiles...</b> there to manage "
-            "recognized OpenAI-compatible endpoints."
+            "recognized OpenAI-compatible endpoints. "
+            "The MCP tab includes copy-ready setup snippets and one-click "
+            "launch buttons for Claude Code, Codex, and OpenCode."
         )
         body.setWordWrap(True)
 

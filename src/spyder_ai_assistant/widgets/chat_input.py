@@ -11,7 +11,7 @@ from qtpy.QtWidgets import QPlainTextEdit
 
 # Height limits for the auto-resizing input area.
 # MIN = single line + padding, MAX = ~6 lines before scrolling kicks in.
-_MIN_HEIGHT = 36
+_MIN_HEIGHT = 56
 _MAX_HEIGHT = 150
 
 
@@ -31,8 +31,10 @@ class ChatInput(QPlainTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setPlaceholderText(
-            "Type a message... (Shift+Enter for newline)"
+            "Ask about your code…"
         )
+        self.setAccessibleName("Message to AI assistant")
+        self.setToolTip("Enter to send · Shift+Enter for a new line")
         self.setMaximumHeight(_MAX_HEIGHT)
         self.setMinimumHeight(_MIN_HEIGHT)
 
@@ -48,7 +50,14 @@ class ChatInput(QPlainTextEdit):
         This gives a smooth grow/shrink as the user types or deletes lines.
         """
         # Document height = content height in pixels
-        doc_height = int(self.document().size().height())
+        # QPlainTextDocumentLayout reports height in lines, not pixels.
+        # Count wrapped visual lines and convert with the active font metrics.
+        block = self.document().begin()
+        lines = 0
+        while block.isValid():
+            lines += max(1, block.layout().lineCount())
+            block = block.next()
+        doc_height = lines * self.fontMetrics().lineSpacing()
         # Add margins (top + bottom frame + internal padding)
         margins = self.contentsMargins()
         target = doc_height + margins.top() + margins.bottom() + 8
@@ -56,6 +65,12 @@ class ChatInput(QPlainTextEdit):
         # Clamp to allowed range
         target = max(_MIN_HEIGHT, min(target, _MAX_HEIGHT))
         self.setFixedHeight(target)
+
+    def resizeEvent(self, event):
+        """Recalculate wrapped-line height when the dock changes width."""
+        super().resizeEvent(event)
+        if event.oldSize().width() != event.size().width():
+            self._auto_resize()
 
     def keyPressEvent(self, event):
         """Handle Enter to submit, Shift+Enter for newline."""

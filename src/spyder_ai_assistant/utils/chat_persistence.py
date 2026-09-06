@@ -316,6 +316,11 @@ def _normalize_session_id(value):
     return uuid4().hex
 
 
+def current_timestamp():
+    """Return the current UTC time in the persisted ISO-8601 format."""
+    return _normalize_timestamp(None)
+
+
 def _normalize_timestamp(value, default=None):
     """Normalize timestamps to one UTC ISO-8601 format."""
     if isinstance(value, str) and value.strip():

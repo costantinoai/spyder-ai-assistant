@@ -138,3 +138,9 @@ def _legacy_profile_exists(profiles, base_url):
 def _new_profile_id():
     """Return a short random profile id."""
     return uuid.uuid4().hex[:10]
+
+
+def compatible_api_url(base_url):
+    """Accept either an endpoint root or an explicit compatible /v1 URL."""
+    url = str(base_url or '').strip().rstrip('/')
+    return url if url.endswith('/v1') else f'{url}/v1'

@@ -72,7 +72,7 @@ _EXTENSION_TO_LANGUAGE = {
 
 # Directories to skip when building the project file tree.
 # These are typically large, auto-generated, or irrelevant for context.
-_SKIP_DIRS = {
+SKIP_DIRS = {
     ".git", ".hg", ".svn", "__pycache__", ".mypy_cache", ".pytest_cache",
     "node_modules", ".tox", ".venv", "venv", "env", ".env", ".eggs",
     "dist", "build", ".spyproject", ".idea", ".vscode",
@@ -325,7 +325,7 @@ def _build_file_tree(root_path, max_depth=MAX_TREE_DEPTH,
             full = os.path.join(path, entry)
             if os.path.isdir(full):
                 # Skip non-source directories (hidden, build artifacts, etc.)
-                if (entry in _SKIP_DIRS
+                if (entry in SKIP_DIRS
                         or entry.startswith(".")
                         or entry.endswith(".egg-info")):
                     continue

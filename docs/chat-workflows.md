@@ -25,8 +25,9 @@ When multiple IPython consoles are open, the runtime selector lets the user pin
 debugging work to one console without changing the active editor or active
 console tab elsewhere in Spyder.
 
-The toolbar also exposes the per-tab chat mode selector. Each tab can choose
-its own working mode:
+The **Settings** button next to the input opens the per-tab chat settings.
+Each tab can choose its own working mode there (a preset instruction block
+prepended to the system prompt; the default is Coding):
 
 - `Coding`
 - `Debugging`
@@ -35,8 +36,9 @@ its own working mode:
 - `Explanation`
 - `Documentation`
 
-The selector is shared in the toolbar, but the chosen mode is stored on the
-active chat session rather than globally.
+The chosen mode is stored on the active chat session rather than globally,
+and the `Settings` button reads `Settings*` while a tab deviates from the
+default mode or inference settings.
 
 Below the input, the visible controls are intentionally compact:
 

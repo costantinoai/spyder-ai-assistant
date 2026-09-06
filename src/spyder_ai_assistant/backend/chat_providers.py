@@ -17,6 +17,8 @@ from dataclasses import dataclass
 
 import httpx
 
+from spyder_ai_assistant.utils.provider_profiles import compatible_api_url
+
 from spyder_ai_assistant.backend.client import OllamaClient
 from spyder_ai_assistant.utils.provider_profiles import (
     DEFAULT_COMPATIBLE_PROFILE_LABEL,
@@ -81,6 +83,16 @@ class BaseChatProvider:
     def chat_stream(self, model, messages, options=None):
         """Yield streaming chat chunks in the worker's common format."""
         raise NotImplementedError
+
+    def close(self):
+        """Release network resources; providers without a client do nothing."""
+        client = getattr(self, "_client", None)
+        closer = getattr(client, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception as error:  # pragma: no cover - best effort
+                logger.debug("Ignoring provider client close error: %s", error)
 
     def describe(self):
         """Return one UI-facing provider diagnostic record."""
@@ -163,7 +175,7 @@ class OpenAICompatibleChatProvider(BaseChatProvider):
             if self._api_key:
                 headers["Authorization"] = f"Bearer {self._api_key}"
             self._client = httpx.Client(
-                base_url=f"{self._base_url}/v1",
+                base_url=compatible_api_url(self._base_url),
                 headers=headers,
                 timeout=30.0,
             )
@@ -275,6 +287,11 @@ class ChatProviderRegistry:
     def __init__(self, settings=None):
         self._settings = dict(settings or {})
         self._providers = self._build_providers()
+
+    def close(self):
+        """Close every provider's client (called before a registry rebuild)."""
+        for provider in self._providers.values():
+            provider.close()
 
     def list_models(self):
         """Return all models from configured providers in one flat list."""

@@ -90,7 +90,7 @@ it clears stale local build artifacts before rebuilding the sdist and wheel.
 - suffix-overlap trimming
 - repetition filtering
 - cache warm and cache hit behavior
-- native popup suppression while ghost text is active
+- native popup ownership: `ai_first` hides automatic popups, `ai_replaces` closes them when the ghost arrives, `native_first` lets them win (`run_completion_lsp_validation`, real pylsp)
 - stale completion discard
 - single-line and multiline ghost text
 - Tab accept and Escape dismiss

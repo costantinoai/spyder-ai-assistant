@@ -32,6 +32,14 @@ Usage (from plugin.py):
     # User types anything else → ghost text disappears
 """
 
+from spyder_ai_assistant.utils.assistant_settings import (
+    DEFAULT_NATIVE_POPUP_POLICY,
+    NATIVE_POPUP_POLICIES,
+    NATIVE_POPUP_POLICY_AI_FIRST,
+    NATIVE_POPUP_POLICY_NATIVE_FIRST,
+)
+from spyder_ai_assistant.utils.text_positions import python_index, utf16_length
+
 import logging
 import time
 
@@ -72,8 +80,25 @@ class _GhostEventFilter(QObject):
 
     def eventFilter(self, obj, event):
         """Intercept key events for ghost text acceptance/dismissal."""
+        if event.type() == QEvent.Wheel:
+            self._manager.pause_for_scroll()
+            return False
+        if event.type() == QEvent.FocusOut:
+            self._manager.on_editor_focus_out(event)
+            return False
+        if event.type() == QEvent.FocusIn:
+            self._manager.resume_suggestions("focus_regained", only_if="focus_loss")
+            return False
+        if event.type() == QEvent.MouseButtonPress:
+            self._manager.clear(reason="mouse")
+            return False
         if event.type() not in (QEvent.ShortcutOverride, QEvent.KeyPress):
             return False
+        if event.type() == QEvent.KeyPress:
+            # Any key at the cursor means the user is back to editing here,
+            # so a scroll/focus pause no longer applies (this also covers
+            # Spyder's own Ctrl+Space, which never reaches request_completion).
+            self._manager.resume_suggestions("keypress")
 
         if self._is_manual_completion_shortcut(event):
             if event.type() == QEvent.ShortcutOverride:
@@ -100,6 +125,21 @@ class _GhostEventFilter(QObject):
         modifiers = event.modifiers()
 
         if not self._manager.has_suggestion():
+            return False
+
+        if event.type() == QEvent.ShortcutOverride:
+            # Reserve only ghost acceptance/dismissal keys here. Mutating the
+            # document during ShortcutOverride would handle a printable key
+            # twice when Qt subsequently delivers KeyPress.
+            if key in (Qt.Key_Tab, Qt.Key_Escape) or (
+                key == Qt.Key_Right and modifiers & Qt.AltModifier
+            ):
+                event.accept()
+                return True
+            if modifiers & (Qt.ControlModifier | Qt.MetaModifier):
+                # Native completion, Save and other Spyder shortcuts must see
+                # the real document, with temporary ghost text removed.
+                self._manager.clear(reason="native_shortcut")
             return False
 
         logger.debug(
@@ -154,9 +194,11 @@ class _GhostEventFilter(QObject):
 class _CompletionPopupWatcher(QObject):
     """Event filter installed on the editor's completion popup widget.
 
-    The native LSP popup should take priority over inline ghost text.
-    This watcher keeps the manager informed about popup visibility so
-    ghost suggestions are cleared or suppressed when needed.
+    Decides, at the moment Spyder tries to show its completion popup,
+    whether the popup or the inline ghost text owns the editor (see
+    ``GhostTextManager.blocks_automatic_popup``), and keeps the manager
+    informed about popup visibility so ghost suggestions are cleared or
+    suppressed when the popup wins.
     """
 
     def __init__(self, manager, completion_widget):
@@ -166,7 +208,10 @@ class _CompletionPopupWatcher(QObject):
     def eventFilter(self, obj, event):
         """Track completion popup visibility changes."""
         if event.type() == QEvent.Show:
-            if self._manager.has_suggestion():
+            automatic = bool(getattr(obj, "automatic", False))
+            if automatic and self._manager.blocks_automatic_popup():
+                # Swallow the popup before it takes focus; the ghost text (or
+                # the pending AI request) keeps the editor.
                 self._manager._emit_lifecycle_event(
                     "suppressed",
                     reason="native_popup",
@@ -211,13 +256,23 @@ class GhostTextManager:
         manual_completion_requester=None,
         idle_completion_delay_ms=IDLE_COMPLETION_DELAY_MS,
         post_accept_completion_delay_ms=POST_ACCEPT_COMPLETION_DELAY_MS,
+        native_popup_policy=DEFAULT_NATIVE_POPUP_POLICY,
+        ai_available=None,
     ):
         self._editor = editor
         self._lifecycle_callback = lifecycle_callback
         self._manual_completion_requester = manual_completion_requester
+        # Ownership rule between ghost text and Spyder's automatic popup
+        # (``NATIVE_POPUP_POLICIES``); ``ai_available`` tells whether the AI
+        # side can actually deliver (completions on, model loaded), so the
+        # "AI first" policy never hides native popups while the AI is down.
+        self._native_popup_policy = DEFAULT_NATIVE_POPUP_POLICY
+        self._ai_available = ai_available
+        self.set_native_popup_policy(native_popup_policy)
         self._ghost_active = False
         self._ghost_text = ""
         self._target = None
+        self._pause_reason = ""
         self._insert_offset = -1
         self._display_cursor_offset = -1
         # Document positions of the inserted ghost text, used for
@@ -277,6 +332,52 @@ class GhostTextManager:
         # because we block editor signals during those operations.
         editor.cursorPositionChanged.connect(self._on_cursor_moved)
         editor.textChanged.connect(self._schedule_idle_completion)
+        editor.verticalScrollBar().sliderPressed.connect(self.pause_for_scroll)
+
+    def set_native_popup_policy(self, policy):
+        """Choose how ghost text shares the editor with Spyder's popup.
+
+        Unknown values fall back to the default policy so a stale config
+        value can never disable both completion sources.
+        """
+        policy = str(policy or "").strip().lower()
+        if policy not in NATIVE_POPUP_POLICIES:
+            policy = DEFAULT_NATIVE_POPUP_POLICY
+        self._native_popup_policy = policy
+
+    @property
+    def native_popup_policy(self):
+        """The active popup ownership policy (see ``NATIVE_POPUP_POLICIES``)."""
+        return self._native_popup_policy
+
+    def _ai_can_deliver(self):
+        """True when the AI side is expected to produce suggestions."""
+        if self._ai_available is None:
+            return True
+        try:
+            return bool(self._ai_available())
+        except Exception:
+            return False
+
+    def blocks_automatic_popup(self):
+        """True when an *automatic* native popup must stay hidden right now.
+
+        A visible ghost always keeps its place against an automatic popup.
+        Under the "AI first" policy the automatic popup also stays hidden
+        while a suggestion may still arrive, as long as the AI can deliver;
+        an explicit Ctrl+Space popup is never blocked (the caller checks
+        ``automatic``).
+        """
+        if self._ghost_active:
+            return True
+        return (
+            self._native_popup_policy == NATIVE_POPUP_POLICY_AI_FIRST
+            and self._ai_can_deliver()
+        )
+
+    def _ghost_replaces_automatic_popup(self):
+        """True when an arriving ghost may close an automatic native popup."""
+        return self._native_popup_policy != NATIVE_POPUP_POLICY_NATIVE_FIRST
 
     def update_timing(self, idle_ms=None, post_accept_ms=None):
         """Update completion delay timers from config.
@@ -311,20 +412,35 @@ class GhostTextManager:
             target: Optional target metadata dict containing the cursor
                 position the suggestion was generated for.
         """
+        # Responses already in flight must not pull the viewport back to the
+        # cursor after the user starts reading elsewhere in the file.
+        if self._pause_reason:
+            self._log_suppressed(f"suggestions paused ({self._pause_reason})", target)
+            return False
+
         # Clear any previous ghost text first
         if self._ghost_active:
             self.clear(reason="replaced", record_event=False)
 
         if not text:
+            self._log_suppressed("empty suggestion", target)
             return False
 
         self._idle_completion_timer.stop()
 
-        if self._completion_popup_visible():
+        # An explicit (Ctrl+Space) popup always owns the completion UI. An
+        # automatic one only does under the "native first" policy; otherwise
+        # the arriving ghost closes it and takes over.
+        replaces_automatic = self._ghost_replaces_automatic_popup()
+        if self._completion_popup_visible(manual_only=replaces_automatic):
+            self._log_suppressed("native completion popup is visible", target)
+            return False
+        if replaces_automatic and self._completion_popup_visible():
+            logger.info("Ghost text replaces the automatic native completion popup")
             self._hide_completion_popup()
 
         if not self._matches_target(target):
-            logger.debug("Ghost text skipped because the editor target moved")
+            self._log_suppressed("editor cursor no longer matches the target", target)
             return False
 
         self._ghost_text = text
@@ -332,8 +448,8 @@ class GhostTextManager:
         cursor = self._editor.textCursor()
         original_pos = cursor.position()
         insert_offset = int(self._target.get("insert_offset", original_pos))
-        insert_offset = max(0, min(insert_offset, len(self._editor.toPlainText())))
-        restore_pos = original_pos + len(text) if insert_offset <= original_pos else original_pos
+        insert_offset = max(0, min(insert_offset, self._editor.document().characterCount() - 1))
+        restore_pos = original_pos + utf16_length(text) if insert_offset <= original_pos else original_pos
         insert_cursor = QTextCursor(self._editor.document())
         insert_cursor.setPosition(insert_offset)
         ghost_format = self._build_ghost_text_format()
@@ -354,7 +470,7 @@ class GhostTextManager:
             insert_cursor.endEditBlock()
 
             self._ghost_start = insert_offset
-            self._ghost_end = insert_offset + len(text)
+            self._ghost_end = insert_offset + utf16_length(text)
             self._insert_offset = insert_offset
             self._display_cursor_offset = original_pos
 
@@ -391,6 +507,59 @@ class GhostTextManager:
         )
         return True
 
+    def pause_for_scroll(self):
+        """Dismiss ghost text and pause automatic suggestions while reading."""
+        self.pause_suggestions("scroll")
+
+    def on_editor_focus_out(self, event):
+        """Pause suggestions when focus really leaves the editor.
+
+        Spyder's native completion popup takes keyboard focus while it is
+        shown, which also fires FocusOut on the editor. That hand-off is
+        managed by the popup watcher, so it must not pause ghost text:
+        otherwise every native popup silently disabled AI suggestions until
+        the next edit. Only pause for genuine focus loss (another widget,
+        another window).
+        """
+        try:
+            popup_focus = event.reason() == Qt.PopupFocusReason
+        except Exception:
+            popup_focus = False
+        if popup_focus or self._completion_popup_visible():
+            logger.info("Editor focus moved to the native completion popup; ghost text not paused")
+            return
+        self.pause_suggestions("focus_loss")
+
+    def resume_suggestions(self, trigger, only_if=""):
+        """Lift a scroll/focus pause because the user is active here again.
+
+        Args:
+            trigger: What resumed suggestions (logging only).
+            only_if: When given, resume only if the pause had this reason
+                (focus regained must not cancel a deliberate scroll pause).
+        """
+        if not self._pause_reason:
+            return
+        if only_if and self._pause_reason != only_if:
+            return
+        logger.info(
+            "AI suggestions resumed after %s (was paused: %s)",
+            trigger,
+            self._pause_reason,
+        )
+        self._pause_reason = ""
+
+    def pause_suggestions(self, reason):
+        """Suspend pending suggestions while the user navigates elsewhere."""
+        self._pause_reason = reason
+        self._idle_completion_timer.stop()
+        self._post_accept_completion_timer.stop()
+        self._post_accept_pending = False
+        scrollbar = self._editor.verticalScrollBar()
+        position = scrollbar.value()
+        self.clear(reason=reason)
+        scrollbar.setValue(position)
+
     def clear(self, reason="unknown", record_event=True):
         """Remove the ghost text from the document.
 
@@ -415,6 +584,10 @@ class GhostTextManager:
 
         self._ghost_active = False
         self._ghost_text = ""
+        # Keep the target for the lifecycle event below: the provider uses
+        # it to forget shown candidates / remember an explicit dismissal at
+        # this spot, which needs the spot, not just the reason.
+        dismissed_target = dict(self._target) if self._target else None
         self._target = None
         display_cursor_offset = self._display_cursor_offset
         self._ghost_start = -1
@@ -439,7 +612,7 @@ class GhostTextManager:
             try:
                 cursor = self._editor.textCursor()
                 cursor.setPosition(
-                    max(0, min(display_cursor_offset, len(self._editor.toPlainText())))
+                    max(0, min(display_cursor_offset, self._editor.document().characterCount() - 1))
                 )
                 self._editor.setTextCursor(cursor)
             except Exception:
@@ -450,7 +623,30 @@ class GhostTextManager:
         self._remove_ghost_extra_selection()
 
         if record_event:
-            self._emit_lifecycle_event("dismissed", reason=reason)
+            self._emit_lifecycle_event(
+                "dismissed", reason=reason, target=dismissed_target
+            )
+
+    def document_state_without_ghost(self):
+        """Return ``(text, cursor_position)`` as the user sees the document.
+
+        Ghost text is temporary document content; anything that syncs the
+        editor to a provider or reads the "real" cursor must exclude it.
+        Positions are Qt (UTF-16) offsets like the editor's own.
+        """
+        text = self._editor.toPlainText()
+        position = self._editor.textCursor().position()
+        if not self._ghost_active or self._ghost_start < 0:
+            return text, position
+        start, end = self._ghost_start, self._ghost_end
+        py_start = python_index(text, start)
+        py_end = python_index(text, end)
+        text = text[:py_start] + text[py_end:]
+        if position >= end:
+            position -= end - start
+        elif position > start:
+            position = start
+        return text, position
 
     def has_suggestion(self):
         """Return True if ghost text is currently visible."""
@@ -548,7 +744,7 @@ class GhostTextManager:
                     "line": cursor.blockNumber(),
                     "column": cursor.columnNumber(),
                     "insert_offset": (
-                        insert_offset + len(text)
+                        insert_offset + utf16_length(text)
                         if isinstance(insert_offset, int) and insert_offset >= 0
                         else cursor.position()
                     ),
@@ -595,6 +791,11 @@ class GhostTextManager:
         self._idle_completion_timer.stop()
         self._post_accept_completion_timer.stop()
         self._post_accept_pending = False
+        if source not in {"idle", "post_accept"}:
+            self.resume_suggestions(f"{source} request")
+            self._hide_completion_popup()
+        elif self._pause_reason or self._completion_popup_visible():
+            return
         if source not in {"idle", "post_accept"}:
             now = time.monotonic()
             cursor = self._editor.textCursor()
@@ -750,6 +951,7 @@ class GhostTextManager:
 
     def _schedule_idle_completion(self):
         """Schedule one AI completion after a short pause."""
+        self.resume_suggestions("edit")
         if self._ghost_active:
             logger.info(
                 "Idle AI completion scheduling skipped because ghost text is already visible"
@@ -832,20 +1034,48 @@ class GhostTextManager:
 
     def on_completion_popup_visibility_changed(self, visible):
         """Track popup visibility and clear ghost text if the menu opens."""
-        return
+        if visible:
+            self._idle_completion_timer.stop()
+            self._post_accept_completion_timer.stop()
+            self._post_accept_pending = False
+            self.clear(reason="native_popup")
+
+    def _log_suppressed(self, reason, target):
+        """Log one suppressed suggestion with the concrete reason.
+
+        Every early exit in ``show_suggestion`` used to be silent, which made
+        live logs ambiguous (the plugin could only guess "target moved").
+        Naming the reason keeps validation evidence unambiguous.
+        """
+        try:
+            cursor_pos = self._editor.textCursor().position()
+        except Exception:
+            cursor_pos = -1
+        logger.info(
+            "Ghost text suppressed: %s (cursor=%s target=%s)",
+            reason,
+            cursor_pos,
+            target,
+        )
 
     def _matches_target(self, target):
-        """Return True if the editor is still at the target cursor position."""
+        """Return True if the editor is still at the target cursor position.
+
+        A target created while a previous ghost was visible carries the
+        cursor position *after* that ghost (``offset``) and the logical
+        insertion spot (``insert_offset``). Once the old ghost is replaced
+        the cursor is back at the insertion spot, so either position counts
+        as "still there". Line/column are implied by the position.
+        """
         if not target:
             return True
 
         try:
-            cursor = self._editor.textCursor()
-            return (
-                cursor.position() == int(target.get("offset", -1))
-                and cursor.blockNumber() == int(target.get("line", -1))
-                and cursor.columnNumber() == int(target.get("column", -1))
-            )
+            position = self._editor.textCursor().position()
+            expected = {int(target.get("offset", -1))}
+            if target.get("insert_offset") is not None:
+                expected.add(int(target["insert_offset"]))
+            return position in expected
         except Exception:
             return False
 
@@ -868,6 +1098,14 @@ class GhostTextManager:
             )
         except (RuntimeError, TypeError):
             pass  # Already disconnected or editor destroyed
+
+        try:
+            self._editor.textChanged.disconnect(self._schedule_idle_completion)
+            self._editor.verticalScrollBar().sliderPressed.disconnect(
+                self.pause_for_scroll
+            )
+        except (RuntimeError, TypeError):
+            pass
 
         for target in self._event_targets:
             try:
@@ -898,7 +1136,7 @@ class GhostTextManager:
         self._insert_real_text(accepted_text, insert_offset, display_offset)
         new_display_offset = display_offset
         if insert_offset >= 0 and display_offset >= 0 and insert_offset <= display_offset:
-            new_display_offset = display_offset + len(accepted_text)
+            new_display_offset = display_offset + utf16_length(accepted_text)
         elif display_offset < 0:
             new_display_offset = self._editor.textCursor().position()
 
@@ -911,7 +1149,7 @@ class GhostTextManager:
                     "line": cursor.blockNumber(),
                     "column": cursor.columnNumber(),
                     "insert_offset": (
-                        insert_offset + len(accepted_text)
+                        insert_offset + utf16_length(accepted_text)
                         if insert_offset >= 0
                         else cursor.position()
                     ),
@@ -991,6 +1229,13 @@ class GhostTextManager:
 
         if "target" not in payload and self._target is not None:
             payload["target"] = dict(self._target)
+        # Exact ghost bounds (Qt offsets) let the provider map cursor
+        # positions reported while the ghost is in the document back to
+        # ghost-free coordinates; ``ghost_visible`` is the state *after*
+        # this event.
+        payload["ghost_visible"] = bool(self._ghost_active)
+        payload["ghost_start"] = int(self._ghost_start)
+        payload["ghost_end"] = int(self._ghost_end)
 
         try:
             self._lifecycle_callback(event_name, payload)
@@ -1005,7 +1250,7 @@ class GhostTextManager:
             if isinstance(insert_offset, int) and insert_offset >= 0
             else cursor.position()
         )
-        insert_at = max(0, min(insert_at, len(self._editor.toPlainText())))
+        insert_at = max(0, min(insert_at, self._editor.document().characterCount() - 1))
         logger.info(
             "Inserting accepted ghost text: chars=%d insert_offset=%s display_offset=%s",
             len(text),
@@ -1022,9 +1267,9 @@ class GhostTextManager:
             else cursor.position()
         )
         if insert_at <= restore_offset:
-            restore_offset += len(text)
+            restore_offset += utf16_length(text)
         cursor = self._editor.textCursor()
-        cursor.setPosition(max(0, min(restore_offset, len(self._editor.toPlainText()))))
+        cursor.setPosition(max(0, min(restore_offset, self._editor.document().characterCount() - 1)))
         self._editor.setTextCursor(cursor)
 
     def _completion_popup_visible(self, manual_only=False):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from qtpy.QtCore import Qt, Signal
 from qtpy.QtGui import QColor, QFont, QPixmap, QIcon
+from qtpy.QtWidgets import QApplication
 from qtpy.QtWidgets import (
     QCheckBox,
     QColorDialog,
@@ -17,6 +18,7 @@ from qtpy.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -26,12 +28,39 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from spyder_ai_assistant.mcp.launch import (
+    MCP_CLIENT_CLAUDE,
+    MCP_CLIENT_CODEX,
+    MCP_CLIENT_OPENCODE,
+    get_mcp_client_label,
+)
+from spyder_ai_assistant.mcp.settings import (
+    DEFAULT_MCP_HOST,
+    DEFAULT_MCP_PORT,
+    DEFAULT_MCP_SERVER_NAME,
+    build_client_setup_snippets,
+    build_mcp_endpoint_url,
+    normalize_mcp_host,
+    normalize_mcp_port,
+)
+from spyder_ai_assistant.utils.assistant_settings import (
+    DEFAULT_NATIVE_POPUP_POLICY,
+    NATIVE_POPUP_POLICIES,
+    NATIVE_POPUP_POLICY_DESCRIPTIONS,
+    NATIVE_POPUP_POLICY_LABELS,
+    AssistantSettings,
+)
 from spyder_ai_assistant.utils.chat_themes import (
     EXPOSED_COLOR_KEYS,
     get_preset_names,
     get_theme_colors,
     parse_color_overrides,
     serialize_color_overrides,
+)
+from spyder_ai_assistant.widgets.model_selection import (
+    populate_model_combo,
+    provider_key,
+    select_model,
 )
 
 
@@ -98,20 +127,30 @@ class AssistantSettingsDialog(QDialog):
     manage_profiles_requested = Signal()
     refresh_models_requested = Signal()
 
-    def __init__(self, *, models=None, settings=None, parent=None):
+    def __init__(
+        self,
+        *,
+        models=None,
+        settings=None,
+        mcp_status=None,
+        mcp_client_launcher=None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Assistant Settings")
         self.resize(760, 720)
 
         self._models = [dict(model) for model in (models or []) if isinstance(model, dict)]
-        self._settings = dict(settings or {})
+        self._settings = AssistantSettings.from_mapping(settings).to_conf_dict()
+        self._mcp_status = dict(mcp_status or {})
+        self._mcp_client_launcher = mcp_client_launcher
         self._completion_model_payloads = []
 
         layout = QVBoxLayout(self)
 
         intro = QLabel(
             "Configure models, generation, shortcuts, appearance, behavior, "
-            "and prompt templates here. "
+            "prompt templates, and the embedded MCP server here. "
             "Provider endpoints are managed through Provider Profiles."
         )
         intro.setWordWrap(True)
@@ -339,6 +378,38 @@ class AssistantSettingsDialog(QDialog):
         ghost_form.addRow("Idle completion delay", self.idle_delay_spin)
         ghost_form.addRow("Post-accept delay", self.post_accept_delay_spin)
         behavior_layout.addWidget(ghost_group)
+
+        # Ownership between ghost text and Spyder's own automatic popup
+        # (pylsp etc.). The description below the combo explains the
+        # selected policy so the user does not have to guess.
+        popup_group = QGroupBox("Spyder's automatic completion popup", behavior_tab)
+        popup_layout = QVBoxLayout(popup_group)
+        self.native_popup_policy_combo = QComboBox(popup_group)
+        for policy in NATIVE_POPUP_POLICIES:
+            self.native_popup_policy_combo.addItem(
+                NATIVE_POPUP_POLICY_LABELS[policy], policy
+            )
+        self.native_popup_policy_combo.currentIndexChanged.connect(
+            self._refresh_native_popup_policy_description
+        )
+        popup_layout.addWidget(self.native_popup_policy_combo)
+        self.native_popup_policy_description = QLabel(popup_group)
+        self.native_popup_policy_description.setWordWrap(True)
+        popup_layout.addWidget(self.native_popup_policy_description)
+        behavior_layout.addWidget(popup_group)
+
+        access_group = QGroupBox("Project access", behavior_tab)
+        access_form = QFormLayout(access_group)
+        self.project_tools_checkbox = QCheckBox(
+            "Let the assistant read project files and git history on request",
+            access_group,
+        )
+        self.project_tools_checkbox.setToolTip(
+            "Read-only. Limited to files under the active project (or the "
+            "current file's folder), with size caps; also exposed as MCP tools."
+        )
+        access_form.addRow(self.project_tools_checkbox)
+        behavior_layout.addWidget(access_group)
         behavior_note = QLabel(
             "Idle delay: how long after you stop typing before ghost text "
             "appears. Post-accept delay: pause after accepting a suggestion "
@@ -348,6 +419,105 @@ class AssistantSettingsDialog(QDialog):
         behavior_layout.addWidget(behavior_note)
         behavior_layout.addStretch(1)
         tabs.addTab(behavior_tab, "Behavior")
+
+        mcp_tab = QWidget(self)
+        mcp_layout = QVBoxLayout(mcp_tab)
+
+        mcp_server_group = QGroupBox("Embedded MCP server", mcp_tab)
+        mcp_server_form = QFormLayout(mcp_server_group)
+        self.mcp_enabled_checkbox = QCheckBox(
+            "Start the local Spyder MCP server automatically",
+            mcp_server_group,
+        )
+        self.mcp_host_edit = QLineEdit(mcp_server_group)
+        self.mcp_host_edit.setPlaceholderText(DEFAULT_MCP_HOST)
+        self.mcp_port_spin = QSpinBox(mcp_server_group)
+        self.mcp_port_spin.setRange(1, 65535)
+        self.mcp_port_spin.setValue(DEFAULT_MCP_PORT)
+        self.mcp_endpoint_edit = QLineEdit(mcp_server_group)
+        self.mcp_endpoint_edit.setReadOnly(True)
+        self.mcp_status_label = QLabel(mcp_server_group)
+        self.mcp_status_label.setWordWrap(True)
+        self.mcp_status_note_label = QLabel(
+            "Status reflects the currently saved configuration. Preview "
+            "commands below update live as you edit host or port values.",
+            mcp_server_group,
+        )
+        self.mcp_status_note_label.setWordWrap(True)
+        mcp_server_form.addRow(self.mcp_enabled_checkbox)
+        mcp_server_form.addRow("Listen host", self.mcp_host_edit)
+        mcp_server_form.addRow("Listen port", self.mcp_port_spin)
+        mcp_server_form.addRow("Endpoint URL", self.mcp_endpoint_edit)
+        mcp_server_form.addRow("Current status", self.mcp_status_label)
+        mcp_server_form.addRow("", self.mcp_status_note_label)
+        mcp_layout.addWidget(mcp_server_group)
+
+        clients_group = QGroupBox("Client setup", mcp_tab)
+        clients_layout = QVBoxLayout(clients_group)
+        clients_note = QLabel(
+            "Use these copy-ready snippets to connect Claude Code, Codex, "
+            "or OpenCode to the embedded Spyder MCP server."
+        )
+        clients_note.setWordWrap(True)
+        clients_layout.addWidget(clients_note)
+
+        claude_row = QHBoxLayout()
+        self.claude_command_edit = QLineEdit(clients_group)
+        self.claude_command_edit.setReadOnly(True)
+        self.copy_claude_btn = QPushButton("Copy Claude", clients_group)
+        self.copy_claude_btn.clicked.connect(
+            lambda: self._copy_text(self.claude_command_edit.text())
+        )
+        self.launch_claude_btn = QPushButton("Launch Claude", clients_group)
+        self.launch_claude_btn.clicked.connect(
+            lambda: self._launch_client(MCP_CLIENT_CLAUDE)
+        )
+        claude_row.addWidget(self.claude_command_edit, stretch=1)
+        claude_row.addWidget(self.copy_claude_btn)
+        claude_row.addWidget(self.launch_claude_btn)
+        clients_layout.addLayout(claude_row)
+
+        codex_row = QHBoxLayout()
+        self.codex_command_edit = QLineEdit(clients_group)
+        self.codex_command_edit.setReadOnly(True)
+        self.copy_codex_btn = QPushButton("Copy Codex", clients_group)
+        self.copy_codex_btn.clicked.connect(
+            lambda: self._copy_text(self.codex_command_edit.text())
+        )
+        self.launch_codex_btn = QPushButton("Launch Codex", clients_group)
+        self.launch_codex_btn.clicked.connect(
+            lambda: self._launch_client(MCP_CLIENT_CODEX)
+        )
+        codex_row.addWidget(self.codex_command_edit, stretch=1)
+        codex_row.addWidget(self.copy_codex_btn)
+        codex_row.addWidget(self.launch_codex_btn)
+        clients_layout.addLayout(codex_row)
+
+        self.opencode_config_edit = QPlainTextEdit(clients_group)
+        self.opencode_config_edit.setReadOnly(True)
+        self.opencode_config_edit.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.opencode_config_edit.setMinimumHeight(180)
+        clients_layout.addWidget(self.opencode_config_edit)
+
+        opencode_row = QHBoxLayout()
+        self.copy_opencode_btn = QPushButton("Copy OpenCode", clients_group)
+        self.copy_opencode_btn.clicked.connect(
+            lambda: self._copy_text(self.opencode_config_edit.toPlainText())
+        )
+        self.launch_opencode_btn = QPushButton("Launch OpenCode", clients_group)
+        self.launch_opencode_btn.clicked.connect(
+            lambda: self._launch_client(MCP_CLIENT_OPENCODE)
+        )
+        self.mcp_action_feedback = QLabel(clients_group)
+        self.mcp_action_feedback.setWordWrap(True)
+        opencode_row.addWidget(self.copy_opencode_btn)
+        opencode_row.addWidget(self.launch_opencode_btn)
+        opencode_row.addWidget(self.mcp_action_feedback, stretch=1)
+        opencode_row.addStretch()
+        clients_layout.addLayout(opencode_row)
+        mcp_layout.addWidget(clients_group)
+        mcp_layout.addStretch(1)
+        tabs.addTab(mcp_tab, "MCP")
 
         prompts_tab = QWidget(self)
         prompts_layout = QVBoxLayout(prompts_tab)
@@ -381,22 +551,8 @@ class AssistantSettingsDialog(QDialog):
 
         self._populate_model_combos()
         self._load_settings()
-
-    @staticmethod
-    def _model_display(payload):
-        """Return one readable provider-aware model label."""
-        provider_label = payload.get("provider_label", "Provider")
-        name = payload.get("name", "")
-        return f"[{provider_label}] {name}"
-
-    @staticmethod
-    def _provider_key(payload):
-        """Return one key grouping models by provider/profile."""
-        return (
-            payload.get("provider_kind", payload.get("provider_id", "")),
-            payload.get("profile_id", ""),
-            payload.get("provider_id", ""),
-        )
+        self.mcp_host_edit.textChanged.connect(self._refresh_mcp_preview)
+        self.mcp_port_spin.valueChanged.connect(self._refresh_mcp_preview)
 
     def _on_theme_preset_changed(self, index):
         """Update color swatches when the user picks a different preset."""
@@ -443,11 +599,128 @@ class AssistantSettingsDialog(QDialog):
 
     def _populate_model_combos(self):
         """Fill the chat-model combo from the latest discovered models."""
-        self.chat_model_combo.blockSignals(True)
-        self.chat_model_combo.clear()
-        for payload in self._models:
-            self.chat_model_combo.addItem(self._model_display(payload), dict(payload))
-        self.chat_model_combo.blockSignals(False)
+        populate_model_combo(self.chat_model_combo, self._models, show_provider=True)
+
+    def _copy_text(self, text):
+        """Copy text to the system clipboard and update the feedback label."""
+        clipboard = QApplication.clipboard()
+        clipboard.setText(str(text or ""))
+        self._set_mcp_action_feedback("Copied to clipboard.")
+
+    def _set_mcp_action_feedback(self, text):
+        """Update the shared MCP client action feedback label."""
+        self.mcp_action_feedback.setText(str(text or ""))
+
+    def _current_mcp_host(self):
+        """Return the normalized host currently shown in the dialog."""
+        return normalize_mcp_host(self.mcp_host_edit.text())
+
+    def _current_mcp_port(self):
+        """Return the normalized port currently shown in the dialog."""
+        return normalize_mcp_port(self.mcp_port_spin.value())
+
+    def _refresh_mcp_preview(self):
+        """Refresh the endpoint URL and copy-ready client setup snippets."""
+        snippets = build_client_setup_snippets(
+            host=self._current_mcp_host(),
+            port=self._current_mcp_port(),
+            name=DEFAULT_MCP_SERVER_NAME,
+        )
+        self.mcp_endpoint_edit.setText(snippets["url"])
+        self.claude_command_edit.setText(snippets["claude_command"])
+        self.codex_command_edit.setText(snippets["codex_command"])
+        self.opencode_config_edit.setPlainText(snippets["opencode_config"])
+
+    def _refresh_mcp_status_label(self):
+        """Update the MCP status label for the currently saved server."""
+        status = dict(self._mcp_status or {})
+        enabled = bool(status.get("enabled", True))
+        running = bool(status.get("running", False))
+        error = str(status.get("error", "") or "").strip()
+        endpoint_url = str(
+            status.get(
+                "endpoint_url",
+                build_mcp_endpoint_url(
+                    host=self._settings.get("mcp_host", DEFAULT_MCP_HOST),
+                    port=self._settings.get("mcp_port", DEFAULT_MCP_PORT),
+                ),
+            ) or ""
+        )
+
+        if not enabled:
+            text = "Disabled. The embedded Spyder MCP server will not start."
+        elif running:
+            text = f"Running on {endpoint_url}"
+        elif error:
+            text = f"Not running. {error}"
+        else:
+            text = f"Not running. Expected endpoint: {endpoint_url}"
+
+        self.mcp_status_label.setText(text)
+
+    def _can_launch_client(self):
+        """Return whether the launch buttons match the running saved server."""
+        status = dict(self._mcp_status or {})
+        preview_url = self.mcp_endpoint_edit.text().strip()
+        saved_url = str(status.get("endpoint_url", "") or "").strip()
+
+        if not self.mcp_enabled_checkbox.isChecked():
+            return (
+                False,
+                "Enable the embedded MCP server and save settings before "
+                "launching a client.",
+            )
+
+        if bool(status.get("enabled", True)) != bool(self.mcp_enabled_checkbox.isChecked()):
+            return (
+                False,
+                "Save MCP settings first so Spyder restarts the embedded "
+                "server with this configuration.",
+            )
+
+        if preview_url != saved_url:
+            return (
+                False,
+                "Save MCP settings first so the running embedded server "
+                "matches the preview URL.",
+            )
+
+        if not bool(status.get("running", False)):
+            return (
+                False,
+                "The embedded MCP server is not running. Save settings or "
+                "restart Spyder first.",
+            )
+
+        return True, ""
+
+    def _launch_client(self, client_id):
+        """Launch one supported MCP-aware client through the plugin callback."""
+        allowed, message = self._can_launch_client()
+        if not allowed:
+            self._set_mcp_action_feedback(message)
+            return False
+
+        launcher = self._mcp_client_launcher
+        if not callable(launcher):
+            self._set_mcp_action_feedback(
+                "MCP client launch support is not available in this build."
+            )
+            return False
+
+        client_label = get_mcp_client_label(client_id)
+        try:
+            result = launcher(client_id, self.mcp_endpoint_edit.text().strip())
+        except Exception as error:
+            self._set_mcp_action_feedback(
+                f"Could not launch {client_label}: {error}"
+            )
+            return False
+
+        self._set_mcp_action_feedback(
+            str(result or f"Launching {client_label}.")
+        )
+        return True
 
     def replace_models(self, models):
         """Replace discovered models and rebuild both dropdowns."""
@@ -479,12 +752,24 @@ class AssistantSettingsDialog(QDialog):
         self.ollama_host_edit.setText(
             str(self._settings.get("ollama_host", "http://localhost:11434") or "")
         )
+        self.mcp_enabled_checkbox.setChecked(
+            bool(self._settings.get("mcp_enabled", True))
+        )
+        self.mcp_host_edit.setText(
+            str(self._settings.get("mcp_host", DEFAULT_MCP_HOST) or DEFAULT_MCP_HOST)
+        )
+        self.mcp_port_spin.setValue(
+            normalize_mcp_port(self._settings.get("mcp_port", DEFAULT_MCP_PORT))
+        )
         self.chat_temperature_spin.setValue(chat_temperature)
         self.chat_max_tokens_spin.setValue(
             int(self._settings.get("max_tokens", 1024) or 1024)
         )
         self.completions_enabled_checkbox.setChecked(
             bool(self._settings.get("completions_enabled", True))
+        )
+        self.project_tools_checkbox.setChecked(
+            bool(self._settings.get("project_tools_enabled", True))
         )
         self.completion_temperature_spin.setValue(
             float(self._settings.get("completion_temperature", 0.15) or 0.15)
@@ -575,9 +860,33 @@ class AssistantSettingsDialog(QDialog):
         self.post_accept_delay_spin.setValue(
             int(self._settings.get("post_accept_completion_delay_ms", 75) or 75)
         )
+        self._select_native_popup_policy(
+            self._settings.get("native_popup_policy", DEFAULT_NATIVE_POPUP_POLICY)
+        )
 
         self._select_chat_model()
         self._refresh_completion_model_options()
+        self._refresh_mcp_preview()
+        self._refresh_mcp_status_label()
+
+    def _select_native_popup_policy(self, policy):
+        """Select ``policy`` in the popup combo (default when unknown)."""
+        index = self.native_popup_policy_combo.findData(policy)
+        if index < 0:
+            index = self.native_popup_policy_combo.findData(DEFAULT_NATIVE_POPUP_POLICY)
+        self.native_popup_policy_combo.setCurrentIndex(max(index, 0))
+        self._refresh_native_popup_policy_description()
+
+    def _refresh_native_popup_policy_description(self, *_args):
+        """Explain the selected popup policy under the combo."""
+        policy = self.native_popup_policy_combo.currentData()
+        self.native_popup_policy_description.setText(
+            NATIVE_POPUP_POLICY_DESCRIPTIONS.get(policy, "")
+        )
+
+    def selected_native_popup_policy(self):
+        """Return the popup policy chosen in the Behavior tab."""
+        return self.native_popup_policy_combo.currentData() or DEFAULT_NATIVE_POPUP_POLICY
 
     def _select_chat_model(
         self,
@@ -586,47 +895,34 @@ class AssistantSettingsDialog(QDialog):
         preferred_profile_id=None,
     ):
         """Select the configured chat model, or the first available entry."""
-        chat_model = str(
-            preferred_name
-            if preferred_name is not None
-            else self._settings.get("chat_model", "") or ""
+        select_model(
+            self.chat_model_combo,
+            name=str(
+                preferred_name
+                if preferred_name is not None
+                else self._settings.get("chat_model", "") or ""
+            ),
+            provider_kind=str(
+                preferred_provider_kind
+                if preferred_provider_kind is not None
+                else self._settings.get("chat_provider", "ollama") or "ollama"
+            ),
+            profile_id=str(
+                preferred_profile_id
+                if preferred_profile_id is not None
+                else self._settings.get("chat_provider_profile_id", "") or ""
+            ),
         )
-        provider_kind = str(
-            preferred_provider_kind
-            if preferred_provider_kind is not None
-            else self._settings.get("chat_provider", "ollama") or "ollama"
-        )
-        profile_id = str(
-            preferred_profile_id
-            if preferred_profile_id is not None
-            else self._settings.get("chat_provider_profile_id", "") or ""
-        )
-
-        for index in range(self.chat_model_combo.count()):
-            payload = self.chat_model_combo.itemData(index)
-            if not isinstance(payload, dict):
-                continue
-            if payload.get("name") != chat_model:
-                continue
-            if payload.get("provider_kind", payload.get("provider_id", "")) != provider_kind:
-                continue
-            if str(payload.get("profile_id", "") or "") != profile_id:
-                continue
-            self.chat_model_combo.setCurrentIndex(index)
-            return
-
-        if self.chat_model_combo.count() > 0:
-            self.chat_model_combo.setCurrentIndex(0)
 
     def _refresh_completion_model_options(self, preferred_name=None):
         """Rebuild the completion-model list for the selected provider."""
         chat_payload = self.chat_model_combo.currentData()
-        allowed_key = self._provider_key(chat_payload or {})
+        allowed_key = provider_key(chat_payload or {})
 
         self._completion_model_payloads = [
             dict(payload)
             for payload in self._models
-            if self._provider_key(payload) == allowed_key
+            if provider_key(payload) == allowed_key
         ]
         if not self._completion_model_payloads:
             self._completion_model_payloads = [dict(payload) for payload in self._models]
@@ -636,25 +932,26 @@ class AssistantSettingsDialog(QDialog):
             if preferred_name is not None
             else self._settings.get("completion_model", "") or ""
         )
+        populate_model_combo(
+            self.completion_model_combo,
+            self._completion_model_payloads,
+            show_provider=True,
+        )
         self.completion_model_combo.blockSignals(True)
-        self.completion_model_combo.clear()
-        selected_index = 0
-        for index, payload in enumerate(self._completion_model_payloads):
-            self.completion_model_combo.addItem(
-                self._model_display(payload),
-                dict(payload),
-            )
-            if payload.get("name") == selected_name:
-                selected_index = index
-        self.completion_model_combo.setCurrentIndex(selected_index)
-        self.completion_model_combo.blockSignals(False)
+        try:
+            select_model(self.completion_model_combo, name=selected_name)
+        finally:
+            self.completion_model_combo.blockSignals(False)
 
     def selected_settings(self):
         """Return the normalized settings chosen in the dialog."""
         chat_payload = self.chat_model_combo.currentData() or {}
         completion_payload = self.completion_model_combo.currentData() or {}
-        return {
+        return AssistantSettings.from_mapping({
             "ollama_host": self.ollama_host_edit.text().strip() or "http://localhost:11434",
+            "mcp_enabled": bool(self.mcp_enabled_checkbox.isChecked()),
+            "mcp_host": self._current_mcp_host(),
+            "mcp_port": self._current_mcp_port(),
             "chat_provider": chat_payload.get(
                 "provider_kind",
                 self._settings.get("chat_provider", "ollama"),
@@ -673,6 +970,7 @@ class AssistantSettingsDialog(QDialog):
             "chat_temperature": int(round(self.chat_temperature_spin.value() * 10)),
             "max_tokens": int(self.chat_max_tokens_spin.value()),
             "completions_enabled": bool(self.completions_enabled_checkbox.isChecked()),
+            "project_tools_enabled": bool(self.project_tools_checkbox.isChecked()),
             "completion_temperature": float(self.completion_temperature_spin.value()),
             "completion_max_tokens": int(self.completion_max_tokens_spin.value()),
             "debounce_ms": int(self.debounce_spin.value()),
@@ -703,4 +1001,5 @@ class AssistantSettingsDialog(QDialog):
             # Behavior
             "idle_completion_delay_ms": int(self.idle_delay_spin.value()),
             "post_accept_completion_delay_ms": int(self.post_accept_delay_spin.value()),
-        }
+            "native_popup_policy": self.selected_native_popup_policy(),
+        }).to_conf_dict()

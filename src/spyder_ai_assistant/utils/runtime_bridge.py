@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 
+from spyder_ai_assistant.utils.project_tools import PROJECT_TOOL_NAMES
 from spyder_ai_assistant.utils.runtime_context import (
     format_runtime_shell,
     format_runtime_variable,
@@ -27,6 +28,9 @@ RUNTIME_TOOL_NAMES = (
     "runtime.inspect_variables",
 )
 
+# Every tool the chat model may request through the request block.
+REQUESTABLE_TOOL_NAMES = RUNTIME_TOOL_NAMES + PROJECT_TOOL_NAMES
+
 _REQUEST_RE = re.compile(
     rf"^\s*<{RUNTIME_REQUEST_TAG}>\s*(\{{.*\}})\s*</{RUNTIME_REQUEST_TAG}>\s*$",
     re.DOTALL,
@@ -34,7 +38,34 @@ _REQUEST_RE = re.compile(
 _TAG_RE = re.compile(rf"</?{RUNTIME_REQUEST_TAG}>")
 
 
-def build_runtime_bridge_instructions():
+def build_project_tools_instructions():
+    """Return the system-prompt section describing project file/git tools."""
+    tool_names = "\n".join(f"- {tool_name}" for tool_name in PROJECT_TOOL_NAMES)
+    example = (
+        f"<{RUNTIME_REQUEST_TAG}>\n"
+        '{"tool":"project.read_file","args":{"path":"src/app.py","start_line":1,"end_line":120}}\n'
+        f"</{RUNTIME_REQUEST_TAG}>"
+    )
+    return (
+        "Read-only project access is available through the same request "
+        "block, for files under the current project root and its git "
+        "history:\n"
+        f"{tool_names}\n"
+        "Example:\n"
+        f"{example}\n"
+        "- `project.list_files` args: subdir, glob, max_entries.\n"
+        "- `project.read_file` args: path (relative to the project root), "
+        "start_line, end_line, max_chars.\n"
+        "- `project.search` args: pattern (regex), glob, max_results.\n"
+        "- `git.status` (no args), `git.diff` args: path, staged, max_chars; "
+        "`git.log` args: max_count, path.\n"
+        "Use these when the answer depends on files that are not already in "
+        "the context, or on uncommitted changes / recent commits. Paths "
+        "outside the project are refused."
+    )
+
+
+def build_runtime_bridge_instructions(include_project_tools=True):
     """Return the internal system-prompt instructions for runtime access."""
     tool_names = "\n".join(f"- {tool_name}" for tool_name in RUNTIME_TOOL_NAMES)
     example = (
@@ -74,6 +105,7 @@ def build_runtime_bridge_instructions():
         "6. Never invent runtime results.\n"
         "7. Do not answer questions about current runtime state from memory, "
         "guesswork, or file context alone."
+        + ("\n\n" + build_project_tools_instructions() if include_project_tools else "")
     )
 
 
@@ -114,12 +146,12 @@ def parse_runtime_request(text):
     tool = payload.get("tool")
     args = payload.get("args", {})
 
-    if tool not in RUNTIME_TOOL_NAMES:
+    if tool not in REQUESTABLE_TOOL_NAMES:
         return {
             "valid": False,
             "error": (
-                f"Unsupported runtime tool: {tool!r}. "
-                f"Allowed tools: {', '.join(RUNTIME_TOOL_NAMES)}"
+                f"Unsupported tool: {tool!r}. "
+                f"Allowed tools: {', '.join(REQUESTABLE_TOOL_NAMES)}"
             ),
             "raw_text": stripped,
         }
@@ -208,7 +240,28 @@ def format_runtime_observation(request, result):
     return "\n".join(lines)
 
 
+def _format_project_payload(payload):
+    """Render project/git payloads: scalars inline, multi-line text as blocks."""
+    lines = []
+    for key, value in (payload or {}).items():
+        if isinstance(value, list):
+            lines.append(f"{key} ({len(value)}):")
+            for item in value:
+                if isinstance(item, dict):
+                    lines.append("  " + " | ".join(f"{k}: {v}" for k, v in item.items()))
+                else:
+                    lines.append(f"  {item}")
+        elif isinstance(value, str) and "\n" in value:
+            lines.append(f"{key}:")
+            lines.extend(value.split("\n"))
+        else:
+            lines.append(f"{key}: {value}")
+    return lines
+
+
 def _format_payload(tool, payload):
+    if str(tool).startswith(("project.", "git.")):
+        return _format_project_payload(payload)
     if tool == "runtime.status":
         return _format_simple_mapping(payload, ("stale",))
 

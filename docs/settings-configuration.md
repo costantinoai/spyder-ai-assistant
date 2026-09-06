@@ -109,11 +109,25 @@ Controls ghost text completion timing.
 |---------|-----------|---------|-------|
 | Idle completion delay | `idle_completion_delay_ms` | `1000` ms | 100-5000 |
 | Post-accept delay | `post_accept_completion_delay_ms` | `75` ms | 0-1000 |
+| Spyder's automatic completion popup | `native_popup_policy` | `ai_first` | `ai_first`, `ai_replaces`, `native_first` |
 
 - **Idle completion delay**: How long after the user stops typing before an
   automatic ghost text completion is requested.
 - **Post-accept delay**: Pause after accepting a ghost text suggestion before
   requesting the next one.
+- **Spyder's automatic completion popup**: who owns the editor when Spyder
+  would open its own completion popup automatically (after `.` or a few
+  characters). An explicit `Ctrl+Space` popup always wins, whatever the
+  policy.
+  - `ai_first` (default): while AI completions are on and the model is
+    available, the automatic popup stays hidden and ghost text is the only
+    automatic suggestion. If the model is offline or completions are off,
+    Spyder's popup behaves normally.
+  - `ai_replaces`: the automatic popup opens while the AI is thinking; the
+    ghost suggestion closes it when it arrives.
+  - `native_first`: the automatic popup keeps priority; an AI suggestion
+    arriving while it is open is dropped, and a visible ghost only blocks new
+    automatic popups.
 
 Behavior changes apply immediately to all open editors.
 

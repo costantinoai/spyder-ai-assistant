@@ -8,7 +8,7 @@
 
 A local-first AI assistant for [Spyder IDE](https://www.spyder-ide.org/). Chat with a model about your code, get Copilot-style inline completions, inspect live variables and tracebacks, and browse your conversation history — all running on your own GPU through [Ollama](https://ollama.com/), with optional support for OpenAI-compatible endpoints.
 
-![Chat panel debugging a ZeroDivisionError — the AI reads the console traceback and explains the fix](docs/screenshots/chat-panel.png)
+![Chat panel: a question about the current file, the answer with a highlighted code block and Copy/Apply actions, model selector above, Debug/Regenerate/Sessions/Settings actions below](docs/screenshots/chat-panel.png)
 
 ---
 
@@ -65,7 +65,7 @@ Copilot-style ghost text that appears as you type, powered by Ollama's Fill-in-M
 | `Escape` | Dismiss |
 | `Backspace` | Dismiss and keep editing |
 
-The provider is tuned beyond a basic API call: it caches recent prompts, trims suffix overlap so brackets aren't duplicated, filters repetitive output, pulls relevant snippets from other open files for richer context, suppresses Spyder's native popup when a ghost suggestion is active, and cycles through alternative candidates locally without extra model round-trips. Explicit dismissals (`Escape`, `Backspace`) are forgotten as soon as the editor content changes. The status bar shows the active completion model and its state (`generating`, `offline`, or ready).
+The provider is tuned beyond a basic API call: it caches recent prompts, trims suffix overlap so brackets aren't duplicated, filters repetitive output, pulls relevant snippets from other open files for richer context, and cycles through alternative candidates locally without extra model round-trips. It owns the editor by default: while the AI model is available, Spyder's own automatic completion popup (pylsp) stays hidden and ghost text is the only automatic suggestion; an explicit `Ctrl+Space` popup still opens and takes over. Prefer the native popup? **Settings > Behavior** offers "replace it when the AI answers" and "Spyder popup first" as well. Scrolling or leaving the editor pauses suggestions until you type again. Explicit dismissals (`Escape`, `Backspace`) are forgotten as soon as the editor content changes. The completion model is loaded as soon as Spyder starts (and kept resident for 30 minutes of inactivity), so the first suggestion is not delayed by a cold model load; the status bar shows the active model and its state (`loading`, `generating`, `offline`, or ready).
 
 ### Chat panel
 
@@ -73,10 +73,9 @@ A dockable pane for talking to a model about your code. Open it from **View > Pa
 
 - **Multi-tab sessions** — each conversation lives in its own tab
 - **Streaming responses** — tokens arrive in real time
-- **Syntax-highlighted code blocks** — with copy, insert-at-cursor, and replace-selection actions
+- **Syntax-highlighted code blocks** — with Copy and Apply actions; Apply previews a unified diff and can insert at the cursor, replace the selection, or replace the existing function/class of the same name in place
 - **Thinking/reasoning display** — models that emit `<think>` blocks (QwQ, DeepSeek-R1, etc.) show their reasoning in a dimmed section
-- **Per-tab chat modes** — switch between Coding, Debugging, Review, Data Analysis, Explanation, or Documentation presets
-- **Per-tab inference settings** — override temperature and max tokens for individual tabs
+- **Per-tab chat settings** — the **Settings** button next to the input opens the tab's chat mode (Coding, Debugging, Review, Data Analysis, Explanation, or Documentation, each a different instruction block for the model) and its temperature / max-token overrides; the button shows `Settings*` while a tab deviates from the defaults
 - **Mid-conversation model switching** — change models from the toolbar without losing context
 - **Stop and regenerate** — cancel a response mid-stream, or rerun the last turn
 - **Delete individual exchanges** — remove any saved turn from the conversation
@@ -103,6 +102,54 @@ This is **on-demand, not automatic** — ordinary questions stay file-focused an
 | **Regenerate** | Reruns the last turn on the active tab |
 
 When more than one IPython console is open, the runtime target selector in the chat toolbar lets you choose **Follow Active Console** or pin the debugging context to a specific console. The runtime tooltip shows which console is currently active and which one is actually being inspected.
+
+### Project files and git
+
+On request, the model can read other files in your project and look at git history, using the same on-demand protocol as runtime inspection:
+
+- **Project files** — list files, read a file (or a line range), and search the project with a regular expression
+- **Git** — `git status`, the uncommitted or staged diff (optionally for one file), and recent commits
+- **Review Changes** — a Debug-menu action that asks the model to review your uncommitted changes
+
+Access is read-only and bounded: only files under the active project (or the folder of the current file when no project is open), never `.git`, virtual environments, caches or build output, with size caps on files, search results and diffs. Switch it off in **Settings → Assistant Settings… → Behavior → Project access**. The same tools are exposed to external agents through MCP (`read_project_file`, `search_project`, `git_diff`, …).
+
+### Claude, Codex, and OpenCode via MCP
+
+The plugin now also exposes Spyder as a local MCP server on `http://127.0.0.1:8769/mcp`. When Spyder starts, Claude Code, Codex, and OpenCode can connect to the live editor and console state without any extra manual server process.
+
+Open **AI Chat → Settings → Assistant Settings... → MCP** to enable or disable the server, change the host or port, view current status, and either copy ready-to-paste setup snippets or launch Claude Code, Codex, or OpenCode directly from Spyder.
+
+When you use the launch buttons, Spyder opens the selected CLI in your active Spyder project directory when possible, otherwise it falls back to the current file's directory. If you edit the MCP host or port in the dialog, save those settings first so Spyder restarts the embedded server on the new endpoint before launching a client.
+
+```bash
+claude mcp add --transport http spyder http://127.0.0.1:8769/mcp
+```
+
+```bash
+codex mcp add spyder --url http://127.0.0.1:8769/mcp
+```
+
+Available MCP tools:
+
+- `get_current_file` — active file path, full content, cursor, and selection
+- `get_open_files` — summaries of the other open editor tabs
+- `get_project_tree` — active project root and bounded file tree
+- `get_consoles` — available Spyder IPython console targets and their `shell_id` values
+- `get_variables` — variable list from the selected Spyder IPython console
+- `inspect_variable` — detailed inspection for one named variable
+- `get_traceback` — latest traceback or exception block
+- `get_console_output` — recent visible console output
+- `preview_file_edit` — build a diff preview for an editor mutation without changing the file
+- `apply_file_edit` — apply the previewed editor mutation after explicit confirmation, with optional save-to-disk through Spyder
+- `execute_console_code` — submit explicit code to the active or selected Spyder IPython console
+
+MCP writes are guarded instead of blind:
+
+- file edits are stateless compare-and-apply operations: preview first, then apply with `confirm=true`, the `expected_document_sha256` returned by the preview, and the previewed cursor/selection positions
+- console execution accepts an optional `shell_id` so clients can target a specific open Spyder console instead of following the active one
+- save-on-apply goes through Spyder's editor stack, not raw file I/O
+
+The MCP settings tab also includes an `opencode.json` snippet for OpenCode's remote-server config, plus one-click launch buttons that generate temporary client config instead of overwriting your saved CLI setup.
 
 ### Editor integration
 
@@ -186,7 +233,7 @@ All assistant settings live in the chat pane under **Settings**:
 
 Existing single-endpoint settings are imported automatically the first time you open the provider-profiles dialog.
 
-Per-tab chat modes and inference overrides are set directly in the chat pane and persist with the session.
+Per-tab chat modes and inference overrides are set from the chat pane's **Settings** button and persist with the session.
 
 ---
 

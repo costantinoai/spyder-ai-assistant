@@ -15,6 +15,7 @@ DEBUG_ACTION_LABELS = {
     "fix_traceback": "Fix Traceback",
     "use_variables": "Use Variables",
     "use_console": "Use Console",
+    "review_changes": "Review Changes",
 }
 
 
@@ -53,6 +54,13 @@ def build_debug_prompt(action, user_text="", context_label=""):
             "Inspect the recent console output from the active Spyder IPython "
             "console and summarize the execution history or messages that "
             "matter for the current problem."
+        ),
+        "review_changes": (
+            "Use git.status and git.diff to inspect the uncommitted changes in "
+            "the current project, then review them: summarize what changed, "
+            "point out bugs, missing tests, and risky edits, and suggest "
+            "concrete improvements. Read related project files with "
+            "project.read_file when the diff alone is not enough."
         ),
     }
     base_prompt = base_prompts.get(

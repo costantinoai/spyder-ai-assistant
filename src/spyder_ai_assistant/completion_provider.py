@@ -35,6 +35,12 @@ from spyder_ai_assistant.backend.client import (
     OllamaClient,
     OpenAICompatibleCompletionClient,
 )
+from spyder_ai_assistant.utils.assistant_settings import (
+    COMPLETION_PROVIDER_CONF_DEFAULTS,
+    AssistantSettings,
+)
+from spyder_ai_assistant.utils.logging import configure_package_logging
+from spyder_ai_assistant.utils.text_positions import python_index, utf16_length
 from spyder_ai_assistant.utils.provider_profiles import (
     PROVIDER_KIND_OLLAMA,
     PROVIDER_KIND_OPENAI_COMPATIBLE,
@@ -197,6 +203,21 @@ class _CompletionTarget:
     insert_line: int | None = None
     insert_column: int | None = None
     insert_offset: int | None = None
+
+    @property
+    def anchor(self):
+        """Identity of the spot a suggestion is inserted at.
+
+        While ghost text is visible the editor cursor sits after the ghost,
+        so a follow-up request reports a different ``offset`` for the same
+        logical place. Comparing anchors (file, document version, effective
+        insert position) instead of whole targets keeps "ask for another
+        candidate" and "user dismissed this spot" stable across that shift.
+        """
+        insert_offset = (
+            self.insert_offset if self.insert_offset is not None else self.offset
+        )
+        return (self.filename, self.version, insert_offset)
 
     def to_payload(self):
         """Serialize a target for ghost-text routing."""
@@ -401,6 +422,54 @@ def _summarize_target_for_log(target):
             f":offset={target.insert_offset}"
         )
     return summary
+
+
+def ghost_free_position(offset, ghost_start, ghost_end):
+    """Map a cursor offset taken while a ghost is visible to ghost-free space.
+
+    The editor document temporarily contains the ghost text, so Spyder's
+    own completion requests report cursor offsets that include it, while
+    the provider's tracked document (and every cache/anchor) does not.
+    Offsets after the ghost shift back by its length; offsets inside it
+    collapse to the ghost start. Returns ``(offset, adjusted)``.
+    """
+    if ghost_start is None or ghost_end is None or ghost_start < 0 or ghost_end <= ghost_start:
+        return offset, False
+    if offset >= ghost_end:
+        return offset - (ghost_end - ghost_start), True
+    if offset > ghost_start:
+        return ghost_start, True
+    return offset, False
+
+
+def update_visible_ghosts(visible_ghosts, payload):
+    """Keep ``{filename: (start, end)}`` in sync from one lifecycle event.
+
+    Every ghost event carries ``ghost_visible`` plus the bounds after the
+    event. Without a filename in the payload the state is reset, since at
+    most one ghost is ever visible.
+    """
+    payload = payload or {}
+    target = payload.get("target") or {}
+    filename = str(target.get("filename", "") or "")
+    if "ghost_visible" not in payload:
+        return
+    if payload.get("ghost_visible") and filename:
+        visible_ghosts[filename] = (
+            int(payload.get("ghost_start", -1)),
+            int(payload.get("ghost_end", -1)),
+        )
+    elif filename:
+        visible_ghosts.pop(filename, None)
+    else:
+        visible_ghosts.clear()
+
+
+def line_column_at(text, offset):
+    """Return 0-based ``(line, column)`` of a Qt offset in ``text``."""
+    index = python_index(text, offset)
+    line_start = text.rfind("\n", 0, index) + 1
+    return text.count("\n", 0, index), utf16_length(text[line_start:index])
 
 
 def _resolve_completion_anchor(text, line, column, offset):
@@ -998,6 +1067,10 @@ class CompletionWorker(QObject):
     # Args: (req_id, model, prefix, suffix, options)
     sig_perform_completion = Signal(int, str, str, str, dict)
     sig_update_backend_settings = Signal(dict)
+    # sig_warm_up(backend settings incl. "model") — load the model off the
+    # main thread; sig_warm_up_done(model, ok, detail) reports the outcome.
+    sig_warm_up = Signal(dict)
+    sig_warm_up_done = Signal(str, bool, str)
     # Output signals: consumed by the provider on the main thread
     # sig_completion_ready(req_id, completion_text, suffix) — text for ghost display
     sig_completion_ready = Signal(int, str, str)
@@ -1025,6 +1098,7 @@ class CompletionWorker(QObject):
         self.sig_update_backend_settings.connect(
             self._handle_update_backend_settings
         )
+        self.sig_warm_up.connect(self._handle_warm_up)
 
     # --- Thread lifecycle ---
 
@@ -1156,16 +1230,51 @@ class CompletionWorker(QObject):
         self.sig_update_backend_settings.emit(dict(settings or {}))
 
     @Slot(dict)
+    def _handle_warm_up(self, settings):
+        """Load the completion model on the worker thread.
+
+        Runs through the same queued-signal path as completions, so a
+        completion requested during the load simply waits behind it (the
+        model has to load either way). Only Ollama needs this; hosted
+        OpenAI-compatible endpoints have no local model to load.
+        """
+        settings = dict(settings or {})
+        model = str(settings.get("model", "") or "")
+        provider_kind = str(settings.get("provider_kind", PROVIDER_KIND_OLLAMA))
+        if not model or provider_kind != PROVIDER_KIND_OLLAMA:
+            self.sig_warm_up_done.emit(model, True, "warm-up not needed")
+            return
+        try:
+            client = self._get_client(
+                provider_kind,
+                settings.get("endpoint", ""),
+                settings.get("api_key", ""),
+            )
+            elapsed = client.warm_up(model)
+        except Exception as error:
+            logger.warning("AI completion model warm-up failed for %s: %s", model, error)
+            self.sig_warm_up_done.emit(model, False, str(error))
+            return
+        self.sig_warm_up_done.emit(model, True, f"loaded in {elapsed:.1f}s")
+
+    @Slot(dict)
     def _handle_update_backend_settings(self, settings):
         """Update the worker-owned backend settings on the worker thread."""
         self._backend_settings = dict(settings or {})
-        self._client = None
-        self._client_signature = None
+        self._close_client()
         logger.info(
             "AI completion worker backend refreshed: provider=%s endpoint=%s",
             self._backend_settings.get("provider_kind", "-"),
             self._backend_settings.get("endpoint", ""),
         )
+
+    def _close_client(self):
+        """Release the current client's connection pool, if any."""
+        closer = getattr(self._client, "close", None)
+        if callable(closer):
+            closer()
+        self._client = None
+        self._client_signature = None
 
     def _get_client(self, provider_kind, endpoint, api_key):
         """Return a backend client matching the requested endpoint."""
@@ -1182,6 +1291,7 @@ class CompletionWorker(QObject):
             )
             return self._client
 
+        self._close_client()
         if provider_kind == PROVIDER_KIND_OPENAI_COMPATIBLE:
             self._client = OpenAICompatibleCompletionClient(
                 base_url=endpoint,
@@ -1246,19 +1356,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
     # FLAT format: list of (option_name, default_value) tuples.
     # This is the format required by SpyderCompletionProvider (NOT the dict
     # format used by SpyderDockablePlugin).
-    CONF_DEFAULTS = [
-        ("ollama_host", "http://localhost:11434"),
-        ("chat_provider", PROVIDER_KIND_OLLAMA),
-        ("chat_provider_profile_id", ""),
-        ("provider_profiles", "[]"),
-        ("openai_compatible_base_url", ""),
-        ("openai_compatible_api_key", ""),
-        ("completion_model", "qooba/qwen3-coder-30b-a3b-instruct:q3_k_m"),
-        ("completion_temperature", 0.15),
-        ("completion_max_tokens", 512),
-        ("completions_enabled", True),
-        ("debounce_ms", DEFAULT_DEBOUNCE_MS),
-    ]
+    CONF_DEFAULTS = list(COMPLETION_PROVIDER_CONF_DEFAULTS)
 
     def __init__(self, parent, config):
         super().__init__(parent, config)
@@ -1291,6 +1389,9 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._completion_cache = _CompletionCache()
         self._candidate_store = _CompletionCandidateStore()
         self._shown_candidates = {}
+        # {filename: (ghost_start, ghost_end)} for ghosts currently in an
+        # editor document, maintained from ghost lifecycle events.
+        self._visible_ghosts = {}
         self._dismissed_targets = {}
         self._metrics = {
             "requests_received": 0,
@@ -1298,6 +1399,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             "debounced_dropped": 0,
             "queued_dropped": 0,
             "dispatched": 0,
+            "warm_ups": 0,
             "cache_hits": 0,
             "cache_misses": 0,
             "shown": 0,
@@ -1332,6 +1434,24 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         # Connect worker output to our response handler
         self._worker.sig_completion_ready.connect(self._on_completion_ready)
         self._worker.sig_error.connect(self._on_completion_error)
+        self._worker.sig_warm_up_done.connect(self._on_warm_up_done)
+        # Model currently being loaded, or "" when idle. Late results for a
+        # model the user already switched away from are ignored.
+        self._warming_model = ""
+        self._last_warm_up_detail = ""
+        # Runtime-only replacement when the configured completion model is
+        # not installed but the chat model is (never written to config).
+        self._model_fallback = ""
+        # (endpoint, model) that finished loading; unchanged settings do not
+        # trigger another load.
+        self._warmed_signature = None
+        # Settings changes arrive in bursts (host, provider, model...); one
+        # warm-up per burst is enough and keeps the worker queue short for
+        # the completion that usually follows.
+        self._warm_up_timer = QTimer(self)
+        self._warm_up_timer.setSingleShot(True)
+        self._warm_up_timer.setInterval(250)
+        self._warm_up_timer.timeout.connect(self._dispatch_model_warm_up)
 
         # --- State ---
         self._started = False
@@ -1351,6 +1471,9 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         if self._started:
             return
 
+        # The completion provider can start before the chat plugin; make
+        # sure the package log file exists either way.
+        configure_package_logging()
         enabled = self.get_conf("completions_enabled")
         if not enabled:
             logger.info("AI completions disabled in config, not starting worker")
@@ -1364,9 +1487,11 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._worker.start()
         self._started = True
 
-        # Show the active model name in the status bar
+        # Show the active model name in the status bar, then load the model
+        # so the first completion does not pay the cold start.
         backend_settings = self._resolve_completion_backend_settings()
         self._update_status(self._ready_status_text(backend_settings))
+        self._request_model_warm_up(backend_settings)
 
         logger.info(
             "AI completion provider started: model=%s provider=%s endpoint=%s "
@@ -1397,6 +1522,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._completion_cache.clear()
         self._candidate_store.clear()
         self._shown_candidates.clear()
+        self._visible_ghosts.clear()
         self._dismissed_targets.clear()
         logger.info("AI completion provider shut down")
 
@@ -1464,6 +1590,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
                 self._document_states.pop(filename, None)
                 self._latest_target_by_filename.pop(filename, None)
                 self._shown_candidates.pop(filename, None)
+                self._visible_ghosts.pop(filename, None)
                 self._dismissed_targets.pop(filename, None)
 
         elif req_type == CompletionRequestTypes.DOCUMENT_COMPLETION:
@@ -1639,12 +1766,14 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
     def _should_request_alternative(self, target):
         """Return True when the user is asking for another visible suggestion."""
         shown = self._shown_candidates.get(target.filename) or {}
-        return shown.get("target") == target
+        shown_target = shown.get("target")
+        return shown_target is not None and shown_target.anchor == target.anchor
 
     def _try_cycle_visible_candidate(self, target, req_id):
         """Cycle to the next remembered candidate for the same visible target."""
         shown = self._shown_candidates.get(target.filename) or {}
-        if shown.get("target") != target:
+        shown_target = shown.get("target")
+        if shown_target is None or shown_target.anchor != target.anchor:
             return False
 
         next_text = self._candidate_store.next_after(
@@ -1951,6 +2080,85 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
         self._update_status(self._ready_status_text())
 
+    def _request_model_warm_up(self, backend_settings=None):
+        """Schedule a model load for the current settings (coalesced).
+
+        Called on start and whenever the backend or model changes. Only
+        the most recent request matters: the status returns to ready when
+        the worker reports the model currently expected.
+        """
+        del backend_settings  # resolved fresh when the timer fires
+        if not self._started:
+            return
+        self._warm_up_timer.start()
+
+    def _dispatch_model_warm_up(self):
+        """Send one warm-up for the current backend/model to the worker."""
+        if not self._started or not self.get_conf("completions_enabled"):
+            return
+        backend_settings = self._resolve_completion_backend_settings()
+        model = self._resolved_completion_model()
+        if not model or backend_settings.get("provider_kind") != PROVIDER_KIND_OLLAMA:
+            return
+        signature = (backend_settings.get("endpoint", ""), model)
+        if signature == self._warmed_signature:
+            logger.info("AI completion model %s already loaded; warm-up skipped", model)
+            return
+        self._warming_model = model
+        self._last_warm_up_detail = ""
+        self._update_status(f"AI: loading {_short_completion_model_label(model)}…")
+        logger.info("Requesting AI completion model warm-up for %s", model)
+        self._worker.sig_warm_up.emit({**backend_settings, "model": model})
+
+    def _pick_fallback_model(self, failed_model, detail):
+        """Fall back to the chat model when the configured one is missing.
+
+        Only for "model not found" failures of an explicitly configured
+        completion model, and only when the chat model is a different,
+        concrete model. Returns True when a fallback warm-up was requested.
+        """
+        if "not found" not in str(detail).lower() or self._model_fallback:
+            return False
+        configured = str(self.get_conf("completion_model") or "").strip()
+        chat_model = str(self.get_conf("chat_model", default="") or "").strip()
+        if (
+            failed_model != configured
+            or not chat_model
+            or chat_model in _GENERIC_COMPLETION_MODEL_NAMES
+            or chat_model == failed_model
+        ):
+            return False
+        self._model_fallback = chat_model
+        logger.warning(
+            "Configured completion model %r is not installed; using the chat "
+            "model %r for completions until settings change",
+            failed_model,
+            chat_model,
+        )
+        self._request_model_warm_up()
+        return True
+
+    def _on_warm_up_done(self, model, ok, detail):
+        """Return to the ready status once the expected model is loaded."""
+        if model != self._warming_model:
+            logger.info("Ignoring stale warm-up result for %s (%s)", model, detail)
+            return
+        self._warming_model = ""
+        self._last_warm_up_detail = "" if ok else detail
+        self._warmed_signature = None
+        if not ok and self._pick_fallback_model(model, detail):
+            return
+        if ok:
+            self._warmed_signature = (
+                self._resolve_completion_backend_settings().get("endpoint", ""),
+                model,
+            )
+            self._increment_metric("warm_ups")
+            logger.info("AI completion model %s ready (%s)", model, detail)
+            self._set_ready_status()
+        else:
+            self._update_status(self._ready_status_text())
+
     def _emit_empty_response(self, req_id):
         """Emit an empty completion response for a request id."""
         logger.debug("Emitting empty AI completion response for req_id=%d", req_id)
@@ -1994,28 +2202,14 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
     def _resolve_completion_backend_settings(self):
         """Return the provider-aware backend settings for completions."""
+        settings = AssistantSettings.from_conf(self.get_conf)
         return resolve_completion_backend_settings(
-            chat_provider=self.get_conf(
-                "chat_provider",
-                default=PROVIDER_KIND_OLLAMA,
-            ),
-            chat_provider_profile_id=self.get_conf(
-                "chat_provider_profile_id",
-                default="",
-            ),
-            provider_profiles=self.get_conf("provider_profiles", default="[]"),
-            ollama_host=self.get_conf(
-                "ollama_host",
-                default="http://localhost:11434",
-            ),
-            openai_compatible_base_url=self.get_conf(
-                "openai_compatible_base_url",
-                default="",
-            ),
-            openai_compatible_api_key=self.get_conf(
-                "openai_compatible_api_key",
-                default="",
-            ),
+            chat_provider=settings.chat_provider,
+            chat_provider_profile_id=settings.chat_provider_profile_id,
+            provider_profiles=settings.provider_profiles,
+            ollama_host=settings.ollama_host,
+            openai_compatible_base_url=settings.openai_compatible_base_url,
+            openai_compatible_api_key=settings.openai_compatible_api_key,
         )
 
     def _on_completion_backend_changed(self):
@@ -2033,12 +2227,30 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._shown_candidates.clear()
         if self.get_conf("completions_enabled"):
             self._set_ready_status()
+            self._request_model_warm_up(backend_settings)
 
     def _resolved_completion_model(self):
-        """Return the configured live completion model after light healing."""
+        """Return the live completion model.
+
+        Resolution order: the configured completion model, then the chat
+        model (a separate completion model is optional), then the packaged
+        default. Generic placeholder names count as unset.
+        """
         model = str(self.get_conf("completion_model") or "").strip()
+        chat_model = str(self.get_conf("chat_model", default="") or "").strip()
+        fallback = getattr(self, "_model_fallback", "")
+        if fallback:
+            # The configured completion model is not installed; keep using
+            # the chat model until the configuration changes.
+            return fallback
         if model not in _GENERIC_COMPLETION_MODEL_NAMES:
             return model
+        if chat_model and chat_model not in _GENERIC_COMPLETION_MODEL_NAMES:
+            logger.info(
+                "No separate completion model configured; using chat model %r",
+                chat_model,
+            )
+            return chat_model
         default_model = dict(self.CONF_DEFAULTS).get("completion_model", "")
         logger.warning(
             "Completion model config was generic/invalid (%r); falling back to %r",
@@ -2047,10 +2259,33 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         )
         return str(default_model or "").strip()
 
+    def inline_suggestions_active(self):
+        """True when ghost text can be expected from this provider.
+
+        Used by the ghost text managers to decide whether hiding Spyder's
+        automatic completion popup is safe: only while completions are on,
+        the worker runs, and the last model load did not fail.
+        """
+        return bool(
+            self._started
+            and self.get_conf("completions_enabled")
+            and not getattr(self, "_last_warm_up_detail", "")
+        )
+
     def _ready_status_text(self, backend_settings=None):
-        """Return the steady-state status label for the live completion model."""
+        """Return the steady-state status label for the live completion model.
+
+        A model whose last load failed stays flagged as unavailable until a
+        later warm-up succeeds, so other status refreshes cannot hide it.
+        """
         del backend_settings
-        return f"AI: {_short_completion_model_label(self._resolved_completion_model())}"
+        label = _short_completion_model_label(self._resolved_completion_model())
+        if getattr(self, "_last_warm_up_detail", ""):
+            return f"AI: {label} unavailable"
+        # A fallback to the chat model is a working state: the label shows the
+        # model actually in use; the tooltip explains why (see
+        # ``_build_status_payload``).
+        return f"AI: {label}"
 
     @on_conf_change(option="ollama_host")
     def on_host_changed(self, value):
@@ -2090,15 +2325,29 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
     @on_conf_change(option="completion_model")
     def on_completion_model_changed(self, _value):
-        """Refresh steady-state status and clear stale cached completions."""
-        resolved_model = self._resolved_completion_model()
-        if resolved_model != str(self.get_conf("completion_model") or "").strip():
-            self.set_conf("completion_model", resolved_model)
-            return
+        """Refresh steady-state status and clear stale cached completions.
+
+        The stored value is left as-is: an empty completion model means
+        "use the chat model" and must keep following the chat model.
+        """
+        self._model_fallback = ""
+        self._last_warm_up_detail = ""
         self._completion_cache.clear()
         self._candidate_store.clear()
         if self.get_conf("completions_enabled"):
             self._set_ready_status()
+            self._request_model_warm_up()
+
+    @on_conf_change(option="chat_model")
+    def on_chat_model_changed(self, _value):
+        """The chat model backs completions when no completion model is set."""
+        self._model_fallback = ""
+        if str(self.get_conf("completion_model") or "").strip() in _GENERIC_COMPLETION_MODEL_NAMES:
+            self._completion_cache.clear()
+            self._candidate_store.clear()
+            if self.get_conf("completions_enabled"):
+                self._set_ready_status()
+                self._request_model_warm_up()
 
     @on_conf_change(option="completion_temperature")
     def on_completion_temperature_changed(self, _value):
@@ -2143,6 +2392,19 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         line = int(req.get("line", 0))
         column = int(req.get("column", 0))
         offset = int(req.get("offset", 0))
+        # Requests issued while a ghost is visible count the ghost text.
+        ghost = self._visible_ghosts.get(filename)
+        if ghost is not None:
+            offset, adjusted = ghost_free_position(offset, ghost[0], ghost[1])
+            if adjusted:
+                line, column = line_column_at(
+                    state.text if state is not None else "", offset
+                )
+                logger.info(
+                    "Normalized AI completion request past visible ghost for %s to offset=%d",
+                    filename,
+                    offset,
+                )
         insert_line, insert_column, insert_offset = _resolve_completion_anchor(
             state.text if state is not None else "",
             line,
@@ -2189,7 +2451,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
     def _is_target_dismissed(self, target):
         """Return True when one target was explicitly dismissed by the user."""
         dismissed = self._dismissed_targets.get(target.filename)
-        return dismissed == target
+        return dismissed is not None and dismissed.anchor == target.anchor
 
     @staticmethod
     def _should_skip_completion(req, prefix, suffix):
@@ -2208,6 +2470,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
     def record_ghost_event(self, event_name, payload=None):
         """Record one ghost-text lifecycle event from the editor layer."""
         payload = payload or {}
+        update_visible_ghosts(self._visible_ghosts, payload)
         reason = str(payload.get("reason", "") or "")
         method = str(payload.get("method", "") or "")
         target = payload.get("target") or {}
@@ -2457,6 +2720,20 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             "",
             f"Model: {model_name or 'unconfigured'}",
             f"Endpoint: {backend_settings.get('endpoint', '') or 'unknown'}",
+            *(
+                [f"Last model load error: {self._last_warm_up_detail}"]
+                if getattr(self, "_last_warm_up_detail", "")
+                else []
+            ),
+            *(
+                [
+                    f"Configured completion model "
+                    f"'{self.get_conf('completion_model')}' is not installed; "
+                    "using the chat model instead (change it in Settings)"
+                ]
+                if getattr(self, "_model_fallback", "")
+                else []
+            ),
             "",
             f"Requests: {metrics['requests_received']}",
             (
