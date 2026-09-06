@@ -52,6 +52,7 @@ from spyder_ai_assistant.utils.chat_persistence import (
 from spyder_ai_assistant.utils.assistant_settings import (
     ASSISTANT_APPEARANCE_KEYS,
     ASSISTANT_CONF_DEFAULTS,
+    GHOST_TEXT_OPTION_KEYS,
     AssistantSettings,
 )
 from spyder_ai_assistant.utils.code_apply import (
@@ -588,6 +589,11 @@ class AIChatPlugin(SpyderDockablePlugin):
                 post_accept_completion_delay_ms=self.get_conf(
                     "post_accept_completion_delay_ms", default=75,
                 ),
+                native_popup_policy=self.get_conf(
+                    "native_popup_policy",
+                    default=ASSISTANT_CONF_DEFAULTS["native_popup_policy"],
+                ),
+                ai_available=self._inline_ai_available,
             )
             self._ghost_managers[editor_id] = manager
             logger.info(
@@ -1093,6 +1099,11 @@ class AIChatPlugin(SpyderDockablePlugin):
         except Exception as error:
             logger.debug("Failed to record ghost lifecycle event: %s", error)
 
+    def _inline_ai_available(self):
+        """True when the completion provider can currently deliver ghost text."""
+        provider = self._get_completion_provider_instance()
+        return provider is not None and provider.inline_suggestions_active()
+
     def _get_completion_provider_instance(self):
         """Return the AI completion provider instance if it is available."""
         provider = self._completion_provider_instance
@@ -1530,14 +1541,18 @@ class AIChatPlugin(SpyderDockablePlugin):
         widget.update_all_display_appearance(**{key: value})
 
     # --- Behavior config change handlers ---
-    # These propagate ghost text timing to all editor ghost text managers.
+    # These propagate ghost text options to all editor ghost text managers.
 
-    @on_conf_change(option=["idle_completion_delay_ms", "post_accept_completion_delay_ms"])
-    def on_ghost_timing_changed(self, option, value):
-        """Ghost text timing applies to every editor's ghost manager."""
-        keyword = "idle_ms" if option == "idle_completion_delay_ms" else "post_accept_ms"
+    @on_conf_change(option=list(GHOST_TEXT_OPTION_KEYS))
+    def on_ghost_option_changed(self, option, value):
+        """Ghost text timing and popup policy apply to every editor's manager."""
         for manager in self._ghost_managers.values():
-            manager.update_timing(**{keyword: value})
+            if option == "native_popup_policy":
+                manager.set_native_popup_policy(value)
+            elif option == "idle_completion_delay_ms":
+                manager.update_timing(idle_ms=value)
+            else:
+                manager.update_timing(post_accept_ms=value)
 
     @on_plugin_teardown(plugin=Plugins.Preferences)
     def on_preferences_teardown(self):

@@ -33,6 +33,41 @@ DEFAULT_DEBOUNCE_MS = 300
 DEFAULT_COMPLETION_SHORTCUT = "Ctrl+Shift+Space"
 DEFAULT_COMPLETION_ACCEPT_WORD_SHORTCUT = "Alt+Right"
 DEFAULT_COMPLETION_ACCEPT_LINE_SHORTCUT = "Alt+Shift+Right"
+
+# How inline AI suggestions share the editor with Spyder's own completion
+# popup (pylsp, fallback, snippets). Only *automatic* popups (the ones Spyder
+# opens by itself after "." or a few characters) are affected; an explicit
+# Ctrl+Space popup always wins, whatever the policy.
+NATIVE_POPUP_POLICY_AI_FIRST = "ai_first"
+NATIVE_POPUP_POLICY_AI_REPLACES = "ai_replaces"
+NATIVE_POPUP_POLICY_NATIVE_FIRST = "native_first"
+NATIVE_POPUP_POLICIES = (
+    NATIVE_POPUP_POLICY_AI_FIRST,
+    NATIVE_POPUP_POLICY_AI_REPLACES,
+    NATIVE_POPUP_POLICY_NATIVE_FIRST,
+)
+NATIVE_POPUP_POLICY_LABELS = {
+    NATIVE_POPUP_POLICY_AI_FIRST: "AI suggestions only (Spyder popup on Ctrl+Space)",
+    NATIVE_POPUP_POLICY_AI_REPLACES: "Show Spyder popup, replace it when the AI answers",
+    NATIVE_POPUP_POLICY_NATIVE_FIRST: "Spyder popup first (AI waits until it closes)",
+}
+NATIVE_POPUP_POLICY_DESCRIPTIONS = {
+    NATIVE_POPUP_POLICY_AI_FIRST: (
+        "While AI completions are on and the model is available, Spyder's "
+        "automatic completion popup stays hidden and ghost text is the only "
+        "automatic suggestion. Press Ctrl+Space for the Spyder popup."
+    ),
+    NATIVE_POPUP_POLICY_AI_REPLACES: (
+        "Spyder's automatic popup opens as usual while the AI is thinking; "
+        "the ghost suggestion closes it when it arrives."
+    ),
+    NATIVE_POPUP_POLICY_NATIVE_FIRST: (
+        "Spyder's automatic popup keeps priority: an AI suggestion arriving "
+        "while it is open is dropped, and a visible ghost only blocks new "
+        "automatic popups."
+    ),
+}
+DEFAULT_NATIVE_POPUP_POLICY = NATIVE_POPUP_POLICY_AI_FIRST
 DEFAULT_CHAT_SYSTEM_PROMPT = (
     "You are a helpful AI coding assistant working inside "
     "the Spyder IDE. Be concise and provide code examples "
@@ -109,7 +144,16 @@ ASSISTANT_CONF_DEFAULTS = {
     "debounce_ms": DEFAULT_DEBOUNCE_MS,
     "idle_completion_delay_ms": DEFAULT_IDLE_COMPLETION_DELAY_MS,
     "post_accept_completion_delay_ms": DEFAULT_POST_ACCEPT_COMPLETION_DELAY_MS,
+    "native_popup_policy": DEFAULT_NATIVE_POPUP_POLICY,
 }
+
+# Options every editor's ghost text manager reads directly (the plugin pushes
+# changes to all managers; see ``on_ghost_option_changed``).
+GHOST_TEXT_OPTION_KEYS = (
+    "idle_completion_delay_ms",
+    "post_accept_completion_delay_ms",
+    "native_popup_policy",
+)
 
 COMPLETION_PROVIDER_CONF_DEFAULTS = [
     ("ollama_host", ASSISTANT_CONF_DEFAULTS["ollama_host"]),
@@ -163,6 +207,12 @@ def _normalize_string(value, default="", *, default_on_blank=False):
     if default_on_blank and not normalized.strip():
         return str(default or "")
     return normalized
+
+
+def _normalize_choice(value, choices, default):
+    """Return ``value`` when it is one of ``choices``, else ``default``."""
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in choices else default
 
 
 def _normalize_bool(value, default=False):
@@ -269,6 +319,7 @@ class AssistantSettings:
     theme_color_overrides: str = DEFAULT_THEME_COLOR_OVERRIDES
     debounce_ms: int = DEFAULT_DEBOUNCE_MS
     idle_completion_delay_ms: int = DEFAULT_IDLE_COMPLETION_DELAY_MS
+    native_popup_policy: str = DEFAULT_NATIVE_POPUP_POLICY
     post_accept_completion_delay_ms: int = DEFAULT_POST_ACCEPT_COMPLETION_DELAY_MS
 
     @classmethod
@@ -322,6 +373,11 @@ class AssistantSettings:
             ),
             project_tools_enabled=_normalize_bool(
                 values.get("project_tools_enabled", True),
+            ),
+            native_popup_policy=_normalize_choice(
+                values.get("native_popup_policy", DEFAULT_NATIVE_POPUP_POLICY),
+                NATIVE_POPUP_POLICIES,
+                DEFAULT_NATIVE_POPUP_POLICY,
             ),
             mcp_enabled=_normalize_bool(
                 values.get("mcp_enabled", True),

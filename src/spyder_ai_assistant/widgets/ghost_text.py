@@ -32,6 +32,12 @@ Usage (from plugin.py):
     # User types anything else → ghost text disappears
 """
 
+from spyder_ai_assistant.utils.assistant_settings import (
+    DEFAULT_NATIVE_POPUP_POLICY,
+    NATIVE_POPUP_POLICIES,
+    NATIVE_POPUP_POLICY_AI_FIRST,
+    NATIVE_POPUP_POLICY_NATIVE_FIRST,
+)
 from spyder_ai_assistant.utils.text_positions import python_index, utf16_length
 
 import logging
@@ -188,9 +194,11 @@ class _GhostEventFilter(QObject):
 class _CompletionPopupWatcher(QObject):
     """Event filter installed on the editor's completion popup widget.
 
-    The native LSP popup should take priority over inline ghost text.
-    This watcher keeps the manager informed about popup visibility so
-    ghost suggestions are cleared or suppressed when needed.
+    Decides, at the moment Spyder tries to show its completion popup,
+    whether the popup or the inline ghost text owns the editor (see
+    ``GhostTextManager.blocks_automatic_popup``), and keeps the manager
+    informed about popup visibility so ghost suggestions are cleared or
+    suppressed when the popup wins.
     """
 
     def __init__(self, manager, completion_widget):
@@ -200,7 +208,10 @@ class _CompletionPopupWatcher(QObject):
     def eventFilter(self, obj, event):
         """Track completion popup visibility changes."""
         if event.type() == QEvent.Show:
-            if self._manager.has_suggestion() and bool(getattr(obj, "automatic", False)):
+            automatic = bool(getattr(obj, "automatic", False))
+            if automatic and self._manager.blocks_automatic_popup():
+                # Swallow the popup before it takes focus; the ghost text (or
+                # the pending AI request) keeps the editor.
                 self._manager._emit_lifecycle_event(
                     "suppressed",
                     reason="native_popup",
@@ -245,10 +256,19 @@ class GhostTextManager:
         manual_completion_requester=None,
         idle_completion_delay_ms=IDLE_COMPLETION_DELAY_MS,
         post_accept_completion_delay_ms=POST_ACCEPT_COMPLETION_DELAY_MS,
+        native_popup_policy=DEFAULT_NATIVE_POPUP_POLICY,
+        ai_available=None,
     ):
         self._editor = editor
         self._lifecycle_callback = lifecycle_callback
         self._manual_completion_requester = manual_completion_requester
+        # Ownership rule between ghost text and Spyder's automatic popup
+        # (``NATIVE_POPUP_POLICIES``); ``ai_available`` tells whether the AI
+        # side can actually deliver (completions on, model loaded), so the
+        # "AI first" policy never hides native popups while the AI is down.
+        self._native_popup_policy = DEFAULT_NATIVE_POPUP_POLICY
+        self._ai_available = ai_available
+        self.set_native_popup_policy(native_popup_policy)
         self._ghost_active = False
         self._ghost_text = ""
         self._target = None
@@ -314,6 +334,51 @@ class GhostTextManager:
         editor.textChanged.connect(self._schedule_idle_completion)
         editor.verticalScrollBar().sliderPressed.connect(self.pause_for_scroll)
 
+    def set_native_popup_policy(self, policy):
+        """Choose how ghost text shares the editor with Spyder's popup.
+
+        Unknown values fall back to the default policy so a stale config
+        value can never disable both completion sources.
+        """
+        policy = str(policy or "").strip().lower()
+        if policy not in NATIVE_POPUP_POLICIES:
+            policy = DEFAULT_NATIVE_POPUP_POLICY
+        self._native_popup_policy = policy
+
+    @property
+    def native_popup_policy(self):
+        """The active popup ownership policy (see ``NATIVE_POPUP_POLICIES``)."""
+        return self._native_popup_policy
+
+    def _ai_can_deliver(self):
+        """True when the AI side is expected to produce suggestions."""
+        if self._ai_available is None:
+            return True
+        try:
+            return bool(self._ai_available())
+        except Exception:
+            return False
+
+    def blocks_automatic_popup(self):
+        """True when an *automatic* native popup must stay hidden right now.
+
+        A visible ghost always keeps its place against an automatic popup.
+        Under the "AI first" policy the automatic popup also stays hidden
+        while a suggestion may still arrive, as long as the AI can deliver;
+        an explicit Ctrl+Space popup is never blocked (the caller checks
+        ``automatic``).
+        """
+        if self._ghost_active:
+            return True
+        return (
+            self._native_popup_policy == NATIVE_POPUP_POLICY_AI_FIRST
+            and self._ai_can_deliver()
+        )
+
+    def _ghost_replaces_automatic_popup(self):
+        """True when an arriving ghost may close an automatic native popup."""
+        return self._native_popup_policy != NATIVE_POPUP_POLICY_NATIVE_FIRST
+
     def update_timing(self, idle_ms=None, post_accept_ms=None):
         """Update completion delay timers from config.
 
@@ -363,10 +428,16 @@ class GhostTextManager:
 
         self._idle_completion_timer.stop()
 
-        # The native Spyder popup owns completion UI while it is visible.
-        if self._completion_popup_visible():
+        # An explicit (Ctrl+Space) popup always owns the completion UI. An
+        # automatic one only does under the "native first" policy; otherwise
+        # the arriving ghost closes it and takes over.
+        replaces_automatic = self._ghost_replaces_automatic_popup()
+        if self._completion_popup_visible(manual_only=replaces_automatic):
             self._log_suppressed("native completion popup is visible", target)
             return False
+        if replaces_automatic and self._completion_popup_visible():
+            logger.info("Ghost text replaces the automatic native completion popup")
+            self._hide_completion_popup()
 
         if not self._matches_target(target):
             self._log_suppressed("editor cursor no longer matches the target", target)

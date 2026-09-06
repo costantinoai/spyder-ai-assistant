@@ -43,7 +43,13 @@ from spyder_ai_assistant.mcp.settings import (
     normalize_mcp_host,
     normalize_mcp_port,
 )
-from spyder_ai_assistant.utils.assistant_settings import AssistantSettings
+from spyder_ai_assistant.utils.assistant_settings import (
+    DEFAULT_NATIVE_POPUP_POLICY,
+    NATIVE_POPUP_POLICIES,
+    NATIVE_POPUP_POLICY_DESCRIPTIONS,
+    NATIVE_POPUP_POLICY_LABELS,
+    AssistantSettings,
+)
 from spyder_ai_assistant.utils.chat_themes import (
     EXPOSED_COLOR_KEYS,
     get_preset_names,
@@ -372,6 +378,25 @@ class AssistantSettingsDialog(QDialog):
         ghost_form.addRow("Idle completion delay", self.idle_delay_spin)
         ghost_form.addRow("Post-accept delay", self.post_accept_delay_spin)
         behavior_layout.addWidget(ghost_group)
+
+        # Ownership between ghost text and Spyder's own automatic popup
+        # (pylsp etc.). The description below the combo explains the
+        # selected policy so the user does not have to guess.
+        popup_group = QGroupBox("Spyder's automatic completion popup", behavior_tab)
+        popup_layout = QVBoxLayout(popup_group)
+        self.native_popup_policy_combo = QComboBox(popup_group)
+        for policy in NATIVE_POPUP_POLICIES:
+            self.native_popup_policy_combo.addItem(
+                NATIVE_POPUP_POLICY_LABELS[policy], policy
+            )
+        self.native_popup_policy_combo.currentIndexChanged.connect(
+            self._refresh_native_popup_policy_description
+        )
+        popup_layout.addWidget(self.native_popup_policy_combo)
+        self.native_popup_policy_description = QLabel(popup_group)
+        self.native_popup_policy_description.setWordWrap(True)
+        popup_layout.addWidget(self.native_popup_policy_description)
+        behavior_layout.addWidget(popup_group)
 
         access_group = QGroupBox("Project access", behavior_tab)
         access_form = QFormLayout(access_group)
@@ -835,11 +860,33 @@ class AssistantSettingsDialog(QDialog):
         self.post_accept_delay_spin.setValue(
             int(self._settings.get("post_accept_completion_delay_ms", 75) or 75)
         )
+        self._select_native_popup_policy(
+            self._settings.get("native_popup_policy", DEFAULT_NATIVE_POPUP_POLICY)
+        )
 
         self._select_chat_model()
         self._refresh_completion_model_options()
         self._refresh_mcp_preview()
         self._refresh_mcp_status_label()
+
+    def _select_native_popup_policy(self, policy):
+        """Select ``policy`` in the popup combo (default when unknown)."""
+        index = self.native_popup_policy_combo.findData(policy)
+        if index < 0:
+            index = self.native_popup_policy_combo.findData(DEFAULT_NATIVE_POPUP_POLICY)
+        self.native_popup_policy_combo.setCurrentIndex(max(index, 0))
+        self._refresh_native_popup_policy_description()
+
+    def _refresh_native_popup_policy_description(self, *_args):
+        """Explain the selected popup policy under the combo."""
+        policy = self.native_popup_policy_combo.currentData()
+        self.native_popup_policy_description.setText(
+            NATIVE_POPUP_POLICY_DESCRIPTIONS.get(policy, "")
+        )
+
+    def selected_native_popup_policy(self):
+        """Return the popup policy chosen in the Behavior tab."""
+        return self.native_popup_policy_combo.currentData() or DEFAULT_NATIVE_POPUP_POLICY
 
     def _select_chat_model(
         self,
@@ -954,4 +1001,5 @@ class AssistantSettingsDialog(QDialog):
             # Behavior
             "idle_completion_delay_ms": int(self.idle_delay_spin.value()),
             "post_accept_completion_delay_ms": int(self.post_accept_delay_spin.value()),
+            "native_popup_policy": self.selected_native_popup_policy(),
         }).to_conf_dict()

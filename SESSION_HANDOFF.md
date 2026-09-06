@@ -220,6 +220,28 @@ Process rule added after this session: live harnesses, screenshots and
 synthetic input run on a private Xvfb display (`:99`), never on the user's
 `DISPLAY=:1`.
 
+## Fourth commit (2026-09-06): ghost text vs Spyder's automatic popup
+
+User feedback: "after `os.pa` the pylsp popup wins, ghost suppressed" is not
+user friendly. New setting `native_popup_policy` (Settings > Behavior,
+default `ai_first`):
+
+- `ai_first`: while the provider reports `inline_suggestions_active()`
+  (completions on, worker started, last model load ok) Spyder's automatic
+  popup is swallowed in the popup watcher's Show event; ghost text is the
+  only automatic suggestion. Explicit Ctrl+Space popup still opens and wins.
+  When the model is offline the native popup behaves normally.
+- `ai_replaces`: automatic popup opens; the arriving ghost hides it.
+- `native_first`: previous behaviour.
+
+Plumbing: `GhostTextManager(native_popup_policy=..., ai_available=...)`,
+`set_native_popup_policy()`, `blocks_automatic_popup()`; plugin
+`_inline_ai_available()` + `on_ghost_option_changed` (GHOST_TEXT_OPTION_KEYS);
+provider `inline_suggestions_active()`; dialog combo with description.
+Verified: unit tests (6 new) and `run_completion_lsp_validation` with real
+pylsp on Xvfb (two new scenarios: `ai_first_hides_automatic_popup`,
+`ai_replaces_automatic_popup`).
+
 ## Follow-ups (not blocking, listed in tasks/todo.md)
 
 - Inline (in-editor) diff review with per-hunk accept/reject remains the

@@ -2259,6 +2259,19 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         )
         return str(default_model or "").strip()
 
+    def inline_suggestions_active(self):
+        """True when ghost text can be expected from this provider.
+
+        Used by the ghost text managers to decide whether hiding Spyder's
+        automatic completion popup is safe: only while completions are on,
+        the worker runs, and the last model load did not fail.
+        """
+        return bool(
+            self._started
+            and self.get_conf("completions_enabled")
+            and not getattr(self, "_last_warm_up_detail", "")
+        )
+
     def _ready_status_text(self, backend_settings=None):
         """Return the steady-state status label for the live completion model.
 
