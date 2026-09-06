@@ -59,6 +59,7 @@ from spyder_ai_assistant.utils.code_apply import (
     APPLY_MODE_REPLACE,
     apply_code_plan,
 )
+from spyder_ai_assistant.utils.logging import configure_package_logging
 from spyder_ai_assistant.utils.runtime_context import RuntimeContextService
 from spyder_ai_assistant.widgets.chat_widget import ChatWidget
 from spyder_ai_assistant.widgets.config_page import AIChatConfigPage
@@ -199,6 +200,11 @@ class AIChatPlugin(SpyderDockablePlugin):
     # --- Plugin lifecycle ---
 
     def on_initialize(self):
+        # Spyder redirects stdout to its internal console after startup, so
+        # the rotating log file is the only durable evidence of plugin
+        # behaviour in real sessions (validation harnesses rely on it too).
+        configure_package_logging()
+
         """Called after the plugin and widget are created.
 
         Connects the widget's code-apply preview signal to our handler,
@@ -300,6 +306,7 @@ class AIChatPlugin(SpyderDockablePlugin):
 
         settings = self._build_completion_provider_settings()
         synced = False
+        changed = []
         for key, value in settings.items():
             try:
                 current = provider.get_conf(key)
@@ -307,8 +314,20 @@ class AIChatPlugin(SpyderDockablePlugin):
                 current = None
             if current == value:
                 continue
-            provider.set_conf(key, value)
+            try:
+                provider.set_conf(key, value)
+            except Exception as error:
+                logger.warning(
+                    "Could not push completion setting %s=%r to the provider: %s",
+                    key, value, error,
+                )
+                continue
+            changed.append(f"{key}: {current!r} -> {value!r}")
             synced = True
+        logger.info(
+            "Completion provider settings sync: %s",
+            "; ".join(changed) if changed else "already up to date",
+        )
 
         if synced:
             logger.info(

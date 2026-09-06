@@ -55,7 +55,6 @@ from spyder_ai_assistant.widgets.model_selection import (
 from spyder_ai_assistant.utils.prompt_library import (
     build_chat_prompt_preset_block,
     get_chat_prompt_preset,
-    list_chat_prompt_presets,
     normalize_chat_prompt_preset,
 )
 from spyder_ai_assistant.utils.runtime_bridge import (
@@ -193,13 +192,6 @@ class ChatWidget(PluginMainWidget):
         self.model_combo.setToolTip("Select the AI model for chat")
         self.model_combo.ID = "ai_chat_model_selector"
 
-        self.prompt_preset_combo = QComboBox(self)
-        self.prompt_preset_combo.setMinimumWidth(100)
-        self.prompt_preset_combo.setAccessibleName("Chat mode")
-        self.prompt_preset_combo.setToolTip("Select the active chat mode for this tab")
-        self.prompt_preset_combo.ID = "ai_chat_prompt_preset_selector"
-        self._populate_prompt_preset_combo()
-
         self.status_label = QLabel("Connecting...")
         self.status_label.ID = "ai_chat_status_label"
 
@@ -229,9 +221,6 @@ class ChatWidget(PluginMainWidget):
         toolbar = self.get_main_toolbar()
         self.add_item_to_toolbar(
             self.model_combo, toolbar=toolbar, section="main",
-        )
-        self.add_item_to_toolbar(
-            self.prompt_preset_combo, toolbar=toolbar, section="preset",
         )
         # Secondary context belongs below the model selector so a narrow dock
         # does not hide all controls in the toolbar overflow menu.
@@ -477,9 +466,6 @@ class ChatWidget(PluginMainWidget):
         self.runtime_target_combo.currentIndexChanged.connect(
             self._on_runtime_target_changed
         )
-        self.prompt_preset_combo.currentIndexChanged.connect(
-            self._on_prompt_preset_changed
-        )
         self._tab_widget.currentChanged.connect(self._on_current_tab_changed)
         self._sync_session_controls()
 
@@ -507,41 +493,6 @@ class ChatWidget(PluginMainWidget):
         """
         pass
 
-    def _populate_prompt_preset_combo(self):
-        """Fill the shared preset selector with built-in prompt presets."""
-        self.prompt_preset_combo.blockSignals(True)
-        self.prompt_preset_combo.clear()
-        for preset in list_chat_prompt_presets():
-            self.prompt_preset_combo.addItem(preset["label"], preset["id"])
-            index = self.prompt_preset_combo.count() - 1
-            self.prompt_preset_combo.setItemData(
-                index,
-                preset["description"],
-                Qt.ToolTipRole,
-            )
-        self.prompt_preset_combo.blockSignals(False)
-
-    def _sync_prompt_preset_combo(self, session=None):
-        """Reflect the active session preset in the shared combo box."""
-        if session is None:
-            session = self._active_session
-
-        preset = get_chat_prompt_preset(
-            getattr(session, "prompt_preset_id", None)
-        )
-        combo_index = 0
-        for index in range(self.prompt_preset_combo.count()):
-            if self.prompt_preset_combo.itemData(index) == preset["id"]:
-                combo_index = index
-                break
-
-        self.prompt_preset_combo.blockSignals(True)
-        self.prompt_preset_combo.setCurrentIndex(combo_index)
-        self.prompt_preset_combo.setToolTip(
-            f"{preset['label']}: {preset['description']}"
-        )
-        self.prompt_preset_combo.blockSignals(False)
-
     def _sync_chat_settings_button(self, session=None):
         """Reflect assistant settings entrypoint and active tab overrides."""
         if session is None:
@@ -555,9 +506,11 @@ class ChatWidget(PluginMainWidget):
             return
 
         metadata = self._chat_option_metadata(session)
+        mode = get_chat_prompt_preset(getattr(session, "prompt_preset_id", None))
         has_override = (
             metadata["temperature_source"] == "override"
             or metadata["num_predict_source"] == "override"
+            or mode["id"] != normalize_chat_prompt_preset(None)
         )
         self.chat_settings_btn.setText("Settings*" if has_override else "Settings")
         self.chat_settings_btn.setToolTip(
@@ -586,7 +539,6 @@ class ChatWidget(PluginMainWidget):
 
     def _sync_session_controls(self, session=None):
         """Refresh the shared per-tab controls from the active session."""
-        self._sync_prompt_preset_combo(session=session)
         self._sync_chat_settings_button(session=session)
         self._sync_session_menu_button(session=session)
         if hasattr(self, "send_btn"):
@@ -1011,31 +963,6 @@ class ChatWidget(PluginMainWidget):
         self._on_model_changed(self.model_combo.currentIndex())
         return True
 
-    def _on_prompt_preset_changed(self, index):
-        """Persist the selected prompt preset on the active session."""
-        del index
-        session = self._active_session
-        if session is None:
-            return
-
-        preset_id = normalize_chat_prompt_preset(
-            self.prompt_preset_combo.currentData()
-        )
-        if session.prompt_preset_id == preset_id:
-            self._sync_prompt_preset_combo(session)
-            return
-
-        session.prompt_preset_id = preset_id
-        session.touch()
-        preset = get_chat_prompt_preset(preset_id)
-        logger.info(
-            "Chat prompt preset set to %s for session %s",
-            preset["label"],
-            session.session_id,
-        )
-        self._sync_prompt_preset_combo(session)
-        self._notify_session_state_changed("prompt-preset")
-
     def _chat_default_options(self):
         """Return the normalized global chat defaults from preferences."""
         return self._assistant_settings().chat_default_options()
@@ -1176,8 +1103,28 @@ class ChatWidget(PluginMainWidget):
             session_title=getattr(session, "title", ""),
             defaults=self._chat_default_options(),
             overrides=overrides,
+            prompt_preset_id=getattr(session, "prompt_preset_id", None),
             parent=self,
         )
+
+    def set_prompt_preset(self, preset_id, session=None):
+        """Set the chat mode (prompt preset) of one tab; returns True on change."""
+        session = session or self._active_session
+        if session is None:
+            return False
+        normalized = normalize_chat_prompt_preset(preset_id)
+        if session.prompt_preset_id == normalized:
+            return False
+        session.prompt_preset_id = normalized
+        session.touch()
+        logger.info(
+            "Chat prompt preset set to %s for session %s",
+            get_chat_prompt_preset(normalized)["label"],
+            session.session_id,
+        )
+        self._sync_chat_settings_button(session)
+        self._notify_session_state_changed("prompt-preset")
+        return True
 
     def _apply_chat_settings(self, session, overrides):
         """Persist one set of per-tab inference overrides."""
@@ -1221,7 +1168,8 @@ class ChatWidget(PluginMainWidget):
             self._sync_chat_settings_button(session)
             return False
 
-        return self._apply_chat_settings(session, dialog.selected_overrides())
+        changed = self.set_prompt_preset(dialog.selected_prompt_preset_id(), session)
+        return self._apply_chat_settings(session, dialog.selected_overrides()) or changed
 
     # --- Public API (called by plugin) ---
 
@@ -1397,6 +1345,10 @@ class ChatWidget(PluginMainWidget):
     def serialize_session_state(self):
         """Return the current chat sessions as a persisted payload."""
         return self._session_ctrl.serialize_session_state()
+
+    def clear_all_tabs(self):
+        """Close every chat tab and forget its session (used before a restore)."""
+        self._session_ctrl.clear_all_tabs()
 
     def restore_session_state(self, state):
         """Restore tabs and messages from persisted state."""

@@ -23,7 +23,7 @@ follows). Nothing pushed, merged or published.
 
 - Python for tests/harnesses: `/home/eik-tb/miniforge3/envs/spyder-ai/bin/python`
 - Unit tests: `QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests -q`
-- Live harnesses: `DISPLAY=:1 QT_QPA_PLATFORM=xcb PYTHONPATH=src:. python -u -m tools.spyder_validation.<harness>`
+- Live harnesses (private Xvfb display, never the desktop): `DISPLAY=:99 QT_QPA_PLATFORM=xcb PYTHONPATH=src:. python -u -m tools.spyder_validation.<harness>`
 - Local Ollama now holds exactly one model: `qwen2.5-coder:14b` (Q4_K_M,
   9 GB, fully GPU-resident on the 16 GB RTX 3080). Pulled this session on
   the user's explicit authorisation. The harness constants
@@ -183,6 +183,42 @@ Private harness inventory (tools/spyder_validation, gitignored):
 (`SPYDER_AI_VALIDATION_UI_THEME=light`, `SPYDER_AI_VALIDATION_SHOT_SCALE=2`),
 `run_chat_project_tools_smoke` (real model), `run_mcp_http_smoke` (headless),
 plus the earlier phase harnesses.
+
+## Third commit (2026-09-06): live feedback from the user's own Spyder
+
+Triggered by three points raised after `pip install -e .` put the checkout
+into the `spyder-ai` env (site-packages had a plain 0.6.0 wheel before).
+
+1. Status bar showed a 30B model that no longer exists. Cause: stale
+   `completion_model` in `~/.config/spyder-py3/plugins/ai_chat/spyder.ini`.
+   Fix: `_pick_fallback_model` falls back to the chat model when the
+   configured completion model is missing ("not found"), the status bar shows
+   the model actually in use (`AI: qwen2.5-coder`) with the reason in its
+   tooltip, `chat_model` is synced into
+   the provider conf, and nothing is written back into the stored settings.
+   `configure_package_logging()` is now called from the plugin and the
+   provider, so real sessions log to `~/.config/spyder-py3/spyder-ai-assistant.log`;
+   the MCP server passes `log_config=None` to uvicorn so that logging setup
+   does not break it.
+2. The toolbar "Coding / Data exploration / ..." dropdown is gone. Chat mode
+   (a preset instruction block prepended to the system prompt, default
+   Coding) now lives in the per-tab Chat Settings dialog next to the
+   temperature / max-token overrides; the `Settings` button reads
+   `Settings*` while a tab deviates. Widget API: `set_prompt_preset()`;
+   harness helper `select_prompt_preset` uses it.
+3. Ghost text verified live in the user's session: `os.pa` shows the pylsp
+   popup (ghost suppressed by design), the body line after
+   `def read_config(path):` showed a 588-char ghost docstring; log line
+   `Ghost text shown` confirms it.
+
+Note for the user: their real Spyder config still has the harness fixture
+project `/tmp/spyder-ai-assistant-validation/fixtures/phase13-history-project`
+as the active project (pollution from the first session's non-isolated runs);
+closing the project in Spyder clears it. Nothing was pushed.
+
+Process rule added after this session: live harnesses, screenshots and
+synthetic input run on a private Xvfb display (`:99`), never on the user's
+`DISPLAY=:1`.
 
 ## Follow-ups (not blocking, listed in tasks/todo.md)
 

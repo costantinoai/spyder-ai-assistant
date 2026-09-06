@@ -114,6 +114,7 @@ ASSISTANT_CONF_DEFAULTS = {
 COMPLETION_PROVIDER_CONF_DEFAULTS = [
     ("ollama_host", ASSISTANT_CONF_DEFAULTS["ollama_host"]),
     ("chat_provider", ASSISTANT_CONF_DEFAULTS["chat_provider"]),
+    ("chat_model", ASSISTANT_CONF_DEFAULTS["chat_model"]),
     ("chat_provider_profile_id", ASSISTANT_CONF_DEFAULTS["chat_provider_profile_id"]),
     ("provider_profiles", ASSISTANT_CONF_DEFAULTS["provider_profiles"]),
     (
@@ -544,6 +545,7 @@ class AssistantSettings:
         return {
             "ollama_host": self.ollama_host,
             "chat_provider": self.chat_provider,
+            "chat_model": self.chat_model,
             "chat_provider_profile_id": self.chat_provider_profile_id,
             "provider_profiles": self.provider_profiles,
             "openai_compatible_base_url": self.openai_compatible_base_url,

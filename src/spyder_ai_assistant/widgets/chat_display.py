@@ -1287,8 +1287,8 @@ class ChatDisplay(QTextEdit):
                     in_table = True
                     table_row_index = 0
                     output_lines.append(
-                        f'<table cellpadding="6" cellspacing="0"'
-                        f' style="margin:4px 0; border-collapse:collapse;">'
+                        '<table cellpadding="6" cellspacing="0"'
+                        ' style="margin:4px 0; border-collapse:collapse;">'
                     )
 
                 if table_row_index == 1 and self._is_table_separator(stripped):

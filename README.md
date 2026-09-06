@@ -8,7 +8,7 @@
 
 A local-first AI assistant for [Spyder IDE](https://www.spyder-ide.org/). Chat with a model about your code, get Copilot-style inline completions, inspect live variables and tracebacks, and browse your conversation history — all running on your own GPU through [Ollama](https://ollama.com/), with optional support for OpenAI-compatible endpoints.
 
-![Chat panel: a question about the current file, the answer with a highlighted code block and Copy/Apply actions, model and mode selectors above, Debug/Regenerate/Sessions/Settings actions below](docs/screenshots/chat-panel.png)
+![Chat panel: a question about the current file, the answer with a highlighted code block and Copy/Apply actions, model selector above, Debug/Regenerate/Sessions/Settings actions below](docs/screenshots/chat-panel.png)
 
 ---
 
@@ -75,8 +75,7 @@ A dockable pane for talking to a model about your code. Open it from **View > Pa
 - **Streaming responses** — tokens arrive in real time
 - **Syntax-highlighted code blocks** — with Copy and Apply actions; Apply previews a unified diff and can insert at the cursor, replace the selection, or replace the existing function/class of the same name in place
 - **Thinking/reasoning display** — models that emit `<think>` blocks (QwQ, DeepSeek-R1, etc.) show their reasoning in a dimmed section
-- **Per-tab chat modes** — switch between Coding, Debugging, Review, Data Analysis, Explanation, or Documentation presets
-- **Per-tab inference settings** — override temperature and max tokens for individual tabs
+- **Per-tab chat settings** — the **Settings** button next to the input opens the tab's chat mode (Coding, Debugging, Review, Data Analysis, Explanation, or Documentation, each a different instruction block for the model) and its temperature / max-token overrides; the button shows `Settings*` while a tab deviates from the defaults
 - **Mid-conversation model switching** — change models from the toolbar without losing context
 - **Stop and regenerate** — cancel a response mid-stream, or rerun the last turn
 - **Delete individual exchanges** — remove any saved turn from the conversation
@@ -234,7 +233,7 @@ All assistant settings live in the chat pane under **Settings**:
 
 Existing single-endpoint settings are imported automatically the first time you open the provider-profiles dialog.
 
-Per-tab chat modes and inference overrides are set directly in the chat pane and persist with the session.
+Per-tab chat modes and inference overrides are set from the chat pane's **Settings** button and persist with the session.
 
 ---
 

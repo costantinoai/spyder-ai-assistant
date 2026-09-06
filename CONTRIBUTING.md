@@ -108,11 +108,14 @@ Typical validation commands:
 source ~/miniforge3/etc/profile.d/conda.sh
 conda activate spyder-ai
 PYTHONPATH=src python -m pytest tests
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_completion_validation
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_workflow_validation
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_persistence_setup
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_persistence_verify
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_use_console_smoke
+# Live harnesses drive a real Spyder with synthetic input: give them their own
+# virtual display so they never steal focus from your desktop session.
+Xvfb :99 -screen 0 2560x1440x24 -nolisten tcp &
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_completion_validation
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_chat_workflow_validation
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_chat_persistence_setup
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_chat_persistence_verify
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_chat_use_console_smoke
 ```
 
 See [docs/validation-workflow.md](docs/validation-workflow.md) for the

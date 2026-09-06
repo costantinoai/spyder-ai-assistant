@@ -39,6 +39,7 @@ from spyder_ai_assistant.utils.assistant_settings import (
     COMPLETION_PROVIDER_CONF_DEFAULTS,
     AssistantSettings,
 )
+from spyder_ai_assistant.utils.logging import configure_package_logging
 from spyder_ai_assistant.utils.text_positions import python_index, utf16_length
 from spyder_ai_assistant.utils.provider_profiles import (
     PROVIDER_KIND_OLLAMA,
@@ -1438,6 +1439,9 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         # model the user already switched away from are ignored.
         self._warming_model = ""
         self._last_warm_up_detail = ""
+        # Runtime-only replacement when the configured completion model is
+        # not installed but the chat model is (never written to config).
+        self._model_fallback = ""
         # (endpoint, model) that finished loading; unchanged settings do not
         # trigger another load.
         self._warmed_signature = None
@@ -1467,6 +1471,9 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         if self._started:
             return
 
+        # The completion provider can start before the chat plugin; make
+        # sure the package log file exists either way.
+        configure_package_logging()
         enabled = self.get_conf("completions_enabled")
         if not enabled:
             logger.info("AI completions disabled in config, not starting worker")
@@ -2103,6 +2110,34 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         logger.info("Requesting AI completion model warm-up for %s", model)
         self._worker.sig_warm_up.emit({**backend_settings, "model": model})
 
+    def _pick_fallback_model(self, failed_model, detail):
+        """Fall back to the chat model when the configured one is missing.
+
+        Only for "model not found" failures of an explicitly configured
+        completion model, and only when the chat model is a different,
+        concrete model. Returns True when a fallback warm-up was requested.
+        """
+        if "not found" not in str(detail).lower() or self._model_fallback:
+            return False
+        configured = str(self.get_conf("completion_model") or "").strip()
+        chat_model = str(self.get_conf("chat_model", default="") or "").strip()
+        if (
+            failed_model != configured
+            or not chat_model
+            or chat_model in _GENERIC_COMPLETION_MODEL_NAMES
+            or chat_model == failed_model
+        ):
+            return False
+        self._model_fallback = chat_model
+        logger.warning(
+            "Configured completion model %r is not installed; using the chat "
+            "model %r for completions until settings change",
+            failed_model,
+            chat_model,
+        )
+        self._request_model_warm_up()
+        return True
+
     def _on_warm_up_done(self, model, ok, detail):
         """Return to the ready status once the expected model is loaded."""
         if model != self._warming_model:
@@ -2110,6 +2145,9 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             return
         self._warming_model = ""
         self._last_warm_up_detail = "" if ok else detail
+        self._warmed_signature = None
+        if not ok and self._pick_fallback_model(model, detail):
+            return
         if ok:
             self._warmed_signature = (
                 self._resolve_completion_backend_settings().get("endpoint", ""),
@@ -2119,10 +2157,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             logger.info("AI completion model %s ready (%s)", model, detail)
             self._set_ready_status()
         else:
-            self._warmed_signature = None
-            self._update_status(
-                f"AI: {_short_completion_model_label(model)} unavailable"
-            )
+            self._update_status(self._ready_status_text())
 
     def _emit_empty_response(self, req_id):
         """Emit an empty completion response for a request id."""
@@ -2202,9 +2237,14 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         default. Generic placeholder names count as unset.
         """
         model = str(self.get_conf("completion_model") or "").strip()
+        chat_model = str(self.get_conf("chat_model", default="") or "").strip()
+        fallback = getattr(self, "_model_fallback", "")
+        if fallback:
+            # The configured completion model is not installed; keep using
+            # the chat model until the configuration changes.
+            return fallback
         if model not in _GENERIC_COMPLETION_MODEL_NAMES:
             return model
-        chat_model = str(self.get_conf("chat_model", default="") or "").strip()
         if chat_model and chat_model not in _GENERIC_COMPLETION_MODEL_NAMES:
             logger.info(
                 "No separate completion model configured; using chat model %r",
@@ -2220,9 +2260,19 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         return str(default_model or "").strip()
 
     def _ready_status_text(self, backend_settings=None):
-        """Return the steady-state status label for the live completion model."""
+        """Return the steady-state status label for the live completion model.
+
+        A model whose last load failed stays flagged as unavailable until a
+        later warm-up succeeds, so other status refreshes cannot hide it.
+        """
         del backend_settings
-        return f"AI: {_short_completion_model_label(self._resolved_completion_model())}"
+        label = _short_completion_model_label(self._resolved_completion_model())
+        if getattr(self, "_last_warm_up_detail", ""):
+            return f"AI: {label} unavailable"
+        # A fallback to the chat model is a working state: the label shows the
+        # model actually in use; the tooltip explains why (see
+        # ``_build_status_payload``).
+        return f"AI: {label}"
 
     @on_conf_change(option="ollama_host")
     def on_host_changed(self, value):
@@ -2262,16 +2312,29 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
 
     @on_conf_change(option="completion_model")
     def on_completion_model_changed(self, _value):
-        """Refresh steady-state status and clear stale cached completions."""
-        resolved_model = self._resolved_completion_model()
-        if resolved_model != str(self.get_conf("completion_model") or "").strip():
-            self.set_conf("completion_model", resolved_model)
-            return
+        """Refresh steady-state status and clear stale cached completions.
+
+        The stored value is left as-is: an empty completion model means
+        "use the chat model" and must keep following the chat model.
+        """
+        self._model_fallback = ""
+        self._last_warm_up_detail = ""
         self._completion_cache.clear()
         self._candidate_store.clear()
         if self.get_conf("completions_enabled"):
             self._set_ready_status()
             self._request_model_warm_up()
+
+    @on_conf_change(option="chat_model")
+    def on_chat_model_changed(self, _value):
+        """The chat model backs completions when no completion model is set."""
+        self._model_fallback = ""
+        if str(self.get_conf("completion_model") or "").strip() in _GENERIC_COMPLETION_MODEL_NAMES:
+            self._completion_cache.clear()
+            self._candidate_store.clear()
+            if self.get_conf("completions_enabled"):
+                self._set_ready_status()
+                self._request_model_warm_up()
 
     @on_conf_change(option="completion_temperature")
     def on_completion_temperature_changed(self, _value):
@@ -2647,6 +2710,15 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             *(
                 [f"Last model load error: {self._last_warm_up_detail}"]
                 if getattr(self, "_last_warm_up_detail", "")
+                else []
+            ),
+            *(
+                [
+                    f"Configured completion model "
+                    f"'{self.get_conf('completion_model')}' is not installed; "
+                    "using the chat model instead (change it in Settings)"
+                ]
+                if getattr(self, "_model_fallback", "")
                 else []
             ),
             "",

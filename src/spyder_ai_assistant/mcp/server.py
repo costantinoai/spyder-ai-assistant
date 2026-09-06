@@ -235,6 +235,11 @@ class SpyderMCPServer:
             host=self._host,
             port=self._port,
             log_level="warning",
+            # Never let uvicorn install its own dictConfig: inside Spyder
+            # stdout is redirected to the internal console and uvicorn's
+            # default formatter fails to build there ("Unable to configure
+            # formatter 'default'"). The package logger already exists.
+            log_config=None,
             access_log=False,
             lifespan="on",
         )
