@@ -947,7 +947,8 @@ class AssistantSettingsDialog(QDialog):
         """Return the normalized settings chosen in the dialog."""
         chat_payload = self.chat_model_combo.currentData() or {}
         completion_payload = self.completion_model_combo.currentData() or {}
-        return AssistantSettings.from_mapping({
+        selected = dict(self._settings)
+        selected.update({
             "ollama_host": self.ollama_host_edit.text().strip() or "http://localhost:11434",
             "mcp_enabled": bool(self.mcp_enabled_checkbox.isChecked()),
             "mcp_host": self._current_mcp_host(),
@@ -1002,4 +1003,5 @@ class AssistantSettingsDialog(QDialog):
             "idle_completion_delay_ms": int(self.idle_delay_spin.value()),
             "post_accept_completion_delay_ms": int(self.post_accept_delay_spin.value()),
             "native_popup_policy": self.selected_native_popup_policy(),
-        }).to_conf_dict()
+        })
+        return AssistantSettings.from_mapping(selected).to_conf_dict()

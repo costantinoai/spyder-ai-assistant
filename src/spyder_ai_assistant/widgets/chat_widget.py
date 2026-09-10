@@ -1014,6 +1014,16 @@ class ChatWidget(PluginMainWidget):
         updated = AssistantSettings.from_mapping(settings)
         current_dict = current.to_conf_dict()
         updated_dict = updated.to_conf_dict()
+        # Provider profiles are edited and persisted by their own nested
+        # dialog.  Preserve its latest values if that dialog was used while
+        # this assistant-settings snapshot was already open.
+        for key in (
+            "provider_profiles",
+            "openai_compatible_base_url",
+            "openai_compatible_api_key",
+        ):
+            updated_dict[key] = current_dict[key]
+        updated = AssistantSettings.from_mapping(updated_dict)
         changed_provider = False
         changed_model = False
         changed_any = False
