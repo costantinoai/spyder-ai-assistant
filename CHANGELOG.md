@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.7.1 - 2026-09-10
+
+### Fixed
+
+- restored editor context-menu integration on Spyder 6.1.4 and newer while
+  retaining compatibility with the per-editor menus in older Spyder releases
+- prevented FastMCP from installing a global Rich stderr logger that Spyder
+  reported as an internal error, and coalesced redundant MCP startup events
+- preserved provider profiles and credentials when saving the parent
+  Assistant Settings dialog
 
 ## 0.7.0 - 2026-09-06
 
