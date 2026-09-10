@@ -70,6 +70,20 @@ from spyder_ai_assistant.widgets.ghost_text import GhostTextManager
 logger = logging.getLogger(__name__)
 
 
+def _resolve_codeeditor_context_menu(codeeditor, editor_plugin, menu_id):
+    """Return the context menu and the widget that should own its actions.
+
+    Spyder <= 6.1.3 keeps one menu on each CodeEditor.  Spyder >= 6.1.4
+    instead owns one shared editor menu on the Editor main widget.
+    """
+    legacy_menu = getattr(codeeditor, "menu", None)
+    if legacy_menu is not None:
+        return legacy_menu, codeeditor
+
+    editor_widget = editor_plugin.get_widget()
+    return editor_widget.get_menu(menu_id), editor_widget
+
+
 class _ManualCompletionShortcutFilter(QObject):
     """Application-level fallback for the manual AI completion shortcut."""
 
@@ -657,9 +671,22 @@ class AIChatPlugin(SpyderDockablePlugin):
         # Import here to avoid import errors if editor plugin is not available
         from spyder.plugins.editor.widgets.codeeditor.codeeditor import (
             CodeEditorContextMenuSections,
+            CodeEditorMenus,
         )
 
-        if getattr(codeeditor, "_ai_chat_actions_installed", False):
+        editor_plugin = self.get_plugin(Plugins.Editor)
+        try:
+            context_menu, action_owner = _resolve_codeeditor_context_menu(
+                codeeditor,
+                editor_plugin,
+                CodeEditorMenus.ContextMenu,
+            )
+        except Exception as error:
+            logger.warning("Could not resolve the editor context menu: %s", error)
+            return
+
+        if getattr(context_menu, "_ai_chat_actions_installed", False):
+            codeeditor._ai_chat_actions_installed = True
             return
 
         # Define the context menu actions: (id_suffix, display_text, action_key)
@@ -671,14 +698,14 @@ class AIChatPlugin(SpyderDockablePlugin):
         ]
 
         for action_id, text, action_key in actions:
-            # Use a unique ID per editor to avoid conflicts when multiple
-            # editors are open. The codeeditor's id() ensures uniqueness.
-            unique_id = f"ai_chat_{action_id}_{id(codeeditor)}"
+            # Legacy Spyder has one context menu per editor; newer Spyder has
+            # one shared menu. Its identity is unique in either layout.
+            unique_id = f"ai_chat_{action_id}_{id(context_menu)}"
 
-            # Create the action on the codeeditor widget itself. We use
-            # register_action=False since these are ephemeral per-editor
-            # actions, not global plugin actions.
-            action = codeeditor.create_action(
+            # Keep the actions alive for the lifetime of their menu owner.
+            # They are integration actions rather than globally registered
+            # plugin actions.
+            action = action_owner.create_action(
                 unique_id,
                 text=text,
                 register_action=False,
@@ -688,12 +715,13 @@ class AIChatPlugin(SpyderDockablePlugin):
             # Add to the InspectSection of the editor's context menu,
             # which groups inspection-related actions (go to definition,
             # find references, etc.)
-            codeeditor.add_item_to_menu(
+            action_owner.add_item_to_menu(
                 action,
-                menu=codeeditor.menu,
+                menu=context_menu,
                 section=CodeEditorContextMenuSections.InspectSection,
             )
 
+        context_menu._ai_chat_actions_installed = True
         codeeditor._ai_chat_actions_installed = True
 
     def _on_codeeditor_changed(self, codeeditor):
