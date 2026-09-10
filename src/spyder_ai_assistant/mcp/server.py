@@ -50,6 +50,35 @@ SERVER_START_TIMEOUT_SECS = 5.0
 SERVER_STOP_TIMEOUT_SECS = 5.0
 
 
+@contextlib.contextmanager
+def _preserve_root_logging():
+    """Keep FastMCP from replacing the host application's logging setup.
+
+    FastMCP 1.x calls ``logging.basicConfig`` from its constructor.  When
+    Spyder has no root handlers yet, that installs a Rich stderr handler and
+    lowers the root level to INFO.  Spyder interprets that stderr output as an
+    internal error, so restore the exact root state after construction.
+    """
+    root_logger = logging.getLogger()
+    original_handlers = list(root_logger.handlers)
+    original_level = root_logger.level
+    try:
+        yield
+    finally:
+        added_handlers = [
+            handler
+            for handler in root_logger.handlers
+            if handler not in original_handlers
+        ]
+        for handler in list(root_logger.handlers):
+            root_logger.removeHandler(handler)
+        for handler in original_handlers:
+            root_logger.addHandler(handler)
+        root_logger.setLevel(original_level)
+        for handler in added_handlers:
+            handler.close()
+
+
 class SpyderMCPServer:
     """Run an embedded MCP server beside the Spyder UI."""
 
@@ -268,19 +297,20 @@ class SpyderMCPServer:
         self._startup_complete.set()
 
     def _build_fastmcp(self):
-        mcp = FastMCP(
-            "Spyder",
-            instructions=(
-                "Access the current Spyder editor, project, and IPython "
-                "runtime state. Editor writes require preview + explicit "
-                "confirmation using the previewed hash and positions, and "
-                "runtime writes target one explicit or active Spyder "
-                "IPython console."
-            ),
-            stateless_http=True,
-            json_response=True,
-            streamable_http_path=self._path,
-        )
+        with _preserve_root_logging():
+            mcp = FastMCP(
+                "Spyder",
+                instructions=(
+                    "Access the current Spyder editor, project, and IPython "
+                    "runtime state. Editor writes require preview + explicit "
+                    "confirmation using the previewed hash and positions, and "
+                    "runtime writes target one explicit or active Spyder "
+                    "IPython console."
+                ),
+                stateless_http=True,
+                json_response=True,
+                streamable_http_path=self._path,
+            )
         self._configure_fastmcp_settings(mcp)
 
         @mcp.tool()

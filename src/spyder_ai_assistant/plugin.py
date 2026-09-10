@@ -386,6 +386,20 @@ class AIChatPlugin(SpyderDockablePlugin):
         """Restart the embedded MCP server from the current config."""
         config = self._mcp_server_config()
 
+        if (
+            self._mcp_server is not None
+            and config["enabled"]
+            and self._mcp_server.host == config["host"]
+            and self._mcp_server.port == config["port"]
+            and self._mcp_server.is_running()
+        ):
+            logger.debug(
+                "Embedded Spyder MCP server already matches %s:%s",
+                config["host"],
+                config["port"],
+            )
+            return True
+
         if self._mcp_server is not None:
             self._mcp_server.stop()
             if self._mcp_server.is_stopping():
