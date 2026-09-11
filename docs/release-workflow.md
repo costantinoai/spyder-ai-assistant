@@ -28,6 +28,15 @@ If you ever mirror this workflow to self-hosted runners, keep the runner version
 
 ## Typical release commands
 
+If the UI changed since the last release, regenerate the README screenshots
+first (private virtual display, never your desktop session) and commit them:
+
+```bash
+# 2x capture scale: the virtual screen must be at least 3840x2160
+Xvfb :99 -screen 0 3840x2160x24 -nolisten tcp &
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_readme_screenshots
+```
+
 ```bash
 git checkout main
 git pull --ff-only

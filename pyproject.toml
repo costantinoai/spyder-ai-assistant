@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "spyder-ai-assistant"
 dynamic = ["version"]
-description = "AI chat and code completion plugin for Spyder IDE using local Ollama models"
+description = "Local-first AI assistant for Spyder IDE: chat, inline completions and live kernel inspection with Ollama or OpenAI-compatible models, plus an MCP server for coding agents"
 readme = "README.md"
 license = "CC-BY-NC-4.0"
 license-files = ["LICENSE"]

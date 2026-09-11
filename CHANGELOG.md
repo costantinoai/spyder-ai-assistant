@@ -8,6 +8,17 @@
   block in chat answers; lists, tables, blockquotes, headings and rules
   no longer keep blank lines above them either
 
+### Documentation
+
+- rewrote the README around a short quick start and feature tour, with
+  reference material in collapsible sections and descriptions that match the
+  current menus, settings tabs and MCP tool list
+- regenerated the README screenshots from a live Spyder with a new
+  `run_readme_screenshots` harness; images now use absolute URLs so they also
+  render on PyPI
+- updated the package description to mention OpenAI-compatible providers and
+  the MCP server
+
 ## 0.7.1 - 2026-09-10
 
 ### Fixed

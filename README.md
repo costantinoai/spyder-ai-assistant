@@ -1,277 +1,173 @@
 # spyder-ai-assistant
 
 [![PyPI](https://img.shields.io/pypi/v/spyder-ai-assistant)](https://pypi.org/project/spyder-ai-assistant/)
-[![Alpha](https://img.shields.io/badge/status-alpha-orange)]()
+![Status: alpha](https://img.shields.io/badge/status-alpha-orange)
 [![License: CC BY-NC 4.0](https://img.shields.io/badge/license-CC%20BY--NC%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/4.0/)
 [![Spyder 6+](https://img.shields.io/badge/spyder-%E2%89%A5%206.0-red)](https://www.spyder-ide.org/)
 [![Python 3.11+](https://img.shields.io/badge/python-%E2%89%A5%203.11-blue)](https://www.python.org/)
 
-A local-first AI assistant for [Spyder IDE](https://www.spyder-ide.org/). Chat with a model about your code, get Copilot-style inline completions, inspect live variables and tracebacks, and browse your conversation history — all running on your own GPU through [Ollama](https://ollama.com/), with optional support for OpenAI-compatible endpoints.
+An AI assistant for [Spyder](https://www.spyder-ide.org/) that runs on your own machine. Chat about your code, get inline completions as you type, and let the model read your live variables and tracebacks. Models run locally through [Ollama](https://ollama.com/); OpenAI-compatible endpoints are optional. Spyder also becomes an MCP server, so Claude Code, Codex and OpenCode can work with your open editor and consoles.
 
-![Chat panel: a question about the current file, the answer with a highlighted code block and Copy/Apply actions, model selector above, Debug/Regenerate/Sessions/Settings actions below](docs/screenshots/chat-panel.png)
-
----
+<p align="center">
+  <img src="https://raw.githubusercontent.com/costantinoai/spyder-ai-assistant/main/docs/screenshots/chat-panel.png" width="290" align="top" alt="Chat panel: a question about load_config and an answer with a code block and Copy/Apply actions">
+  <img src="https://raw.githubusercontent.com/costantinoai/spyder-ai-assistant/main/docs/screenshots/ghost-completions.png" width="520" align="top" alt="Inline ghost-text completion in the Spyder editor">
+</p>
 
 ## Quick start
 
-### 1. Install Ollama and pull a model
+You need Spyder 6+, Python 3.11+ and [Ollama](https://ollama.com/download). A GPU helps but is not required.
 
 ```bash
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen2.5:7b          # chat model (~5 GB VRAM)
+curl -fsSL https://ollama.com/install.sh | sh   # Linux; others: ollama.com/download
+ollama pull qwen2.5:7b                          # chat model, 4.7 GB
+pip install spyder-ai-assistant                 # into Spyder's environment
 ```
 
-> Pick a model that fits your GPU. See [model recommendations](#model-recommendations) below for more options.
-
-### 2. Install the plugin
-
-```bash
-pip install spyder-ai-assistant
-```
-
-> Install into the **same Python environment** where Spyder lives (e.g. your conda env).
-
-### 3. Restart Spyder and open the chat
-
-The plugin registers automatically. After restart:
-
-- Open the chat panel: **View > Panes > AI Chat**
-- Pick your model from the toolbar dropdown
-- Open **Settings** inside the chat pane for assistant-wide settings, tab overrides, and provider profiles
-- Start typing — inline completions appear automatically as ghost text
-
-**To manually trigger an inline suggestion:** press `Ctrl+Shift+Space`.
-
-That's it. Everything runs locally and works offline.
-
-> **Optional:** to use cloud or self-hosted endpoints, open **AI Chat > Settings > Provider Profiles...** and add one or more OpenAI-compatible profiles. Their recognized models then appear in the chat and completion dropdowns automatically.
-
----
+Restart Spyder, open **View > Panes > AI Chat** and pick your model from the dropdown. Suggestions appear as ghost text while you type in the editor.
 
 ## Features
 
-### Inline code completions
+### Inline completions
 
-Copilot-style ghost text that appears as you type, powered by Ollama's Fill-in-Middle (FIM) API.
+`Tab` accepts a suggestion, `Alt+Right` takes the next word, `Esc` dismisses it, and `Ctrl+Shift+Space` asks for one on demand.
 
-![Ghost text suggesting a function call as you type](docs/screenshots/ghost-completions.png)
+<details>
+<summary>All shortcuts and behaviour</summary>
 
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl+Shift+Space` | Manually trigger a suggestion |
-| `Tab` | Accept the full suggestion |
-| `Alt+Right` | Accept next word |
-| `Alt+Shift+Right` | Accept next line |
-| `Escape` | Dismiss |
-| `Backspace` | Dismiss and keep editing |
+| Key | Action |
+|---|---|
+| `Tab` | Accept the suggestion |
+| `Alt+Right` / `Alt+Shift+Right` | Accept the next word / line |
+| `Esc`, `Backspace` | Dismiss |
+| `Ctrl+Shift+Space` | Request a suggestion now |
+| `Ctrl+Space` | Spyder's own completion popup |
 
-The provider is tuned beyond a basic API call: it caches recent prompts, trims suffix overlap so brackets aren't duplicated, filters repetitive output, pulls relevant snippets from other open files for richer context, and cycles through alternative candidates locally without extra model round-trips. It owns the editor by default: while the AI model is available, Spyder's own automatic completion popup (pylsp) stays hidden and ghost text is the only automatic suggestion; an explicit `Ctrl+Space` popup still opens and takes over. Prefer the native popup? **Settings > Behavior** offers "replace it when the AI answers" and "Spyder popup first" as well. Scrolling or leaving the editor pauses suggestions until you type again. Explicit dismissals (`Escape`, `Backspace`) are forgotten as soon as the editor content changes. The completion model is loaded as soon as Spyder starts (and kept resident for 30 minutes of inactivity), so the first suggestion is not delayed by a cold model load; the status bar shows the active model and its state (`loading`, `generating`, `offline`, or ready).
+- Typing the characters of a suggestion accepts them as you go. Asking again at the same spot cycles through alternatives.
+- Ghost text replaces Spyder's automatic popup by default. **Assistant Settings > Behavior** can instead show Spyder's popup first, or show it and replace it when the AI answers.
+- The completion model loads when Spyder starts and stays loaded for 30 minutes of inactivity. The status bar shows its state: `AI: <model>`, `loading`, `generating`, `offline` or `disabled`.
+- The trigger, accept-word and accept-line keys can be changed in **Assistant Settings > Shortcuts** (restart Spyder afterwards).
 
-### Chat panel
+</details>
 
-A dockable pane for talking to a model about your code. Open it from **View > Panes > AI Chat**.
+### Chat about your code
 
-- **Multi-tab sessions** — each conversation lives in its own tab
-- **Streaming responses** — tokens arrive in real time
-- **Syntax-highlighted code blocks** — with Copy and Apply actions; Apply previews a unified diff and can insert at the cursor, replace the selection, or replace the existing function/class of the same name in place
-- **Thinking/reasoning display** — models that emit `<think>` blocks (QwQ, DeepSeek-R1, etc.) show their reasoning in a dimmed section
-- **Per-tab chat settings** — the **Settings** button next to the input opens the tab's chat mode (Coding, Debugging, Review, Data Analysis, Explanation, or Documentation, each a different instruction block for the model) and its temperature / max-token overrides; the button shows `Settings*` while a tab deviates from the defaults
-- **Mid-conversation model switching** — change models from the toolbar without losing context
-- **Stop and regenerate** — cancel a response mid-stream, or rerun the last turn
-- **Delete individual exchanges** — remove any saved turn from the conversation
-- **Export to Markdown** — save any session with full metadata
+The chat sees your current file, cursor, selection and open tabs. Code blocks in answers have **Copy** and **Apply...**. Apply shows a diff first, then inserts at the cursor, replaces the selection, or replaces the function or class of the same name. One undo reverts it. Right-click a selection for **Ask AI**, **AI: Explain**, **AI: Fix** and **AI: Add Docstring**.
 
-### Kernel integration and runtime inspection
+<p align="center">
+  <img src="https://raw.githubusercontent.com/costantinoai/spyder-ai-assistant/main/docs/screenshots/apply-preview.png" width="560" alt="Apply preview dialog showing a unified diff before the editor changes">
+</p>
 
-The chat panel has read-only access to your active Spyder IPython session. It can inspect:
+<p align="center">
+  <img src="https://raw.githubusercontent.com/costantinoai/spyder-ai-assistant/main/docs/screenshots/editor-context-menu.png" width="480" alt="Editor context menu with Ask AI, AI: Explain, AI: Fix and AI: Add Docstring">
+</p>
 
-- **Tracebacks and errors** — the latest exception from your kernel
-- **Console output** — recent visible output from your IPython session
-- **Live variables** — the current variable list and targeted inspection of specific variables by name
-- **Structured runtime values** — arrays, images, DataFrames, Series, and bounded nested-container previews
-- **Kernel state** — shown in the chat toolbar so you always know what's running
-- **Multiple consoles** — the toolbar can follow the active console or pin runtime inspection to a different open console
+<details>
+<summary>More chat features</summary>
 
-This is **on-demand, not automatic** — ordinary questions stay file-focused and lean. The AI only pulls runtime state when the question actually depends on it, and it never executes code on your behalf.
+- One conversation per tab. Answers stream in; **Stop** cancels and **Regenerate** reruns the last turn.
+- Switch models mid-conversation from the dropdown.
+- Reasoning from models that emit `<think>` blocks shows in a dimmed section.
+- Per-tab chat mode (Coding, Debugging, Review, Data Analysis, Explanation, Documentation), temperature and max tokens: **Tab Overrides...** in the **Settings** menu.
+- Delete single exchanges or export a chat to Markdown from the **Sessions** menu.
+- `Enter` sends, `Shift+Enter` adds a line.
 
-**Quick-action buttons** for common debugging workflows:
+</details>
 
-| Control | What it does |
-|--------|-------------|
-| **Debug** | Opens runtime-aware actions such as Explain Error, Fix Traceback, Use Variables, and Use Console |
-| **Regenerate** | Reruns the last turn on the active tab |
+### Debug with your live kernel
 
-When more than one IPython console is open, the runtime target selector in the chat toolbar lets you choose **Follow Active Console** or pin the debugging context to a specific console. The runtime tooltip shows which console is currently active and which one is actually being inspected.
+Ask about an error or a variable and the model can read the latest traceback, recent console output and the variables in your IPython console, including arrays and DataFrames. It reads only when the question needs it and never runs code. The **Debug** menu has ready-made prompts: Explain Error, Fix Traceback, Use Variables, Use Console and Review Changes. With several consoles open, the selector under the model dropdown picks which one is inspected.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/costantinoai/spyder-ai-assistant/main/docs/screenshots/debug-menu.png" width="300" alt="Debug menu open under an answer explaining a ZeroDivisionError">
+</p>
 
 ### Project files and git
 
-On request, the model can read other files in your project and look at git history, using the same on-demand protocol as runtime inspection:
+When asked, the model can list, read and search files in your project and look at `git status`, diffs and recent commits. Access is read-only, stays inside the project folder and skips `.git`, virtual environments and build output. Turn it off in **Assistant Settings > Behavior > Project access**.
 
-- **Project files** — list files, read a file (or a line range), and search the project with a regular expression
-- **Git** — `git status`, the uncommitted or staged diff (optionally for one file), and recent commits
-- **Review Changes** — a Debug-menu action that asks the model to review your uncommitted changes
+### Sessions
 
-Access is read-only and bounded: only files under the active project (or the folder of the current file when no project is open), never `.git`, virtual environments, caches or build output, with size caps on files, search results and diffs. Switch it off in **Settings → Assistant Settings… → Behavior → Project access**. The same tools are exposed to external agents through MCP (`read_project_file`, `search_project`, `git_diff`, …).
+Chats save automatically: per project in `.spyproject/ai-assistant/chat-sessions.json`, otherwise in Spyder's config folder. **Sessions** opens a history browser to search, reopen, duplicate or delete past chats.
 
-### Claude, Codex, and OpenCode via MCP
+<p align="center">
+  <img src="https://raw.githubusercontent.com/costantinoai/spyder-ai-assistant/main/docs/screenshots/history-browser.png" width="560" alt="Chat history browser listing saved sessions">
+</p>
 
-The plugin now also exposes Spyder as a local MCP server on `http://127.0.0.1:8769/mcp`. When Spyder starts, Claude Code, Codex, and OpenCode can connect to the live editor and console state without any extra manual server process.
+### Claude Code, Codex and OpenCode (MCP)
 
-Open **AI Chat → Settings → Assistant Settings... → MCP** to enable or disable the server, change the host or port, view current status, and either copy ready-to-paste setup snippets or launch Claude Code, Codex, or OpenCode directly from Spyder.
-
-When you use the launch buttons, Spyder opens the selected CLI in your active Spyder project directory when possible, otherwise it falls back to the current file's directory. If you edit the MCP host or port in the dialog, save those settings first so Spyder restarts the embedded server on the new endpoint before launching a client.
+While Spyder runs it serves MCP at `http://127.0.0.1:8769/mcp`, so coding agents can read your editor and consoles and edit files after previewing the change:
 
 ```bash
 claude mcp add --transport http spyder http://127.0.0.1:8769/mcp
-```
-
-```bash
 codex mcp add spyder --url http://127.0.0.1:8769/mcp
 ```
 
-Available MCP tools:
+**Assistant Settings > MCP** switches the server on or off, sets host and port, shows its status, copies config snippets (OpenCode included) and launches each agent in your project folder.
 
-- `get_current_file` — active file path, full content, cursor, and selection
-- `get_open_files` — summaries of the other open editor tabs
-- `get_project_tree` — active project root and bounded file tree
-- `get_consoles` — available Spyder IPython console targets and their `shell_id` values
-- `get_variables` — variable list from the selected Spyder IPython console
-- `inspect_variable` — detailed inspection for one named variable
-- `get_traceback` — latest traceback or exception block
-- `get_console_output` — recent visible console output
-- `preview_file_edit` — build a diff preview for an editor mutation without changing the file
-- `apply_file_edit` — apply the previewed editor mutation after explicit confirmation, with optional save-to-disk through Spyder
-- `execute_console_code` — submit explicit code to the active or selected Spyder IPython console
+<p align="center">
+  <img src="https://raw.githubusercontent.com/costantinoai/spyder-ai-assistant/main/docs/screenshots/settings-mcp.png" width="560" alt="MCP tab of Assistant Settings with server status and launch buttons">
+</p>
 
-MCP writes are guarded instead of blind:
+<details>
+<summary>MCP tools and edit safety</summary>
 
-- file edits are stateless compare-and-apply operations: preview first, then apply with `confirm=true`, the `expected_document_sha256` returned by the preview, and the previewed cursor/selection positions
-- console execution accepts an optional `shell_id` so clients can target a specific open Spyder console instead of following the active one
-- save-on-apply goes through Spyder's editor stack, not raw file I/O
+| Area | Tools |
+|---|---|
+| Editor | `get_current_file`, `get_open_files`, `preview_file_edit`, `apply_file_edit` |
+| Project | `get_project_tree`, `list_project_files`, `read_project_file`, `search_project` |
+| Git | `git_status`, `git_diff`, `git_log` |
+| Consoles | `get_consoles`, `get_variables`, `inspect_variable`, `get_traceback`, `get_console_output`, `execute_console_code` |
 
-The MCP settings tab also includes an `opencode.json` snippet for OpenCode's remote-server config, plus one-click launch buttons that generate temporary client config instead of overwriting your saved CLI setup.
+An edit must be previewed first, then applied with `confirm=true` and the document hash the preview returned, so a file that changed in the meantime is never overwritten. Saving goes through Spyder's editor. `execute_console_code` takes an optional `shell_id` to target one console.
 
-### Editor integration
+</details>
 
-The AI automatically sees your current file, cursor position, selection, other open tabs, and your project's file tree. Right-click any selection for AI actions:
+### Other providers
 
-| Action | What it does |
-|--------|-------------|
-| **Ask AI** | Opens chat with your selection as context |
-| **Explain** | Explains the selected code |
-| **Fix** | Finds and fixes bugs in the selection |
-| **Add Docstring** | Generates a docstring for the selected function or class |
+Add OpenAI-compatible endpoints (cloud or self-hosted) under **Provider Profiles...** in the **Settings** menu, each with a name, URL and API key. Their models join the same dropdowns for chat and completions.
 
-Code blocks in chat responses now expose **Copy** and **Apply...**. `Apply...` opens a preview dialog that lets you choose insert-vs-replace, inspect the diff, and confirm or cancel before the editor changes. The final mutation is grouped into a single undo step.
+## Choosing a model
 
-### Session history and persistence
+Every model you pull appears in the dropdowns. A rough guide:
 
-Chat sessions save automatically. When a Spyder project is open, conversations persist in `.spyproject/ai-assistant/chat-sessions.json` and restore when the project reopens. Without a project, sessions fall back to a global store.
+| GPU memory | Chat model | Download |
+|---|---|---|
+| 8 GB | `qwen2.5:7b` | 4.7 GB |
+| 12 GB | `qwen2.5:14b` | 9 GB |
+| 16 GB | `gpt-oss:20b` | 14 GB |
+| 16 GB + 64 GB RAM | `qwen3-coder-next` (80B MoE, 3B active; the plugin default) | 52 GB |
 
-The **Sessions** button keeps session actions in one place. Its history browser lets you search, filter, sort, reopen, duplicate, or delete saved sessions. Per-tab chat modes and inference overrides persist with each session.
+Completions use the chat model unless a separate completion model is installed and selected. A small coder model is faster: `ollama pull qwen2.5-coder:3b` (1.9 GB). Without a GPU, Ollama runs on the CPU, more slowly.
 
-### Multi-provider support
+## Settings
 
-By default, the built-in local path uses Ollama. You can also manage multiple named OpenAI-compatible profiles from **AI Chat > Settings > Provider Profiles...** and use them for chat and inline completions.
+All settings are in the chat pane's **Settings** button. Clicking it opens **Assistant Settings** (models and Ollama host, generation, shortcuts, appearance, behaviour, MCP, prompt templates). Its menu adds **Tab Overrides...** for the current tab's chat mode, temperature and max tokens (the button reads `Settings*` while a tab differs from the defaults) and **Provider Profiles...**.
 
-- each profile has its own label, endpoint, API key, and enabled state
-- the shared model selector groups entries by provider/profile and keeps endpoint details in the tooltip
-- the status label reports provider issues without hiding working models
-- removing a stale profile falls back cleanly to another available model
+<details>
+<summary>Screenshot</summary>
 
-Inline completions follow the configured completion provider and model while keeping the same ghost-text UX.
+<img src="https://raw.githubusercontent.com/costantinoai/spyder-ai-assistant/main/docs/screenshots/settings-models.png" width="560" alt="Models tab of Assistant Settings">
 
----
-
-## Model recommendations
-
-### Chat models
-
-Pick one that fits your GPU:
-
-| VRAM | Model | Command |
-|------|-------|---------|
-| 8 GB | Qwen 2.5 7B | `ollama pull qwen2.5:7b` |
-| 12 GB | Qwen 2.5 14B | `ollama pull qwen2.5:14b` |
-| 16 GB+ | Qwen 3.5 27B | `ollama pull huihui_ai/qwen3.5-abliterated:27b` |
-
-### Completion models (optional)
-
-A smaller, faster model for inline suggestions. Recommended but not required — the chat model handles completions if no separate model is configured.
-
-| VRAM | Model | Command |
-|------|-------|---------|
-| 8 GB | Qwen 2.5 Coder 3B | `ollama pull qwen2.5-coder:3b` |
-| 12 GB+ | Qwen3 Coder 30B (3B active) | `ollama pull qooba/qwen3-coder-30b-a3b-instruct:q3_k_m` |
-
-### GPU and memory
-
-Ollama uses your GPU automatically if CUDA or ROCm drivers are installed. Rough VRAM requirements for Q4_K_M quantized models:
-
-| Model size | VRAM needed | Typical use |
-|-----------|-------------|-------------|
-| 3B | ~2.5 GB | Completions |
-| 7B | ~5 GB | Basic chat |
-| 14B | ~9 GB | Good chat |
-| 27B | ~15 GB | Excellent chat |
-
-Running chat and completions simultaneously keeps both models in VRAM. A 7B chat + 3B completion model needs about 7.5 GB total. Without a GPU, Ollama falls back to CPU (slower but functional).
-
----
-
-## Configuration
-
-All assistant settings live in the chat pane under **Settings**:
-
-- **Settings > Assistant Settings...** — default chat model, default completion model, Ollama host, generation defaults, shortcuts, system prompt, and action prompt templates (with `{filename}` and `{code}` placeholders)
-- **Settings > Tab Overrides...** — per-tab temperature and max-token overrides
-- **Settings > Provider Profiles...** — named OpenAI-compatible endpoints and API keys whose discovered models populate the chat/completion selectors
-
-| Models and providers | Generation defaults | Shortcuts | Prompt templates |
-|:---:|:---:|:---:|:---:|
-| ![Models](docs/screenshots/settings-models.png) | ![Generation](docs/screenshots/settings-generation.png) | ![Shortcuts](docs/screenshots/settings-shortcuts.png) | ![Prompts](docs/screenshots/settings-prompts.png) |
-
-Existing single-endpoint settings are imported automatically the first time you open the provider-profiles dialog.
-
-Per-tab chat modes and inference overrides are set from the chat pane's **Settings** button and persist with the session.
-
----
+</details>
 
 ## Troubleshooting
 
-**"No models found" in the dropdown** — Run `curl http://localhost:11434/api/tags` to check Ollama, or pull a model with `ollama pull qwen2.5:7b`. For OpenAI-compatible profiles, open **Settings > Provider Profiles...** and confirm the endpoint responds on `/v1/models`.
-
-**Completions aren't appearing** — Enable them in **Settings > Assistant Settings...**. The status bar should show `AI: model-name`. If it says `AI: offline`, check the selected provider/profile and model availability.
-
-**Chat panel doesn't show up** — Check View > Panes for "AI Chat". If missing, the plugin may be in a different Python env than Spyder. Verify: `python -c "import spyder_ai_assistant; print('OK')"`.
-
-**Slow responses** — Try a smaller model. Check `nvidia-smi` for GPU usage. First requests are always slower while the model loads into VRAM.
-
-**Too much VRAM** — Run `ollama ps` to see loaded models and `ollama stop <model>` to unload.
-
-**Runtime inspection returns generic answers** — Use a stronger instruction-following model. The runtime bridge requires the model to emit structured inspection requests. Qwen-based models handle this reliably.
-
----
+| Problem | Fix |
+|---|---|
+| No models in the dropdown | Check that Ollama runs: `curl http://localhost:11434/api/tags`. Pull a model if the list is empty. For a provider profile, check that the endpoint answers on `/v1/models`. |
+| No inline suggestions | Check the status bar. `AI: offline`: the model or provider can't be reached. `AI: disabled`: completions are off (**Assistant Settings > Generation**). |
+| AI Chat missing from **View > Panes** | The plugin is in a different environment from Spyder. Run `python -c "import spyder_ai_assistant"` with Spyder's Python. |
+| Slow answers or high memory use | Use a smaller model. The first request waits for the model to load. `ollama ps` lists loaded models, `ollama stop <model>` unloads one. |
+| Vague answers about variables or errors | Kernel inspection needs a model that follows instructions well. Qwen models work reliably. |
 
 ## Roadmap
 
-Active development. Rough priority order:
-
-- **Session management** — pinning, labeling, bulk operations
-- **More providers** — adapters beyond OpenAI-compatible, profile import/export, provider health checks
-- **Smart setup** — one-click Ollama install, guided model downloads, hardware-aware recommendations
-- **Smarter completions** — scope-aware truncation, rename-aware suggestions, multi-site edits
-- **Polish the apply workflow further** — richer inline diff rendering, smarter multi-block edit handling
-- **Agent workflows** — multi-step task execution with approval gates, git-aware context
-
----
+Next up: session pinning and labels, more provider types, guided Ollama setup and model downloads, completions that suggest multi-site edits, and agent workflows with approval steps.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, architecture overview, validation workflow, and release process.
-
----
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, architecture, validation and releases.
 
 ## License
 
-[Creative Commons Attribution-NonCommercial 4.0 International](https://creativecommons.org/licenses/by-nc/4.0/). Free to use, share, and adapt for non-commercial purposes with attribution. See [LICENSE](LICENSE).
+[CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/): free for non-commercial use with attribution. See [LICENSE](LICENSE).

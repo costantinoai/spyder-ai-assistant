@@ -51,6 +51,7 @@ The main entry points are:
 - `python -m tools.spyder_validation.run_phase11_apply_preview_validation`
 - `python -m tools.spyder_validation.run_phase12_provider_profiles_validation`
 - `python -m tools.spyder_validation.run_phase13_history_discovery_validation`
+- `python -m tools.spyder_validation.run_readme_screenshots`
 
 ## Typical full validation pass
 
@@ -230,6 +231,21 @@ it clears stale local build artifacts before rebuilding the sdist and wheel.
 - sort saved rows alphabetically
 - reopen one saved session from a filtered view
 - confirm the active session switches to the reopened row
+
+### README screenshots
+
+- regenerate the README images in `docs/screenshots/` (chat panel, ghost
+  completions, apply preview, editor context menu, Debug menu, history
+  browser, Models and MCP settings) from a live Spyder in the dark theme
+- stage all content itself (fake model list, staged transcripts, a fake
+  completion backend, seeded history sessions), so no Ollama model is needed
+- run Qt at 2x scale: panes and dialogs are rendered as HiDPI widget images,
+  popup menus are captured with a screen-region grab at the same density
+- fail when any shot is missing or the MCP tab does not show a running
+  server; the JSON artifact records each shot's size and staged evidence
+- run it on a private display only, e.g.
+  `DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_readme_screenshots`,
+  then review every image before committing
 
 ## Artifact locations
 
