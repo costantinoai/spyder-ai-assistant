@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- removed the large empty gap between a paragraph and a following code
+  block in chat answers; lists, tables, blockquotes, headings and rules
+  no longer keep blank lines above them either
+
 ## 0.7.1 - 2026-09-10
 
 ### Fixed

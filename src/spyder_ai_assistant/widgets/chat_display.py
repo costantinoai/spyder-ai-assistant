@@ -929,15 +929,22 @@ class ChatDisplay(QTextEdit):
     # --- Private rendering helpers ---
 
     @staticmethod
-    def _drop_paragraph_spacer(output_lines):
-        """Remove a trailing ``<br>`` spacer before a block element opens.
+    def _trim_before_block(output_lines):
+        """Remove the line breaks sitting just above an opening block element.
 
-        Blank markdown lines become ``<br>`` for paragraph spacing, but a
-        list is already a block in Qt's layout, so keeping the spacer
-        renders as two empty lines above the list.
+        Text lines end with ``<br>`` and blank markdown lines add a
+        standalone ``<br>`` spacer. Above a block element (code block, list,
+        table, blockquote, heading, rule) Qt renders both as empty lines:
+        the block already starts on its own line and carries its own
+        margin, so they only add a large gap. Call this right before
+        appending the block's opening HTML.
         """
-        if output_lines and output_lines[-1] == "<br>":
+        # Blank markdown lines before the block: drop their spacers.
+        while output_lines and output_lines[-1] == "<br>":
             output_lines.pop()
+        # The text line above the block: drop its own trailing line break.
+        if output_lines and output_lines[-1].endswith("<br>"):
+            output_lines[-1] = output_lines[-1][:-len("<br>")]
 
     def _code_block_html(self, lang, escaped_code, highlighted):
         """Return the styled ``<pre>`` block for one fenced code snippet.
@@ -962,8 +969,11 @@ class ChatDisplay(QTextEdit):
         # Plain blocks need an explicit text colour; Pygments spans carry
         # their own colours.
         color = "" if highlighted else f' color:{t["code_block_text"]};'
+        # Explicit vertical margin: Qt's default <pre> margin is larger than
+        # the spacing used around lists and tables in the transcript.
         return (
             f'<pre style="background-color:{t["code_block_bg"]};{color}'
+            f' margin:6px 0;'
             f' font-family:{self._code_font_family},monospace;'
             f' font-size:{self._code_font_size}pt;'
             f' padding:8px 12px; white-space:pre-wrap;'
@@ -1211,8 +1221,11 @@ class ChatDisplay(QTextEdit):
                 continue
 
             # --- Check for protected code block placeholders ---
-            # Code block placeholders should pass through untouched
+            # Code block placeholders should pass through untouched. A line
+            # that starts with one opens a <pre> block once restored.
             if "\x00CODEBLOCK" in stripped:
+                if stripped.startswith("\x00CODEBLOCK"):
+                    self._trim_before_block(output_lines)
                 output_lines.append(stripped)
                 continue
 
@@ -1220,6 +1233,7 @@ class ChatDisplay(QTextEdit):
             # Must be checked before list detection because "---" could
             # be confused with a list item starting with "-".
             if re.match(r"^(-{3,}|\*{3,}|_{3,})$", stripped):
+                self._trim_before_block(output_lines)
                 output_lines.append(
                     f'<hr style="border:none; border-top:1px solid'
                     f' {hr_color}; margin:8px 0;">'
@@ -1239,6 +1253,7 @@ class ChatDisplay(QTextEdit):
                 # Scale font size: H1=1.4em, H2=1.2em, H3=1.1em, H4=1.0em
                 sizes = {1: "1.4em", 2: "1.2em", 3: "1.1em", 4: "1.0em"}
                 font_size = sizes.get(level, "1.0em")
+                self._trim_before_block(output_lines)
                 output_lines.append(
                     f'<p style="margin-top:12px; margin-bottom:4px;'
                     f' font-size:{font_size}; font-weight:bold;">'
@@ -1260,6 +1275,7 @@ class ChatDisplay(QTextEdit):
                 if not in_blockquote:
                     # Open a new blockquote table container
                     in_blockquote = True
+                    self._trim_before_block(output_lines)
                     output_lines.append(
                         f'<table cellpadding="4" cellspacing="0"'
                         f' style="margin:4px 0;">'
@@ -1286,6 +1302,7 @@ class ChatDisplay(QTextEdit):
                     # First row of a new table — this is the header row
                     in_table = True
                     table_row_index = 0
+                    self._trim_before_block(output_lines)
                     output_lines.append(
                         '<table cellpadding="6" cellspacing="0"'
                         ' style="margin:4px 0; border-collapse:collapse;">'
@@ -1328,7 +1345,7 @@ class ChatDisplay(QTextEdit):
                 if not list_indent_stack:
                     # Start a new ordered list (no list currently open)
                     list_indent_stack = [(indent_level, "ol")]
-                    self._drop_paragraph_spacer(output_lines)
+                    self._trim_before_block(output_lines)
                     output_lines.append(
                         '<ol style="margin:4px 0; padding-left:24px;">'
                     )
@@ -1360,7 +1377,7 @@ class ChatDisplay(QTextEdit):
                 if not list_indent_stack:
                     # Start a new unordered list (no list currently open)
                     list_indent_stack = [(indent_level, "ul")]
-                    self._drop_paragraph_spacer(output_lines)
+                    self._trim_before_block(output_lines)
                     output_lines.append(
                         '<ul style="margin:4px 0; padding-left:24px;">'
                     )
