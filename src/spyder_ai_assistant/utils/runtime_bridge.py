@@ -16,8 +16,8 @@ from spyder_ai_assistant.utils.runtime_context import (
     format_runtime_variable,
 )
 from spyder_ai_assistant.utils.tool_protocol import (
-    PROJECT_TOOL_PREFIXES,
     RUNTIME_TOOL_NAMES,
+    is_project_tool,
     TOOL_RUNTIME_GET_CONSOLE_TAIL,
     TOOL_RUNTIME_GET_LATEST_ERROR,
     TOOL_RUNTIME_INSPECT_VARIABLE,
@@ -262,7 +262,7 @@ def _format_project_payload(payload):
 
 
 def _format_payload(tool, payload):
-    if str(tool).startswith(PROJECT_TOOL_PREFIXES):
+    if is_project_tool(tool):
         return _format_project_payload(payload)
     if tool == TOOL_RUNTIME_STATUS:
         return _format_simple_mapping(payload, ("stale",))

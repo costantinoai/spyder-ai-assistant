@@ -17,6 +17,7 @@ from spyder_ai_assistant.utils.code_apply import (
     apply_code_plan,
     build_code_apply_plan,
 )
+from spyder_ai_assistant.utils.spyder_plugins import safe_get_plugin
 
 logger = logging.getLogger(__name__)
 BRIDGE_REQUEST_TIMEOUT_SECS = 30.0
@@ -92,10 +93,20 @@ class SpyderMCPBridge(QObject):
         return self.invoke_main_thread("get_project_tree")
 
     def execute_project_request(self, tool_name, **args):
-        """Run one read-only project/git tool on the main thread."""
-        return self.invoke_main_thread(
-            "execute_project_request", tool_name=tool_name, args=dict(args)
+        """Run one read-only project/git tool without blocking Spyder's GUI.
+
+        Resolving the project root is the only part that reads Spyder
+        state, so only that step is marshalled to the main thread. The
+        bounded file and git work then runs on the calling MCP request
+        thread, which is already a background thread: marshalling it too
+        would have frozen the IDE for the whole of a project-wide search or
+        a slow ``git diff``.
+        """
+        request = {"tool": str(tool_name or "").strip(), "args": dict(args)}
+        prepared = self.invoke_main_thread(
+            "prepare_project_request", request=request
         )
+        return self._project_tools.run_prepared(prepared)
 
     def execute_runtime_request(self, tool_name, **args):
         """Execute one runtime-context request on the main thread."""
@@ -187,9 +198,9 @@ class SpyderMCPBridge(QObject):
     def _handle_get_project_tree(self):
         return self._context_service.get_project_tree()
 
-    def _handle_execute_project_request(self, tool_name, args):
-        request = {"tool": str(tool_name or "").strip(), "args": dict(args or {})}
-        return self._project_tools.execute_request(request)
+    def _handle_prepare_project_request(self, request):
+        """Resolve one project request against Spyder state, without running it."""
+        return self._project_tools.prepare_request(request)
 
     def _handle_execute_runtime_request(self, tool_name, args):
         request = {

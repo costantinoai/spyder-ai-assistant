@@ -83,3 +83,33 @@ RUNTIME_RESULT_METADATA_FIELDS = (
 
 # Shown when no IPython console can serve a runtime request.
 NO_ACTIVE_CONSOLE_MESSAGE = "No active IPython console is available."
+
+
+# --- Routing and status vocabulary -----------------------------------------
+
+
+def is_project_tool(tool):
+    """Return whether ``tool`` belongs to the project/git family.
+
+    The two families are executed very differently -- project tools are
+    filesystem work that runs on a worker thread, runtime tools talk to a
+    kernel client on the GUI thread -- so the test for "which family" lives
+    here rather than being spelled out at each dispatch site.
+    """
+    return str(tool or "").startswith(PROJECT_TOOL_PREFIXES)
+
+
+def describe_tool_activity(tool):
+    """Return a short status line for one in-flight tool call.
+
+    Shown while the call runs so the user can tell a slow project search
+    from a stalled model, instead of watching an unexplained spinner.
+
+    Kept to the bare tool name because it shares a narrow footer with the
+    input hint, and the dock can be resized narrower still; the tool name
+    is the part that carries the information.
+    """
+    name = str(tool or "")
+    if is_project_tool(name):
+        return f"{name}..."
+    return "Inspecting runtime..."

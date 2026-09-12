@@ -17,6 +17,7 @@ from __future__ import annotations
 import copy
 import logging
 import re
+import time
 from datetime import datetime
 
 from qtpy.QtCore import QObject, Signal
@@ -53,6 +54,12 @@ MAX_RUNTIME_PREVIEW_CHARS = 160
 MAX_RUNTIME_REQUEST_VARIABLES = 12
 MAX_RUNTIME_REQUEST_NAMES = 5
 MAX_RUNTIME_REQUEST_TIMEOUT = 2
+# Total wall-clock budget for enriching inspected variables with their live
+# values. Every fetch is a blocking kernel round trip on the GUI thread, so
+# without one shared budget an inspection of N variables could freeze
+# Spyder for N * MAX_RUNTIME_REQUEST_TIMEOUT seconds. One in-flight fetch
+# can still overrun the budget by up to that timeout.
+MAX_RUNTIME_LIVE_VALUE_BUDGET = 3.0
 MAX_RUNTIME_SHELLS = 12
 MAX_RUNTIME_EXECUTE_CODE_CHARS = 12_000
 MAX_RUNTIME_EXECUTE_PREVIEW_CHARS = 240
@@ -925,14 +932,17 @@ class RuntimeContextService(QObject):
                 missing.append(name)
                 continue
 
-            variable = _build_variable_summary(
+            found.append(_build_variable_summary(
                 name,
                 info,
                 var_properties.get(name, {}),
-            )
-            if source == "live":
-                variable = self._attach_live_details(shellwidget, variable)
-            found.append(variable)
+            ))
+
+        # Enriching with live values is one batch under one budget, not one
+        # blocking kernel round trip per variable.
+        budget_note = ""
+        if source == "live" and found:
+            found, budget_note = self._attach_live_values(shellwidget, found)
 
         error = ""
         if not found:
@@ -947,7 +957,10 @@ class RuntimeContextService(QObject):
             tool,
             runtime_context,
             source=source,
-            query_note=namespace_note or query_note,
+            query_note=" | ".join(
+                part for part in (namespace_note or query_note, budget_note)
+                if part
+            ),
             error=error,
         )
         result["ok"] = bool(found)
@@ -1102,26 +1115,86 @@ class RuntimeContextService(QObject):
         )
         return namespace_view, var_properties, "live", "", ""
 
-    def _attach_live_details(self, shellwidget, variable):
-        kind = variable.get("kind")
-        if kind not in {
-                "scalar", "list", "tuple", "set", "dict",
-                "array", "image", "dataframe", "series"}:
-            return variable
+    def _attach_live_values(self, shellwidget, variables):
+        """Enrich inspected variables with live kernel values, under a budget.
 
-        length = variable.get("length")
-        if kind in {"list", "tuple", "set", "dict"} and length not in ("", None):
-            try:
-                if int(length) > 20:
-                    return variable
-            except (TypeError, ValueError):
-                pass
+        Returns ``(variables, note)``. Two things keep this off the list of
+        ways to freeze Spyder: one kernel client is opened for the whole
+        batch rather than one per variable (opening it is itself a blocking
+        round trip), and the fetching stops once
+        MAX_RUNTIME_LIVE_VALUE_BUDGET is spent. Variables that were not
+        reached keep the summary already built from the namespace view, so
+        the answer is less detailed rather than absent.
+        """
+        candidates = [
+            index for index, variable in enumerate(variables)
+            if self._wants_live_value(variable)
+        ]
+        if not candidates:
+            return list(variables), ""
 
         try:
             kernel_client = shellwidget.call_kernel(
                 blocking=True,
                 timeout=MAX_RUNTIME_REQUEST_TIMEOUT,
             )
+        except Exception as error:
+            logger.debug(
+                "Runtime inspect could not open a kernel client: %s", error
+            )
+            return list(variables), ""
+
+        enriched = list(variables)
+        deadline = time.monotonic() + MAX_RUNTIME_LIVE_VALUE_BUDGET
+        skipped = 0
+        for position, index in enumerate(candidates):
+            if time.monotonic() >= deadline:
+                skipped = len(candidates) - position
+                logger.info(
+                    "Runtime inspect stopped fetching live values after %.1fs; "
+                    "%d variable(s) keep their namespace summary",
+                    MAX_RUNTIME_LIVE_VALUE_BUDGET,
+                    skipped,
+                )
+                break
+            enriched[index] = self._with_live_value(
+                kernel_client, enriched[index]
+            )
+
+        note = ""
+        if skipped:
+            note = (
+                f"live values omitted for {skipped} variable(s) to stay within "
+                f"the {MAX_RUNTIME_LIVE_VALUE_BUDGET:g}s inspection budget"
+            )
+        return enriched, note
+
+    @staticmethod
+    def _wants_live_value(variable):
+        """Return whether one variable is worth a live kernel round trip.
+
+        Large containers are skipped: their namespace summary already says
+        as much as a fetched copy would, at no cost.
+        """
+        kind = variable.get("kind")
+        if kind not in {
+                "scalar", "list", "tuple", "set", "dict",
+                "array", "image", "dataframe", "series"}:
+            return False
+
+        length = variable.get("length")
+        if kind in {"list", "tuple", "set", "dict"} and length not in ("", None):
+            try:
+                if int(length) > 20:
+                    return False
+            except (TypeError, ValueError):
+                pass
+        return True
+
+    @staticmethod
+    def _with_live_value(kernel_client, variable):
+        """Return ``variable`` re-summarized from its live value in the kernel."""
+        try:
             value = kernel_client.get_value(variable["name"], encoded=False)
         except Exception as error:
             logger.debug(
@@ -1133,7 +1206,7 @@ class RuntimeContextService(QObject):
 
         live_summary = summarize_runtime_value(
             value,
-            kind=kind,
+            kind=variable.get("kind"),
             fallback_type=variable.get("type", ""),
         )
         if live_summary:

@@ -14,7 +14,11 @@ All live validation commands assume:
 - the `spyder-ai` conda environment exists
 - Spyder is installed in that environment
 - Ollama is available at the configured host
-- a display is available, typically `DISPLAY=:1`
+- a display is available, and it is a **private** one, not the display you
+  work on. Every automated run goes to a virtual display (start one with
+  `Xvfb :99 -screen 0 3840x2160x24`); the screenshot harness needs that
+  size. Driving a harness on your own session steals focus and keystrokes
+  from whatever you are doing.
 
 Activate the environment first:
 
@@ -47,6 +51,7 @@ The main entry points are:
 - `python -m tools.spyder_validation.run_chat_history_browser_validation`
 - `python -m tools.spyder_validation.run_chat_history_browser_restore_validation`
 - `python -m tools.spyder_validation.run_chat_use_console_smoke`
+- `python -m tools.spyder_validation.run_chat_tool_responsiveness_validation`
 - `python -m tools.spyder_validation.run_phase10_runtime_validation`
 - `python -m tools.spyder_validation.run_phase11_apply_preview_validation`
 - `python -m tools.spyder_validation.run_phase12_provider_profiles_validation`
@@ -58,24 +63,25 @@ The main entry points are:
 ```bash
 PYTHONPATH=src pytest
 python -m tools.release.build_dist
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_completion_validation
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_provider_validation
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_workflow_validation
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_persistence_setup
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_persistence_verify
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_prompt_preset_validation
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_prompt_preset_restore_validation
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_inference_controls_validation
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_inference_controls_restore_validation
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_exchange_deletion_validation
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_exchange_deletion_restore_validation
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_history_browser_validation
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_history_browser_restore_validation
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_chat_use_console_smoke
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_phase10_runtime_validation
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_phase11_apply_preview_validation
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_phase12_provider_profiles_validation
-DISPLAY=:1 PYTHONPATH=src python -m tools.spyder_validation.run_phase13_history_discovery_validation
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_completion_validation
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_chat_provider_validation
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_chat_workflow_validation
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_chat_persistence_setup
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_chat_persistence_verify
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_chat_prompt_preset_validation
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_chat_prompt_preset_restore_validation
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_chat_inference_controls_validation
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_chat_inference_controls_restore_validation
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_chat_exchange_deletion_validation
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_chat_exchange_deletion_restore_validation
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_chat_history_browser_validation
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_chat_history_browser_restore_validation
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_chat_use_console_smoke
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_chat_tool_responsiveness_validation
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_phase10_runtime_validation
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_phase11_apply_preview_validation
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_phase12_provider_profiles_validation
+DISPLAY=:99 PYTHONPATH=src python -m tools.spyder_validation.run_phase13_history_discovery_validation
 ```
 
 `python -m tools.release.build_dist` is the preferred packaging check because
@@ -232,6 +238,24 @@ it clears stale local build artifacts before rebuilding the sdist and wheel.
 - reopen one saved session from a filtered view
 - confirm the active session switches to the reopened row
 
+### Tool responsiveness validation
+
+- run a 10 ms timer on the GUI thread throughout, so the longest stretch
+  the event loop went unserviced *is* the freeze a user would have felt
+- run the same `project.search` twice over a ~1900-file fixture: once
+  through the chat path (worker thread) and once inline on the GUI thread,
+  both on a warm page cache, and record both stalls
+- include a guard check that the inline path really did block, so a fixture
+  that is too fast cannot pass the comparison for the wrong reason
+- drive one real turn through a `git.status` tool call with the widget's
+  signals blocked, so no model is needed, and confirm the turn stays
+  `generating`, Send stays disabled, and the status line names the tool
+- capture the pending state as a screenshot for review
+- confirm from the plugin log that the embedded MCP server starts *after*
+  plugin initialization returns, keeping its startup handshake off Spyder's
+  boot path
+- needs no Ollama model, so it is deterministic
+
 ### README screenshots
 
 - regenerate the README images in `docs/screenshots/` (chat panel, ghost
@@ -299,6 +323,10 @@ For example:
 - exchange-deletion tests should show the deleted-turn gap in both the restored
   transcript and the delete-browser row list
 - restore tests should show the expected save and restore counts
+- tool-responsiveness validation should show the async stall far below the
+  inline stall, a non-`MainThread` worker name, `runtime_pending` for the
+  turn, and the MCP start marker appearing after the plugin-init marker in
+  the plugin log inside the isolated conf dir
 
 ## Release usage
 

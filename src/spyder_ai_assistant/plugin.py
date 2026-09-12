@@ -40,6 +40,7 @@ from spyder_ai_assistant.utils.context import (
     get_toolbar_context,
     build_action_prompt,
 )
+from spyder_ai_assistant.utils.background_tools import BackgroundToolExecutor
 from spyder_ai_assistant.utils.context_service import EditorContextService
 from spyder_ai_assistant.utils.spyder_plugins import safe_get_plugin
 from spyder_ai_assistant.utils.project_tools import (
@@ -265,6 +266,10 @@ class AIChatPlugin(SpyderDockablePlugin):
             root_resolver=self._resolve_project_tools_root,
             enabled_resolver=lambda: bool(self.get_conf("project_tools_enabled", True)),
         )
+        # Worker pool for tool calls that are pure I/O. Project searches and
+        # git commands used to run inside the chat turn's Qt slot and froze
+        # the IDE for as long as they took.
+        self._background_tools = BackgroundToolExecutor(self)
         self._mcp_server = None
         self._mcp_bridge = SpyderMCPBridge(
             self,
@@ -272,7 +277,11 @@ class AIChatPlugin(SpyderDockablePlugin):
             context_service=self._context_service,
             project_tools=self._project_tools,
         )
-        self._reconfigure_mcp_server()
+        # Starting the embedded server waits for uvicorn's startup handshake
+        # (up to SERVER_START_TIMEOUT_SECS). Inside on_initialize that wait
+        # lands on Spyder's startup path, so it runs on the first idle turn
+        # of the event loop instead.
+        QTimer.singleShot(0, self._reconfigure_mcp_server)
         widget.set_runtime_request_executor(self._execute_chat_tool_request)
         widget.set_runtime_target_handler(self._runtime_context.set_target_shell_id)
         widget.set_mcp_server_status_provider(self._get_mcp_server_status)
@@ -300,6 +309,12 @@ class AIChatPlugin(SpyderDockablePlugin):
         )
         self._install_manual_completion_shortcut_filter()
         QTimer.singleShot(0, self._restore_initial_chat_session_state)
+        # Ordering marker: everything after this line in the log happened on
+        # the event loop, not on Spyder's startup path. The embedded MCP
+        # server's start is one of those deferred steps.
+        logger.info(
+            "AI Chat plugin initialization finished; MCP server start deferred"
+        )
 
     def _build_chat_provider_settings(self):
         """Return the current chat-provider settings snapshot."""
@@ -402,6 +417,10 @@ class AIChatPlugin(SpyderDockablePlugin):
             )
             return True
 
+        # Logged after the no-op guard: every conf change reaches this
+        # method, and logging first made an idle session repeat the line.
+        logger.info("Reconfiguring the embedded MCP server")
+
         if self._mcp_server is not None:
             self._mcp_server.stop()
             if self._mcp_server.is_stopping():
@@ -431,13 +450,72 @@ class AIChatPlugin(SpyderDockablePlugin):
         filename = str(current.get("filename", "") or current.get("file", "") or "")
         return os.path.dirname(filename) if filename else ""
 
-    def _execute_chat_tool_request(self, request):
-        """Route a model tool request to runtime inspection or project tools."""
+    def _execute_chat_tool_request(self, request, on_result):
+        """Route one model tool request and deliver its result to ``on_result``.
+
+        The two families run on different threads, so the turn controller is
+        given a callback contract instead of a return value: it cannot know
+        which of the two it is about to get.
+        """
         return dispatch_chat_tool_request(
             request,
-            runtime_executor=self._runtime_context.execute_request,
-            project_executor=self._project_tools.execute_request,
+            runtime_executor=partial(
+                self._run_runtime_tool_request, on_result=on_result
+            ),
+            project_executor=partial(
+                self._submit_project_tool_request, on_result=on_result
+            ),
         )
+
+    def _run_runtime_tool_request(self, request, on_result):
+        """Run one runtime inspection request on the GUI thread.
+
+        Runtime tools talk to the IPython console's kernel client, which
+        belongs to the shell widget and is not safe to call from a worker
+        thread, so this one stays inline. Its cost is bounded inside
+        RuntimeContextService instead (see the live-value budget there).
+        """
+        on_result(self._runtime_context.execute_request(request))
+
+    def _submit_project_tool_request(self, request, on_result):
+        """Run one project or git tool on a worker thread.
+
+        Only resolving the project root reads Spyder state, so that happens
+        here on the GUI thread; the file walking, searching and git calls
+        are handed to a worker and the observation is delivered back on the
+        GUI thread once it finishes.
+        """
+        prepared = self._project_tools.prepare_request(request)
+        if prepared.result is not None:
+            # Disabled, no project root, or an unknown tool: there is
+            # nothing to run, so answer without touching a thread.
+            on_result(prepared.result)
+            return
+        logger.info(
+            "Running project tool %s on a worker thread", prepared.tool
+        )
+        self._background_tools.submit(
+            partial(self._project_tools.run_prepared, prepared),
+            partial(self._deliver_project_tool_result, prepared, on_result),
+        )
+
+    def _deliver_project_tool_result(self, prepared, on_result, output, error):
+        """Hand one worker's project-tool outcome back to the chat turn."""
+        if error is not None:
+            logger.error(
+                "Project tool %s failed on its worker thread: %s",
+                prepared.tool,
+                error,
+            )
+            on_result(
+                self._project_tools.error_result(
+                    prepared.tool,
+                    f"{prepared.tool} failed: {error}",
+                    root=prepared.root,
+                )
+            )
+            return
+        on_result(output)
 
     def _get_mcp_server_status(self):
         """Return the current embedded MCP server status snapshot."""
@@ -506,6 +584,9 @@ class AIChatPlugin(SpyderDockablePlugin):
         if self._mcp_server is not None:
             self._mcp_server.stop(block=False)
         self.get_widget().cleanup_worker()
+        # Any project tool still running would deliver its result into
+        # widgets that are being torn down.
+        self._background_tools.shutdown()
 
         # Clean up all ghost text managers
         for manager in self._ghost_managers.values():

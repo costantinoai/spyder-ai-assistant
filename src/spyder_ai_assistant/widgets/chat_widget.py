@@ -437,6 +437,9 @@ class ChatWidget(PluginMainWidget):
         )
         self._turn_ctrl.context_provider = self._context_provider
         self._turn_ctrl.runtime_status_notifier = self.status_label.setText
+        # A tool call can finish on a worker thread, so the turn resumes
+        # through this callback rather than from the response handler.
+        self._turn_ctrl.runtime_continuation = self._continue_turn_after_tool
 
         # Main thread → worker: dispatch work requests via signals
         self.sig_send_chat.connect(self._worker.send_chat)
@@ -707,6 +710,12 @@ class ChatWidget(PluginMainWidget):
                 payload,
                 tool_calls=self._turn_ctrl.pending_tool_calls,
             )
+            return
+
+        if action == "runtime_pending":
+            # The tool call is running off the GUI thread. Leave the turn
+            # open: the spinner keeps turning and Send stays disabled until
+            # _continue_turn_after_tool resumes it.
             return
 
         if session and action == "empty":
@@ -1453,6 +1462,15 @@ class ChatWidget(PluginMainWidget):
         if dispatched:
             self._set_generating(True)
         return dispatched
+
+    def _continue_turn_after_tool(self, session, request_messages, tool_calls):
+        """Resume one turn after an off-thread tool call reported back."""
+        logger.info(
+            "Resuming chat turn for session %s after tool call %d",
+            getattr(session, "session_id", "<unknown>"),
+            tool_calls,
+        )
+        self._dispatch_messages(session, request_messages, tool_calls=tool_calls)
 
     def _build_request_messages(self, session):
         """Build the full request payload for the current chat session."""

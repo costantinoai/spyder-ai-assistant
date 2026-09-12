@@ -25,6 +25,13 @@ When multiple IPython consoles are open, the runtime selector lets the user pin
 debugging work to one console without changing the active editor or active
 console tab elsewhere in Spyder.
 
+While the model is waiting on a project or git tool, the status line names the
+tool that is running (for example `git.status`) rather than showing an
+unexplained spinner, so a slow project-wide search reads differently from a
+stalled model. Those tools run on a worker thread, so the rest of Spyder keeps
+responding while one is in flight; the turn itself stays open, which is why
+`Send` remains disabled until the answer arrives.
+
 The **Settings** button next to the input opens the per-tab chat settings.
 Each tab can choose its own working mode there (a preset instruction block
 prepended to the system prompt; the default is Coding):

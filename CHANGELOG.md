@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- project and git tools (`project.search`, `git.diff`, and the rest) now run
+  on a worker thread instead of inside the chat turn's Qt slot, so a
+  project-wide search or a slow git command no longer freezes the editor,
+  the consoles and the transcript while it runs. Measured over a 1900-file
+  project: the worst event-loop stall for one search dropped from about
+  700 ms to about 70 ms
+- while the model is waiting on a project or git tool, the chat status line
+  names the tool that is running instead of showing an unexplained spinner,
+  and the turn stays open so `Send` re-enables only once the answer arrives
+- the embedded MCP server now starts on the first idle pass of the event
+  loop rather than during plugin initialization, keeping its startup
+  handshake off Spyder's startup path
+- MCP project and git requests no longer move their file and git work onto
+  the GUI thread; only the project-root resolution runs there
+- inspecting several variables at once now opens one kernel client for the
+  batch and stops fetching live values after a 3 second budget, instead of
+  one blocking kernel round trip per variable
+
+### Fixed
+
+- restored the MCP editor tools: `preview_file_edit` and `apply_file_edit`
+  raised `NameError` because the shared plugin lookup was not imported when
+  it was centralised
+- the message shown when project file access is switched off pointed at the
+  old Behavior tab instead of Advanced
+- the embedded MCP server no longer logs a reconfiguration line for
+  configuration changes that leave it unchanged
+
 ## 0.7.2 - 2026-09-12
 
 ### Fixed

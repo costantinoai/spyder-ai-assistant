@@ -28,13 +28,14 @@ import logging
 import os
 import re
 import subprocess
+from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from spyder_ai_assistant.utils.coerce import bounded_int
 from spyder_ai_assistant.utils.context import SKIP_DIRS
 from spyder_ai_assistant.utils.tool_protocol import (
-    PROJECT_TOOL_NAMES,
-    PROJECT_TOOL_PREFIXES,
+    PROJECT_TOOL_NAMES,  # noqa: F401 -- re-exported for existing importers
+    is_project_tool,
     TOOL_GIT_DIFF,
     TOOL_GIT_LOG,
     TOOL_GIT_STATUS,
@@ -68,10 +69,29 @@ def dispatch_chat_tool_request(request, runtime_executor, project_executor):
     The chat turn controller only knows "an executor"; this keeps the two
     tool families separate without teaching the controller about either.
     """
-    tool = str((request or {}).get("tool", "") or "")
-    if tool.startswith(PROJECT_TOOL_PREFIXES):
+    if is_project_tool((request or {}).get("tool", "")):
         return project_executor(request)
     return runtime_executor(request)
+
+
+@dataclass
+class PreparedToolRequest:
+    """One project tool request after its GUI-thread preparation.
+
+    Splitting a request in two is what lets the work run off the GUI
+    thread: resolving the project root reads Spyder's active project and
+    editor, while the file and git access that follows is plain I/O.
+
+    ``result`` is already filled in when the request cannot run at all
+    (project access disabled, no project root, unknown tool). Otherwise
+    ``root`` holds the resolved project root and the request is ready to
+    run on any thread.
+    """
+
+    tool: str
+    args: dict = field(default_factory=dict)
+    root: str = ""
+    result: Optional[dict] = None
 
 
 class ProjectToolsService:
@@ -100,33 +120,14 @@ class ProjectToolsService:
             return ""
         return os.path.realpath(root)
 
-    def execute_request(self, request) -> dict[str, Any]:
-        """Execute one ``{"tool": ..., "args": {...}}`` request.
+    def _handlers(self):
+        """Return the tool name to handler mapping.
 
-        Returns the same result shape as the runtime bridge so the chat
-        observation formatter and MCP normaliser treat both alike.
+        One table, consulted by ``prepare_request`` to reject an unknown
+        tool before any thread is involved and by ``run_prepared`` to do
+        the work.
         """
-        tool = str((request or {}).get("tool", "") or "")
-        args = (request or {}).get("args") or {}
-        if not isinstance(args, dict):
-            args = {}
-        logger.info("Executing project tool request: tool=%s args=%s", tool, args)
-
-        if not self._enabled_resolver():
-            return self._error(
-                tool,
-                "Project file access is disabled in Assistant Settings "
-                "(Behavior tab).",
-            )
-        root = self.resolve_root()
-        if not root:
-            return self._error(
-                tool,
-                "No project or file is open in Spyder, so there is no "
-                "project root to read from.",
-            )
-
-        handlers = {
+        return {
             TOOL_PROJECT_LIST_FILES: self._list_files,
             TOOL_PROJECT_READ_FILE: self._read_file,
             TOOL_PROJECT_SEARCH: self._search,
@@ -134,32 +135,98 @@ class ProjectToolsService:
             TOOL_GIT_DIFF: self._git_diff,
             TOOL_GIT_LOG: self._git_log,
         }
-        handler = handlers.get(tool)
-        if handler is None:
-            return self._error(tool, f"Unsupported project tool: {tool!r}")
+
+    def prepare_request(self, request) -> PreparedToolRequest:
+        """Resolve one request against Spyder state, without running it.
+
+        This half reads the active project and the current editor, so it
+        must run on the GUI thread. The work itself does not, which is why
+        it lives in ``run_prepared``.
+        """
+        tool = str((request or {}).get("tool", "") or "")
+        args = (request or {}).get("args") or {}
+        if not isinstance(args, dict):
+            args = {}
+        # Copied so the worker thread reads a snapshot the caller cannot
+        # mutate underneath it.
+        args = dict(args)
+
+        if not self._enabled_resolver():
+            return PreparedToolRequest(tool, args, result=self.error_result(
+                tool,
+                "Project file access is disabled in Assistant Settings "
+                "(Advanced tab).",
+            ))
+        root = self.resolve_root()
+        if not root:
+            return PreparedToolRequest(tool, args, result=self.error_result(
+                tool,
+                "No project or file is open in Spyder, so there is no "
+                "project root to read from.",
+            ))
+        if tool not in self._handlers():
+            return PreparedToolRequest(tool, args, root=root, result=self.error_result(
+                tool, f"Unsupported project tool: {tool!r}", root=root,
+            ))
+        return PreparedToolRequest(tool, args, root=root)
+
+    def run_prepared(self, prepared: PreparedToolRequest) -> dict[str, Any]:
+        """Execute one prepared request. Safe to call off the GUI thread.
+
+        Touches only the filesystem and git, never Qt or Spyder state, so
+        the chat turn loop (via a worker) and the MCP server (on its own
+        request thread) can both run this while the IDE stays responsive.
+
+        Returns the same result shape as the runtime bridge so the chat
+        observation formatter and MCP normaliser treat both alike.
+        """
+        if prepared.result is not None:
+            return prepared.result
+
+        tool = prepared.tool
+        logger.info(
+            "Executing project tool request: tool=%s args=%s",
+            tool,
+            prepared.args,
+        )
+        handler = self._handlers()[tool]
         try:
-            payload, note = handler(root, args)
+            payload, note = handler(prepared.root, prepared.args)
         except ValueError as error:
-            return self._error(tool, str(error), root=root)
+            return self.error_result(tool, str(error), root=prepared.root)
         except Exception as error:  # pragma: no cover - defensive
             logger.exception("Project tool %s failed", tool)
-            return self._error(tool, f"{tool} failed: {error}", root=root)
-        result = {
+            return self.error_result(
+                tool, f"{tool} failed: {error}", root=prepared.root,
+            )
+        logger.info("Project tool %s completed (%s)", tool, note or "ok")
+        return {
             "ok": True,
             "tool": tool,
             "source": "project",
-            "root": root,
+            "root": prepared.root,
             "payload": payload,
             "query_note": note,
             "error": "",
         }
-        logger.info("Project tool %s completed (%s)", tool, note or "ok")
-        return result
+
+    def execute_request(self, request) -> dict[str, Any]:
+        """Execute one ``{"tool": ..., "args": {...}}`` request inline.
+
+        The synchronous entry point, kept for callers that are already off
+        the GUI thread or do not care (tests, the one-click chat actions).
+        """
+        return self.run_prepared(self.prepare_request(request))
 
     # --- helpers shared by the handlers ----------------------------------
 
     @staticmethod
-    def _error(tool, message, root=""):
+    def error_result(tool, message, root=""):
+        """Return the failure envelope for one project tool call.
+
+        Public because a caller that runs the work on a worker thread has
+        to build this itself when the worker raises.
+        """
         return {
             "ok": False,
             "tool": tool,
