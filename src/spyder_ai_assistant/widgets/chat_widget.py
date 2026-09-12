@@ -21,7 +21,7 @@ import os
 from uuid import uuid4
 from datetime import datetime
 
-from qtpy.QtCore import Qt, Signal, QThread
+from qtpy.QtCore import QEvent, Qt, Signal, QThread
 from spyder.utils.icon_manager import ima
 from qtpy.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QSplitter, QPushButton, QComboBox, QLabel,
@@ -41,6 +41,10 @@ from spyder_ai_assistant.utils.chat_inference import (
     format_chat_temperature,
     make_chat_inference_record,
     resolve_chat_inference_options,
+)
+from spyder_ai_assistant.utils.chat_themes import (
+    get_theme_colors,
+    parse_color_overrides,
 )
 from spyder_ai_assistant.utils.context import build_system_context_block
 from spyder_ai_assistant.utils.error_messages import format_provider_problem
@@ -62,6 +66,8 @@ from spyder_ai_assistant.utils.prompt_library import (
 from spyder_ai_assistant.utils.runtime_bridge import (
     build_runtime_bridge_instructions,
 )
+from spyder_ai_assistant.utils.ui_stylesheet import pane_stylesheet
+from spyder_ai_assistant.utils.ui_tokens import build_tokens
 from spyder_ai_assistant.utils.chat_workflows import (
     DEBUG_ACTION_LABELS,
     build_debug_prompt,
@@ -199,18 +205,23 @@ class ChatWidget(PluginMainWidget):
 
         self.status_label = QLabel("Connecting...")
         self.status_label.ID = "ai_chat_status_label"
+        # Spyder's ``ID`` is for its own action routing; the style engine can
+        # only select on an object name, so both are set deliberately.
+        self.status_label.setObjectName("aiChatStatus")
 
         # The first provider problem, shown in the pane rather than only in
         # the status label's tooltip: a tooltip is invisible until hovered,
         # so a misconfigured endpoint just looked like silence.
         self.provider_issue_label = QLabel("")
         self.provider_issue_label.ID = "ai_chat_provider_issue_label"
+        self.provider_issue_label.setObjectName("aiChatProviderIssue")
         self.provider_issue_label.setWordWrap(True)
         self.provider_issue_label.setVisible(False)
 
         # Context label: shows current file and cursor line (e.g. "main.py:42")
         self.context_label = QLabel("")
         self.context_label.ID = "ai_chat_context_label"
+        self.context_label.setObjectName("aiChatContext")
         self.context_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.context_label.setToolTip("Current editor file and cursor position")
 
@@ -218,6 +229,7 @@ class ChatWidget(PluginMainWidget):
         # console or variable content into the normal chat prompt path.
         self.runtime_label = QLabel("Kernel: unavailable")
         self.runtime_label.ID = "ai_chat_runtime_label"
+        self.runtime_label.setObjectName("aiChatRuntime")
         self.runtime_label.setToolTip("Active IPython console runtime status")
 
         self.runtime_target_combo = QComboBox(self)
@@ -411,6 +423,8 @@ class ChatWidget(PluginMainWidget):
 
         self.stop_btn = QPushButton("Stop")
         self.send_btn = QPushButton("Send")
+        self.stop_btn.setObjectName("aiChatStop")
+        self.send_btn.setObjectName("aiChatSend")
         self.stop_btn.setEnabled(False)
         self.stop_btn.hide()
         self.stop_btn.setToolTip("Stop the current response")
@@ -448,6 +462,7 @@ class ChatWidget(PluginMainWidget):
         content_layout.addWidget(self.provider_issue_label)
         footer = QHBoxLayout()
         input_hint = QLabel("Enter to send · Shift+Enter for a new line")
+        input_hint.setObjectName("aiChatHint")
         hint_font = input_hint.font()
         hint_font.setPointSizeF(max(8, hint_font.pointSizeF() - 1))
         input_hint.setFont(hint_font)
@@ -457,6 +472,7 @@ class ChatWidget(PluginMainWidget):
         content_layout.addLayout(footer)
 
         self.setLayout(content_layout)
+        self._apply_ui_theme()
 
         # Explicit tab order. Qt's default follows construction order, which
         # here put the toolbar combos and the action buttons in an order
@@ -1082,6 +1098,32 @@ class ChatWidget(PluginMainWidget):
         if kwargs:
             display.update_appearance(**kwargs)
 
+    def _apply_ui_theme(self):
+        """Rebuild the pane stylesheet from the active theme.
+
+        The transcript themes itself from the same colours, so both surfaces
+        move together; this only covers the chrome Qt draws as widgets.
+        """
+        is_dark = is_dark_interface()
+        try:
+            preset = self.get_conf("theme_preset")
+        except Exception:
+            preset = "default"
+        try:
+            overrides = parse_color_overrides(self.get_conf("theme_color_overrides"))
+        except Exception:
+            overrides = {}
+
+        colors = get_theme_colors(preset, is_dark, overrides)
+        self._ui_tokens = build_tokens(colors, is_dark)
+        self.setStyleSheet(pane_stylesheet(self._ui_tokens))
+
+    def changeEvent(self, event):
+        """Follow Spyder's own light/dark swap, which arrives as a palette change."""
+        super().changeEvent(event)
+        if event.type() == QEvent.PaletteChange and hasattr(self, "_ui_tokens"):
+            self._apply_ui_theme()
+
     def update_all_display_appearance(self, **kwargs):
         """Push appearance settings to all active ChatDisplay widgets.
 
@@ -1091,6 +1133,9 @@ class ChatWidget(PluginMainWidget):
         """
         for session in self._session_ctrl.ordered_sessions():
             session.display.update_appearance(**kwargs)
+        # The preset and its overrides also drive the chrome, so the pane
+        # sheet has to be rebuilt from the same change that moved the bubbles.
+        self._apply_ui_theme()
 
     def sync_model_selection_from_conf(self):
         """Apply the configured provider/model preference without relisting."""
