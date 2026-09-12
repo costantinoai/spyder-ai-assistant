@@ -1641,6 +1641,21 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             _summarize_target_for_log(target),
         )
 
+        # Spyder asks for completions as the user types. In manual-only
+        # mode that is not a request from the user, and it has to be
+        # dropped here as well as in the ghost manager: this path reaches
+        # ghost text through sig_ghost_text_ready without going near the
+        # manager's timers. request_manual_completion is deliberately not
+        # gated, because that one *is* the user asking.
+        if self.get_conf("completion_manual_only", False):
+            logger.info(
+                "Dropping automatic AI completion req_id=%d because "
+                "suggestions are set to manual only",
+                req_id,
+            )
+            self._emit_empty_response(req_id)
+            return
+
         # Check if completions are enabled
         if not self.get_conf("completions_enabled"):
             logger.info(

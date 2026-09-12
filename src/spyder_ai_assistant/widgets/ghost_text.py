@@ -258,10 +258,15 @@ class GhostTextManager:
         post_accept_completion_delay_ms=POST_ACCEPT_COMPLETION_DELAY_MS,
         native_popup_policy=DEFAULT_NATIVE_POPUP_POLICY,
         ai_available=None,
+        manual_only=False,
     ):
         self._editor = editor
         self._lifecycle_callback = lifecycle_callback
         self._manual_completion_requester = manual_completion_requester
+        # Suggestions only when the user asks for them: both automatic
+        # paths (idle and post-accept) stop scheduling, while
+        # request_completion keeps working for the shortcut.
+        self._manual_only = bool(manual_only)
         # Ownership rule between ghost text and Spyder's automatic popup
         # (``NATIVE_POPUP_POLICIES``); ``ai_available`` tells whether the AI
         # side can actually deliver (completions on, model loaded), so the
@@ -949,9 +954,34 @@ class GhostTextManager:
         except Exception:
             return False
 
+    def set_manual_only(self, manual_only):
+        """Turn "suggest only when asked" on or off for this editor.
+
+        Any pending automatic request is dropped straight away, so turning
+        the mode on never lets one last suggestion through.
+        """
+        self._manual_only = bool(manual_only)
+        if self._manual_only:
+            self._idle_completion_timer.stop()
+            self._post_accept_completion_timer.stop()
+            self._post_accept_pending = False
+        logger.info(
+            "Manual-only AI completions are now %s for this editor",
+            "on" if self._manual_only else "off",
+        )
+
+    @property
+    def manual_only(self):
+        """Return whether suggestions are only produced on request."""
+        return self._manual_only
+
     def _schedule_idle_completion(self):
         """Schedule one AI completion after a short pause."""
         self.resume_suggestions("edit")
+        if self._manual_only:
+            # Typing must not queue anything in this mode; the shortcut is
+            # the only way to ask for a suggestion.
+            return
         if self._ghost_active:
             logger.info(
                 "Idle AI completion scheduling skipped because ghost text is already visible"
@@ -993,6 +1023,10 @@ class GhostTextManager:
     def _schedule_post_accept_completion(self, reason):
         """Schedule one immediate completion after accepting ghost text."""
         self._post_accept_reason = str(reason or "accepted")
+        if self._manual_only:
+            # Accepting a suggestion is not a request for the next one.
+            self._post_accept_pending = False
+            return
         if not self._editor_has_focus():
             self._post_accept_pending = False
             logger.info(
@@ -1025,7 +1059,9 @@ class GhostTextManager:
             self._post_accept_reason,
         )
         self.request_completion(source="post_accept")
-        if not self._ghost_active and self._editor_has_focus():
+        # The backup idle timer below would re-arm the automatic path, so
+        # it is skipped in manual-only mode along with everything else.
+        if not self._manual_only and not self._ghost_active and self._editor_has_focus():
             self._idle_completion_timer.start()
             logger.info(
                 "Scheduled backup idle AI completion after post-accept request (%dms)",

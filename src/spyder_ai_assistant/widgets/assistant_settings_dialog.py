@@ -523,6 +523,17 @@ class AssistantSettingsDialog(QDialog):
         )
         self.post_accept_delay_spin.setSingleStep(25)
         self.post_accept_delay_spin.setSuffix(" ms")
+        self.manual_only_checkbox = QCheckBox(
+            "Only suggest when I ask (Ctrl+Shift+Space)", ghost_group
+        )
+        self.manual_only_checkbox.setToolTip(
+            "Stop suggesting as you type. The completion shortcut still "
+            "works, and is then the only way to request a suggestion."
+        )
+        self.manual_only_checkbox.toggled.connect(
+            self._refresh_ghost_timing_enabled
+        )
+        ghost_form.addRow(self.manual_only_checkbox)
         ghost_form.addRow("Idle completion delay", self.idle_delay_spin)
         ghost_form.addRow("Post-accept delay", self.post_accept_delay_spin)
         # The note sits inside the group so the two delays are explained
@@ -534,7 +545,18 @@ class AssistantSettingsDialog(QDialog):
         )
         behavior_note.setWordWrap(True)
         ghost_form.addRow(behavior_note)
+        self._refresh_ghost_timing_enabled()
         return ghost_group
+
+    def _refresh_ghost_timing_enabled(self, *_args):
+        """Grey out the two delays while suggestions are manual only.
+
+        Neither timer runs in that mode, so leaving them editable would
+        invite the user to tune something that has no effect.
+        """
+        automatic = not self.manual_only_checkbox.isChecked()
+        self.idle_delay_spin.setEnabled(automatic)
+        self.post_accept_delay_spin.setEnabled(automatic)
 
     def _build_native_popup_group(self, parent):
         """Return the group choosing who owns Spyder's completion popup."""
@@ -962,6 +984,8 @@ class AssistantSettingsDialog(QDialog):
         )
         self.chat_max_tokens_spin.setValue(settings["max_tokens"])
         self.completions_enabled_checkbox.setChecked(settings["completions_enabled"])
+        self.manual_only_checkbox.setChecked(settings["completion_manual_only"])
+        self._refresh_ghost_timing_enabled()
         self.project_tools_checkbox.setChecked(settings["project_tools_enabled"])
         self.completion_temperature_spin.setValue(settings["completion_temperature"])
         self.completion_max_tokens_spin.setValue(settings["completion_max_tokens"])
@@ -1126,6 +1150,7 @@ class AssistantSettingsDialog(QDialog):
             "chat_temperature": int(round(self.chat_temperature_spin.value() * 10)),
             "max_tokens": int(self.chat_max_tokens_spin.value()),
             "completions_enabled": bool(self.completions_enabled_checkbox.isChecked()),
+            "completion_manual_only": bool(self.manual_only_checkbox.isChecked()),
             "project_tools_enabled": bool(self.project_tools_checkbox.isChecked()),
             "completion_temperature": float(self.completion_temperature_spin.value()),
             "completion_max_tokens": int(self.completion_max_tokens_spin.value()),

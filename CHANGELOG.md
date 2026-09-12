@@ -4,6 +4,12 @@
 
 ### Added
 
+- **Only suggest when I ask**, a new option under Completions. With it on,
+  nothing is suggested as you type: no idle suggestion, no follow-up after
+  accepting one, and no answer to the editor's own automatic completion
+  requests. `Ctrl+Shift+Space` still asks for a suggestion, and is then the
+  only thing that does. The two ghost-text delays are greyed out while the
+  mode is on, since neither timer runs (GitHub issue #4)
 - an empty chat tab now says what the assistant can see and offers three
   starter prompts. Clicking one fills the input instead of sending it, so
   it can be edited first

@@ -863,6 +863,10 @@ class AIChatPlugin(SpyderDockablePlugin):
                     "post_accept_completion_delay_ms"
                 ],
             ),
+            manual_only=self.get_conf(
+                "completion_manual_only",
+                default=ASSISTANT_CONF_DEFAULTS["completion_manual_only"],
+            ),
             native_popup_policy=self.get_conf(
                 "native_popup_policy",
                 default=ASSISTANT_CONF_DEFAULTS["native_popup_policy"],
@@ -1814,6 +1818,16 @@ class AIChatPlugin(SpyderDockablePlugin):
 
     # --- Behavior config change handlers ---
     # These propagate ghost text options to all editor ghost text managers.
+
+    @on_conf_change(option="completion_manual_only")
+    def on_completion_manual_only_changed(self, value):
+        """Apply the manual-only suggestion mode to every editor at once.
+
+        Kept separate from on_ghost_option_changed: that handler treats any
+        key it does not recognise as a timing value in milliseconds.
+        """
+        for manager in self._ghost_managers.values():
+            manager.set_manual_only(value)
 
     @on_conf_change(option=list(GHOST_TEXT_OPTION_KEYS))
     def on_ghost_option_changed(self, option, value):

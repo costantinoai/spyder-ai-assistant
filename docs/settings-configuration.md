@@ -133,10 +133,18 @@ access moved to **Advanced**.
 
 | Setting | Config Key | Default | Range |
 |---------|-----------|---------|-------|
+| Only suggest when I ask | `completion_manual_only` | `False` | on/off |
 | Idle completion delay | `idle_completion_delay_ms` | `1000` ms | 100-5000 |
 | Post-accept delay | `post_accept_completion_delay_ms` | `75` ms | 0-1000 |
 | Spyder's automatic completion popup | `native_popup_policy` | `ai_first` | `ai_first`, `ai_replaces`, `native_first` |
 
+- **Only suggest when I ask**: nothing is suggested while typing. All three
+  automatic paths stop: the idle timer, the follow-up request after accepting
+  a suggestion, and the editor's own automatic completion request, which
+  would otherwise reach ghost text through the completion provider without
+  going near those timers. `Ctrl+Shift+Space` still asks for a suggestion and
+  is then the only way to get one, so the two delays below are greyed out
+  while this is on.
 - **Idle completion delay**: How long after the user stops typing before an
   automatic ghost text completion is requested.
 - **Post-accept delay**: Pause after accepting a ghost text suggestion before

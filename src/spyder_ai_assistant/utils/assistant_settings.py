@@ -128,6 +128,10 @@ ASSISTANT_CONF_DEFAULTS = {
     "max_tokens": DEFAULT_CHAT_MAX_TOKENS,
     "completion_max_tokens": DEFAULT_COMPLETION_MAX_TOKENS,
     "completions_enabled": DEFAULT_COMPLETIONS_ENABLED,
+    # Suggestions only when asked for (GitHub issue #4). Deliberately not in
+    # GHOST_TEXT_OPTION_KEYS: that tuple's handler routes anything it does
+    # not recognise into update_timing(), which expects milliseconds.
+    "completion_manual_only": False,
     "completion_shortcut": DEFAULT_COMPLETION_SHORTCUT,
     "completion_accept_word_shortcut": DEFAULT_COMPLETION_ACCEPT_WORD_SHORTCUT,
     "completion_accept_line_shortcut": DEFAULT_COMPLETION_ACCEPT_LINE_SHORTCUT,
@@ -208,6 +212,10 @@ COMPLETION_PROVIDER_CONF_DEFAULTS = [
         ASSISTANT_CONF_DEFAULTS["completion_max_tokens"],
     ),
     ("completions_enabled", ASSISTANT_CONF_DEFAULTS["completions_enabled"]),
+    (
+        "completion_manual_only",
+        ASSISTANT_CONF_DEFAULTS["completion_manual_only"],
+    ),
     ("project_tools_enabled", ASSISTANT_CONF_DEFAULTS["project_tools_enabled"]),
     ("debounce_ms", ASSISTANT_CONF_DEFAULTS["debounce_ms"]),
 ]
@@ -312,6 +320,7 @@ class AssistantSettings:
     max_tokens: int = DEFAULT_CHAT_MAX_TOKENS
     completion_max_tokens: int = DEFAULT_COMPLETION_MAX_TOKENS
     completions_enabled: bool = DEFAULT_COMPLETIONS_ENABLED
+    completion_manual_only: bool = False
     completion_shortcut: str = DEFAULT_COMPLETION_SHORTCUT
     completion_accept_word_shortcut: str = DEFAULT_COMPLETION_ACCEPT_WORD_SHORTCUT
     completion_accept_line_shortcut: str = DEFAULT_COMPLETION_ACCEPT_LINE_SHORTCUT
@@ -429,6 +438,10 @@ class AssistantSettings:
             completions_enabled=_normalize_bool(
                 values.get("completions_enabled", DEFAULT_COMPLETIONS_ENABLED),
                 DEFAULT_COMPLETIONS_ENABLED,
+            ),
+            completion_manual_only=_normalize_bool(
+                values.get("completion_manual_only", False),
+                False,
             ),
             completion_shortcut=_normalize_string(
                 values.get("completion_shortcut", DEFAULT_COMPLETION_SHORTCUT),
@@ -614,6 +627,7 @@ class AssistantSettings:
             "completion_temperature": self.completion_temperature,
             "completion_max_tokens": self.completion_max_tokens,
             "completions_enabled": self.completions_enabled,
+            "completion_manual_only": self.completion_manual_only,
             "project_tools_enabled": self.project_tools_enabled,
             "debounce_ms": self.debounce_ms,
         }
