@@ -17,6 +17,17 @@
 
 ### Changed
 
+- a long conversation no longer gets slower with every message. Each new
+  message used to re-lay out the whole transcript, so cost grew with
+  length; measured over 150 exchanges, the last messages took 101 ms each
+  against 6.5 ms for the first, 7.9 s in total. Finished messages are now
+  appended to the document instead, which takes 0.18 s for the same 150
+  and stays flat as the chat grows
+- syntax highlighting is reused instead of recomputed. While a response
+  streams, every code block already closed inside it was re-highlighted
+  about 30 times a second even though it could no longer change; a
+  response with a dozen closed blocks now costs 2.5 ms per render instead
+  of 6.2 ms, and its markdown re-render dropped from 3.5 ms to 0.17 ms
 - project and git tools (`project.search`, `git.diff`, and the rest) now run
   on a worker thread instead of inside the chat turn's Qt slot, so a
   project-wide search or a slow git command no longer freezes the editor,

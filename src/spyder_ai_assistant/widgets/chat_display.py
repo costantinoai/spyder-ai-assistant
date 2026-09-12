@@ -59,6 +59,14 @@ _SCROLL_BOTTOM_THRESHOLD_PX = 30
 # streaming markdown, so rendering each token is pure waste.
 _STREAM_RENDER_INTERVAL_S = 0.033
 
+# Highlighted code is cached per (language, style, code). While a response
+# streams, every already-closed code block in it is re-rendered about 30
+# times a second even though it can no longer change; highlighting measured
+# 0.26 ms per block, so a message with a dozen closed blocks spent several
+# milliseconds per render re-deriving identical HTML. The cap keeps a long
+# session from holding every snippet it ever displayed.
+_HIGHLIGHT_CACHE_MAX = 256
+
 
 class ChatDisplay(QTextEdit):
     """Read-only text display for the AI chat conversation.
@@ -154,6 +162,9 @@ class ChatDisplay(QTextEdit):
         # links (which reference blocks by index).
         self._code_blocks = []
         self._batch_render = False
+        # (language, style, code) -> highlighted HTML or None. See
+        # _HIGHLIGHT_CACHE_MAX for why this exists.
+        self._highlight_cache = {}
 
         # --- Smart auto-scroll state ---
         # Tracks whether the user has manually scrolled away from the
@@ -275,6 +286,9 @@ class ChatDisplay(QTextEdit):
             self._batch_render = False
         self._user_scrolled_away = scrolled_away
         if streaming:
+            # The batched appends above deliberately skipped the document,
+            # so load the rebuilt transcript before re-opening the frame.
+            self._set_document_html(self._html_content)
             self.start_assistant_message()
             self.append_chunk(buffer)
             self._render_stream()
@@ -535,12 +549,13 @@ class ChatDisplay(QTextEdit):
         escaped = self._escape_html(text)
         # Preserve newlines in the user's message
         escaped = escaped.replace("\n", "<br>")
-        self._html_content += self._wrap_message(
+        bubble = self._wrap_message(
             self._theme["user_bg"], self._theme["user_text"],
             "YOU", escaped,
             label_color=self._theme["user_label"],
         )
-        self._set_document_html(self._html_content)
+        self._html_content += bubble
+        self._append_document_html(bubble)
         # User just sent a message — always scroll to bottom regardless
         # of previous scroll position, and reset scroll-away state.
         self._user_scrolled_away = False
@@ -554,12 +569,13 @@ class ChatDisplay(QTextEdit):
         """Add a finalized assistant message to the display."""
         self._render_messages.append(("assistant_message", text))
         rendered = self._render_markdown(text or "", track_code_blocks=True)
-        self._html_content += self._wrap_message(
+        bubble = self._wrap_message(
             self._theme["assistant_bg"], self._theme["assistant_text"],
             "AI", rendered,
             label_color=self._theme["assistant_label"],
         )
-        self._set_document_html(self._html_content)
+        self._html_content += bubble
+        self._append_document_html(bubble)
         self._scroll_to_bottom()
 
     def start_assistant_message(self):
@@ -625,13 +641,16 @@ class ChatDisplay(QTextEdit):
         return html
 
     def _open_stream_frame(self):
-        """Load the stable transcript once and append the streaming frame.
+        """Append an empty frame at the end to hold the live response.
 
-        Everything before the frame is the pre-built HTML of completed
-        messages; it is laid out once here and never touched again during
-        the response.
+        The document already contains the finished transcript, because each
+        finished message is appended to it, so there is nothing to reload
+        here. Reloading used to happen once per turn, which put the whole
+        O(n) transcript cost back on every response.
         """
-        self._set_document_html(self._html_content)
+        if self._batch_render:
+            return
+        self._programmatic_scroll = True
         cursor = QTextCursor(self.document())
         cursor.movePosition(QTextCursor.End)
         frame_format = QTextFrameFormat()
@@ -639,6 +658,17 @@ class ChatDisplay(QTextEdit):
         frame_format.setMargin(0)
         frame_format.setPadding(0)
         self._stream_frame = cursor.insertFrame(frame_format)
+        QTimer.singleShot(0, self._clear_programmatic_scroll)
+
+    def _reload_and_open_stream_frame(self):
+        """Reload the transcript, then re-open the live frame below it.
+
+        Needed only when something must appear *above* the live response:
+        rebuilding from ``_html_content`` is the simplest correct way to
+        reorder the document.
+        """
+        self._set_document_html(self._html_content)
+        self._open_stream_frame()
 
     def _render_stream(self):
         """Replace the streaming frame with the current buffer's HTML."""
@@ -682,9 +712,11 @@ class ChatDisplay(QTextEdit):
         # Parse thinking vs response for the final version
         thinking, response, _ = self._parse_thinking(self._streaming_buffer)
 
-        # Add thinking block to permanent HTML (if present)
+        # Build the finished HTML once: it is both appended to the
+        # authoritative transcript and put into the document below.
+        finalized_html = ""
         if thinking:
-            self._html_content += self._wrap_thinking(thinking, "Thought")
+            finalized_html += self._wrap_thinking(thinking, "Thought")
 
         # Render the response with code block tracking enabled.
         # This stores code blocks in self._code_blocks and adds
@@ -694,11 +726,12 @@ class ChatDisplay(QTextEdit):
         rendered = self._render_markdown(
             response_text, track_code_blocks=True
         )
-        self._html_content += self._wrap_message(
+        finalized_html += self._wrap_message(
             self._theme["assistant_bg"], self._theme["assistant_text"],
             "AI", rendered,
             label_color=self._theme["assistant_label"],
         )
+        self._html_content += finalized_html
 
         # Set _is_streaming = False BEFORE calling _set_document_html,
         # because setHtml() may trigger a synchronous or deferred
@@ -716,7 +749,7 @@ class ChatDisplay(QTextEdit):
         # below, but the _user_scrolled_away flag starts fresh.
         self._user_scrolled_away = False
 
-        self._set_document_html(self._html_content)
+        self._commit_stream_frame(finalized_html)
 
         # After rendering, check if the user is at the bottom.
         # If not, show the scroll button so they can jump back.
@@ -757,20 +790,21 @@ class ChatDisplay(QTextEdit):
     def _append_notice(self, level, message):
         """Render all notice levels with the same escaping and layout."""
         self._render_messages.append((level, message))
-        self._html_content += self._wrap_message(
+        bubble = self._wrap_message(
             self._theme[f"{level}_bg"], self._theme[f"{level}_text"],
             level.upper(), self._escape_html(message),
             label_color=self._theme[f"{level}_label"],
         )
+        self._html_content += bubble
         if self._batch_render:
             return
         if self._is_streaming:
-            # The notice belongs before the streaming bubble: reload the
-            # stable transcript and re-open the frame below it.
-            self._open_stream_frame()
+            # The notice belongs before the streaming bubble, so this is
+            # the one path that still reorders by reloading.
+            self._reload_and_open_stream_frame()
             self._render_stream()
         else:
-            self._set_document_html(self._html_content)
+            self._append_document_html(bubble)
             self._scroll_to_bottom()
 
     def clear_conversation(self):
@@ -781,6 +815,7 @@ class ChatDisplay(QTextEdit):
         self._is_streaming = False
         self._code_blocks.clear()
         self._render_messages.clear()
+        self._highlight_cache.clear()
         # Reset scroll state on clear — fresh conversation
         self._user_scrolled_away = False
         self._scroll_btn.hide()
@@ -834,6 +869,54 @@ class ChatDisplay(QTextEdit):
         # Clear the guard via QTimer.singleShot(0) to ensure it
         # persists through any deferred valueChanged signals that Qt
         # delivers on the next event loop tick after setHtml().
+        QTimer.singleShot(0, self._clear_programmatic_scroll)
+
+    def _append_document_html(self, html):
+        """Append one finished bubble without reloading the document.
+
+        ``setHtml`` re-lays out the entire transcript, so appending message
+        n cost O(n): measured over 150 exchanges, the first appends took
+        6.5 ms each and the last took 101 ms each, 7.9 s in total. Building
+        the HTML string is flat and nearly free (0.05 s for the same 150),
+        so the reload was the whole cost. Inserting at the end keeps it
+        flat.
+
+        ``_html_content`` stays the authoritative copy of the transcript,
+        because a font or theme change re-renders every bubble from it.
+        """
+        if self._batch_render:
+            return
+        # insertHtml moves the scrollbar; the guard keeps
+        # _on_scrollbar_moved from reading that as the user scrolling.
+        self._programmatic_scroll = True
+        cursor = QTextCursor(self.document())
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertHtml(html)
+        QTimer.singleShot(0, self._clear_programmatic_scroll)
+
+    def _commit_stream_frame(self, html):
+        """Put the finished bubble in place of the live one.
+
+        The streaming frame already sits at the end of the document, so the
+        finished message replaces its contents and the turn ends without
+        reloading the transcript.
+        """
+        if self._batch_render:
+            return
+        if self._stream_frame is None:
+            self._append_document_html(html)
+            return
+        self._programmatic_scroll = True
+        cursor = self._stream_frame.firstCursorPosition()
+        cursor.setPosition(
+            self._stream_frame.lastCursorPosition().position(),
+            QTextCursor.KeepAnchor,
+        )
+        cursor.beginEditBlock()
+        cursor.removeSelectedText()
+        cursor.insertHtml(html)
+        cursor.endEditBlock()
+        self._stream_frame = None
         QTimer.singleShot(0, self._clear_programmatic_scroll)
 
     def _clear_programmatic_scroll(self):
@@ -1038,13 +1121,17 @@ class ChatDisplay(QTextEdit):
         # renders correctly (see lessons.md Qt HTML constraints).
         link_color = self._theme["link_color"]
 
-        def _replace_code_block(match):
-            """Replace a fenced code block with a placeholder.
+        def _protect_fenced_block(match, with_actions):
+            """Replace one fenced code block with a placeholder.
 
-            Renders the code block to HTML (with Pygments highlighting if
-            a language hint is provided) and stores it in protected_blocks.
-            Returns a placeholder string that will be swapped back in
-            after all other markdown processing is complete.
+            Renders the block to HTML (with Pygments highlighting if a
+            language hint is given) and stores it in protected_blocks, so
+            later markdown rules cannot touch its contents. Returns the
+            placeholder that is swapped back in at the end.
+
+            ``with_actions`` adds the Copy/Apply links and registers the
+            code for the code-apply path. Only complete blocks get them:
+            a block still being streamed is not something to apply yet.
             """
             lang = match.group(1) or ""
             code = match.group(2)
@@ -1060,7 +1147,7 @@ class ChatDisplay(QTextEdit):
 
             block_html = self._code_block_html(lang, code, highlighted)
 
-            if track_code_blocks:
+            if with_actions:
                 # Store the raw code for code-apply actions and "Copy"
                 # actions. Uses the unescaped version so insertions clean.
                 index = len(self._code_blocks)
@@ -1085,7 +1172,7 @@ class ChatDisplay(QTextEdit):
 
         text = re.sub(
             r"```(\w+)?\n(.*?)```",
-            _replace_code_block,
+            lambda match: _protect_fenced_block(match, track_code_blocks),
             text,
             flags=re.DOTALL,
         )
@@ -1098,30 +1185,10 @@ class ChatDisplay(QTextEdit):
         # the closing fence arrives.  We detect an opening fence
         # followed by content all the way to the end of the string
         # and protect it with the same placeholder mechanism.
-        def _replace_partial_code_block(match):
-            """Replace a partial (unclosed) fenced code block with a placeholder.
-
-            Same rendering logic as complete code blocks, but applied to
-            content that runs from an opening fence to end-of-string.
-            """
-            lang = match.group(1) or ""
-            code = match.group(2)
-
-            # Unescape HTML entities so Pygments sees the original code.
-            raw_code = self._unescape_html(code)
-
-            # Syntax-highlight with Pygments if a language is specified.
-            highlighted = self._highlight_code(raw_code, lang)
-
-            block_html = self._code_block_html(lang, code, highlighted)
-
-            placeholder = f"\x00CODEBLOCK{len(protected_blocks)}\x00"
-            protected_blocks.append(block_html)
-            return placeholder
-
+        # Same renderer as above, without the Copy/Apply actions.
         text = re.sub(
             r"```(\w+)?\n(.+)$",
-            _replace_partial_code_block,
+            lambda match: _protect_fenced_block(match, False),
             text,
             flags=re.DOTALL,
         )
@@ -1620,6 +1687,17 @@ class ChatDisplay(QTextEdit):
         if not language:
             return None
 
+        # Token colours must match the code card, not the interface:
+        # several light presets deliberately keep dark code cards, and a
+        # light Pygments style on a dark card is unreadable. The style is
+        # part of the cache key, so a theme change cannot serve stale
+        # colours.
+        style = (self._pygments_style_dark if self._code_card_is_dark()
+                 else self._pygments_style_light)
+        key = (language, style, code)
+        if key in self._highlight_cache:
+            return self._highlight_cache[key]
+
         try:
             from pygments import highlight
             from pygments.lexers import get_lexer_by_name
@@ -1627,22 +1705,22 @@ class ChatDisplay(QTextEdit):
 
             lexer = get_lexer_by_name(language, stripall=True)
 
-            # Token colours must match the code card, not the interface:
-            # several light presets deliberately keep dark code cards, and a
-            # light Pygments style on a dark card is unreadable.
-            style = (self._pygments_style_dark if self._code_card_is_dark()
-                     else self._pygments_style_light)
-
             # nowrap=True gives us just the highlighted <span> elements
             # without wrapping <div>/<pre> — we provide our own <pre> wrapper
             # for consistent styling with our message bubbles.
             formatter = HtmlFormatter(
                 style=style, noclasses=True, nowrap=True
             )
-            return highlight(code, lexer, formatter)
+            result = highlight(code, lexer, formatter)
         except Exception:
-            # Unknown language or Pygments error — fall back to plain text
-            return None
+            # Unknown language or Pygments error — fall back to plain text.
+            # Cached too, so an unknown language is not retried every render.
+            result = None
+
+        if len(self._highlight_cache) >= _HIGHLIGHT_CACHE_MAX:
+            self._highlight_cache.clear()
+        self._highlight_cache[key] = result
+        return result
 
     def _escape_html(self, text):
         """Escape HTML special characters to prevent rendering issues."""
