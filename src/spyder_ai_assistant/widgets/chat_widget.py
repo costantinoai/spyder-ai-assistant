@@ -18,10 +18,11 @@ Multi-tab design:
 
 import logging
 import os
+from functools import partial
 from uuid import uuid4
 from datetime import datetime
 
-from qtpy.QtCore import Qt, Signal, QThread
+from qtpy.QtCore import QEvent, Qt, Signal, QThread
 from spyder.utils.icon_manager import ima
 from qtpy.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QSplitter, QPushButton, QComboBox, QLabel,
@@ -41,6 +42,10 @@ from spyder_ai_assistant.utils.chat_inference import (
     format_chat_temperature,
     make_chat_inference_record,
     resolve_chat_inference_options,
+)
+from spyder_ai_assistant.utils.chat_themes import (
+    get_theme_colors,
+    parse_color_overrides,
 )
 from spyder_ai_assistant.utils.context import build_system_context_block
 from spyder_ai_assistant.utils.error_messages import format_provider_problem
@@ -62,6 +67,13 @@ from spyder_ai_assistant.utils.prompt_library import (
 from spyder_ai_assistant.utils.runtime_bridge import (
     build_runtime_bridge_instructions,
 )
+from spyder_ai_assistant.utils.markdown_render import MarkdownRenderer
+from spyder_ai_assistant.utils.ui_stylesheet import (
+    apply_dialog_theme,
+    pane_stylesheet,
+)
+from spyder_ai_assistant.utils.ui_tokens import build_tokens, solve_surface, tint
+from spyder_ai_assistant.widgets.message_bubble import MessageList
 from spyder_ai_assistant.utils.chat_workflows import (
     DEBUG_ACTION_LABELS,
     build_debug_prompt,
@@ -199,18 +211,23 @@ class ChatWidget(PluginMainWidget):
 
         self.status_label = QLabel("Connecting...")
         self.status_label.ID = "ai_chat_status_label"
+        # Spyder's ``ID`` is for its own action routing; the style engine can
+        # only select on an object name, so both are set deliberately.
+        self.status_label.setObjectName("aiChatStatus")
 
         # The first provider problem, shown in the pane rather than only in
         # the status label's tooltip: a tooltip is invisible until hovered,
         # so a misconfigured endpoint just looked like silence.
         self.provider_issue_label = QLabel("")
         self.provider_issue_label.ID = "ai_chat_provider_issue_label"
+        self.provider_issue_label.setObjectName("aiChatProviderIssue")
         self.provider_issue_label.setWordWrap(True)
         self.provider_issue_label.setVisible(False)
 
         # Context label: shows current file and cursor line (e.g. "main.py:42")
         self.context_label = QLabel("")
         self.context_label.ID = "ai_chat_context_label"
+        self.context_label.setObjectName("aiChatContext")
         self.context_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.context_label.setToolTip("Current editor file and cursor position")
 
@@ -218,6 +235,7 @@ class ChatWidget(PluginMainWidget):
         # console or variable content into the normal chat prompt path.
         self.runtime_label = QLabel("Kernel: unavailable")
         self.runtime_label.ID = "ai_chat_runtime_label"
+        self.runtime_label.setObjectName("aiChatRuntime")
         self.runtime_label.setToolTip("Active IPython console runtime status")
 
         self.runtime_target_combo = QComboBox(self)
@@ -331,6 +349,17 @@ class ChatWidget(PluginMainWidget):
             appearance_applier=self._apply_current_appearance,
             generating_session_getter=lambda: self._generating_session,
             session_initializer=self._initialize_session,
+            # Injected once here so every construction path inside the
+            # controller builds the same kind of transcript, rather than each
+            # call site having to remember the factory.
+            session_factory=partial(
+                ChatSession, display_factory=self._make_transcript
+            ),
+            # Resolved when a dialog opens, not now: the tokens are built at
+            # the end of setup, well after this controller exists.
+            dialog_theme=lambda dialog: apply_dialog_theme(
+                dialog, getattr(self, "_ui_tokens", None)
+            ),
         )
 
         # Create the first tab
@@ -411,6 +440,8 @@ class ChatWidget(PluginMainWidget):
 
         self.stop_btn = QPushButton("Stop")
         self.send_btn = QPushButton("Send")
+        self.stop_btn.setObjectName("aiChatStop")
+        self.send_btn.setObjectName("aiChatSend")
         self.stop_btn.setEnabled(False)
         self.stop_btn.hide()
         self.stop_btn.setToolTip("Stop the current response")
@@ -448,6 +479,7 @@ class ChatWidget(PluginMainWidget):
         content_layout.addWidget(self.provider_issue_label)
         footer = QHBoxLayout()
         input_hint = QLabel("Enter to send · Shift+Enter for a new line")
+        input_hint.setObjectName("aiChatHint")
         hint_font = input_hint.font()
         hint_font.setPointSizeF(max(8, hint_font.pointSizeF() - 1))
         input_hint.setFont(hint_font)
@@ -457,6 +489,7 @@ class ChatWidget(PluginMainWidget):
         content_layout.addLayout(footer)
 
         self.setLayout(content_layout)
+        self._apply_ui_theme()
 
         # Explicit tab order. Qt's default follows construction order, which
         # here put the toolbar combos and the action buttons in an order
@@ -742,7 +775,10 @@ class ChatWidget(PluginMainWidget):
 
     def _add_new_tab(self, notify=True):
         """Create a new chat session tab and switch to it."""
-        session = ChatSession(parent=self._tab_widget)
+        session = ChatSession(
+            parent=self._tab_widget,
+            display_factory=self._make_transcript,
+        )
         return self._add_session(session, notify=notify)
 
     def _close_tab(self, index):
@@ -1082,6 +1118,102 @@ class ChatWidget(PluginMainWidget):
         if kwargs:
             display.update_appearance(**kwargs)
 
+    def _transcript_theme(self, tokens, colors):
+        """Theme for a bubble's content, with code surfaces re-derived.
+
+        The preset's code and inline-code colours were authored for an opaque
+        bubble. On a gradient surface they read muddy: solarized light came
+        out olive on khaki with inline chips that were almost invisible. So
+        derive those few keys from the surface the code actually sits on, and
+        leave every other colour to the preset.
+        """
+        theme = dict(colors)
+        # A code card sits *inside* a bubble, so it separates from the bubble
+        # rather than from the pane, and always recedes: lifting it on a dark
+        # theme made the card light enough that the highlighter chose its light
+        # palette, giving navy keywords on a dark block.
+        card = solve_surface(
+            tokens.assistant.mid, tokens.is_dark, target=1.35, lighter=False
+        )
+        theme["code_block_bg"] = card.mid
+        theme["inline_code_bg"] = tint(tokens.accent, 0.18)
+        theme["inline_code_text"] = tokens.accent
+        theme["lang_label"] = tokens.dim
+        return theme
+
+    def _make_transcript(self, parent=None):
+        """Build one transcript: message bubbles with their own renderer.
+
+        Each tab owns its renderer because the renderer carries that tab's
+        code blocks, which the Copy and Apply links index into.
+        """
+        tokens = getattr(self, "_ui_tokens", None)
+        colors = getattr(self, "_ui_theme_colors", {}) or {}
+        renderer = None
+        if tokens is not None:
+            renderer = MarkdownRenderer(
+                self._transcript_theme(tokens, colors),
+                code_font_family=self.get_conf("code_font_family", default="Courier New"),
+                code_font_size=self.get_conf("code_font_size", default=9),
+                pygments_style_dark=self.get_conf("pygments_style_dark", default="monokai"),
+                pygments_style_light=self.get_conf("pygments_style_light", default="default"),
+                is_dark=tokens.is_dark,
+            )
+        return MessageList(parent=parent, renderer=renderer, tokens=tokens)
+
+    def _apply_ui_theme(self):
+        """Rebuild the pane stylesheet from the active theme.
+
+        The transcript themes itself from the same colours, so both surfaces
+        move together; this only covers the chrome Qt draws as widgets.
+
+        Guarded against re-entry: ``setStyleSheet`` re-polishes the widget and
+        Qt answers with another palette change, which arrives back here. Qt
+        swallows exceptions raised in an event handler, so without the guard
+        each theme change recursed until the stack ran out and every rebuild
+        was abandoned half-applied, leaving the pane partly unstyled.
+        """
+        if getattr(self, "_applying_ui_theme", False):
+            return
+        self._applying_ui_theme = True
+        try:
+            self._rebuild_ui_theme()
+        finally:
+            self._applying_ui_theme = False
+
+    def _rebuild_ui_theme(self):
+        """Resolve the theme and push it to the chrome and every transcript."""
+        is_dark = is_dark_interface()
+        try:
+            preset = self.get_conf("theme_preset")
+        except Exception:
+            preset = "default"
+        try:
+            overrides = parse_color_overrides(self.get_conf("theme_color_overrides"))
+        except Exception:
+            overrides = {}
+
+        colors = get_theme_colors(preset, is_dark, overrides)
+        self._ui_theme_colors = colors
+        self._ui_tokens = build_tokens(colors, is_dark)
+        self.setStyleSheet(pane_stylesheet(self._ui_tokens))
+
+        # Existing transcripts follow the new theme, content included.
+        theme = self._transcript_theme(self._ui_tokens, colors)
+        for session in self._session_ctrl.ordered_sessions():
+            display = session.display
+            renderer = getattr(display, "_renderer", None)
+            if renderer is not None and hasattr(renderer, "update"):
+                renderer.update(theme=theme, is_dark=is_dark)
+            if hasattr(display, "apply_tokens"):
+                display.apply_tokens(self._ui_tokens)
+
+    def changeEvent(self, event):
+        """Follow Spyder's own light/dark swap, which arrives as a palette change."""
+        super().changeEvent(event)
+        if event.type() == QEvent.PaletteChange and hasattr(self, "_ui_tokens"):
+            self._apply_ui_theme()
+
     def update_all_display_appearance(self, **kwargs):
         """Push appearance settings to all active ChatDisplay widgets.
 
@@ -1091,6 +1223,9 @@ class ChatWidget(PluginMainWidget):
         """
         for session in self._session_ctrl.ordered_sessions():
             session.display.update_appearance(**kwargs)
+        # The preset and its overrides also drive the chrome, so the pane
+        # sheet has to be rebuilt from the same change that moved the bubbles.
+        self._apply_ui_theme()
 
     def sync_model_selection_from_conf(self):
         """Apply the configured provider/model preference without relisting."""
@@ -1141,6 +1276,7 @@ class ChatWidget(PluginMainWidget):
             mcp_client_launcher=self._mcp_client_launcher,
             parent=self,
         )
+        apply_dialog_theme(dialog, getattr(self, "_ui_tokens", None))
         dialog.manage_profiles_requested.connect(
             self._open_provider_profiles_dialog
         )
@@ -1255,13 +1391,15 @@ class ChatWidget(PluginMainWidget):
             temperature_override=getattr(session, "temperature_override", None),
             max_tokens_override=getattr(session, "max_tokens_override", None),
         )
-        return ChatSettingsDialog(
+        dialog = ChatSettingsDialog(
             session_title=getattr(session, "title", ""),
             defaults=self._chat_default_options(),
             overrides=overrides,
             prompt_preset_id=getattr(session, "prompt_preset_id", None),
             parent=self,
         )
+        apply_dialog_theme(dialog, getattr(self, "_ui_tokens", None))
+        return dialog
 
     def set_prompt_preset(self, preset_id, session=None):
         """Set the chat mode (prompt preset) of one tab; returns True on change."""
@@ -1497,6 +1635,7 @@ class ChatWidget(PluginMainWidget):
             parent=self,
             connection_tester=self._provider_connection_tester,
         )
+        apply_dialog_theme(dialog, getattr(self, "_ui_tokens", None))
         try:
             if dialog.exec_() != dialog.Accepted:
                 return False

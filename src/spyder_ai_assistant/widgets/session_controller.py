@@ -133,6 +133,7 @@ class SessionController:
         session_initializer=None,
         history_dialog_factory=None,
         exchange_delete_dialog_factory=None,
+        dialog_theme=None,
     ):
         self._tab_widget = tab_widget
         self._appearance_applier = appearance_applier
@@ -141,10 +142,19 @@ class SessionController:
         self._session_initializer = session_initializer
         self._history_dialog_factory = history_dialog_factory
         self._exchange_delete_dialog_factory = exchange_delete_dialog_factory
+        # Injected rather than imported, like every other collaborator here,
+        # so this controller stays Qt-only and testable without a theme.
+        self._dialog_theme = dialog_theme
         self._sessions = ChatSessionStore()
         self._history_sessions = []
         self.session_state_changed_callback = None
         self.session_scope_provider = None
+
+    def _theme_dialog(self, dialog):
+        """Give a dialog the assistant's look, when a theme was injected."""
+        if dialog is not None and self._dialog_theme is not None:
+            self._dialog_theme(dialog)
+        return dialog
 
     @property
     def active_session(self):
@@ -374,11 +384,11 @@ class SessionController:
             )
 
             dialog_factory = SessionHistoryDialog
-        return dialog_factory(
+        return self._theme_dialog(dialog_factory(
             rows=rows,
             scope_info=self.session_scope_info(),
             parent=self._tab_widget.parent(),
-        )
+        ))
 
     def open_history_browser(self):
         """Open the saved-session history browser and apply one action."""
@@ -516,11 +526,11 @@ class SessionController:
             )
 
             dialog_factory = ExchangeDeleteDialog
-        return dialog_factory(
+        return self._theme_dialog(dialog_factory(
             rows=rows,
             session_title=getattr(session, "title", ""),
             parent=self._tab_widget.parent(),
-        )
+        ))
 
     def open_exchange_delete_dialog(self):
         """Open the delete-exchange browser for the active chat tab."""

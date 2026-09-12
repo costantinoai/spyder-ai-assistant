@@ -1,0 +1,581 @@
+"""A transcript built from message widgets rather than one text document.
+
+Qt's rich-text engine cannot round a corner: `border-radius` inside a
+QTextDocument is parsed and discarded, which is why the old transcript shipped
+a `bubble_border_radius` setting that did nothing at any value. Widgets have no
+such limit, so each message becomes a `QFrame` carrying its own gradient,
+hairline, radius, shadow, alignment and width, and the markdown pipeline keeps
+rendering only the *content* inside it.
+
+The content still goes through a `QTextBrowser`, so tables, lists, blockquotes
+and highlighted code render exactly as before. Each is sized to its own
+document, because a bubble must hug its text rather than take a fixed height.
+
+Cost of this shape, measured before choosing it: 1,000 messages occupy about
+31 MB and repaint in roughly 7 ms regardless of conversation length, since only
+visible bubbles paint. A web engine cost 289 MB for a single view before any
+messages existed.
+"""
+
+from __future__ import annotations
+
+from qtpy.QtCore import Qt, Signal
+from qtpy.QtGui import QColor, QGuiApplication
+from qtpy.QtWidgets import (
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QHBoxLayout,
+    QLabel,
+    QScrollArea,
+    QSizePolicy,
+    QTextBrowser,
+    QVBoxLayout,
+    QWidget,
+)
+
+
+# How much of the pane one bubble may occupy. The remainder is the gutter that
+# shows which side a turn belongs to; without it every turn looks alike. A
+# maximum width alone does not achieve this: the frame still shrinks to its
+# content, so the row carries stretch factors instead.
+BUBBLE_WIDTH_SHARE = 78
+GUTTER_SHARE = 22
+
+ROLE_USER = "user"
+ROLE_ASSISTANT = "assistant"
+ROLE_NOTICE = "notice"
+
+ROLE_LABELS = {ROLE_USER: "YOU", ROLE_ASSISTANT: "ASSISTANT"}
+
+# Prompts offered on an empty tab. Kept here beside the widget that shows
+# them, and indexed rather than embedded in the anchor, because a prompt with
+# spaces makes an invalid URL that Qt stringifies to nothing.
+STARTER_ACTIONS = (
+    ("Explain this file", "Explain what the open file does."),
+    ("Find a bug", "Review the open file and point out likely bugs."),
+    ("Write a docstring", "Write a docstring for the function at my cursor."),
+)
+
+
+class StreamBuffer:
+    """Holds back markup that is still arriving, so it is never painted raw.
+
+    Two things flash on screen without this. A ``<think>`` tag split across
+    chunks paints its prefix (``<th``) as literal text before vanishing when
+    the rest lands, and a fence paints ``` and then ```python as prose until
+    the block's body arrives. Both are one defect: text that only becomes
+    meaningful when complete gets rendered while still partial.
+
+    So withhold a trailing fragment that could still become markup, and release
+    it as soon as it either completes or proves to be ordinary text.
+    """
+
+    #: Longest prefix worth withholding, the length of ``<think>``.
+    MAX_HELD = 7
+
+    def __init__(self):
+        self._text = ""
+
+    def add(self, chunk):
+        """Absorb a chunk and return the text that is safe to render now."""
+        self._text += chunk
+        return self.safe_text()
+
+    def safe_text(self):
+        """Everything except a trailing fragment that may still be markup."""
+        held = self._pending_length()
+        return self._text[: len(self._text) - held] if held else self._text
+
+    def full_text(self):
+        """Everything received, including whatever is currently withheld."""
+        return self._text
+
+    def clear(self):
+        self._text = ""
+
+    def _pending_length(self):
+        """How many trailing characters form an incomplete tag or fence."""
+        text = self._text
+        if not text:
+            return 0
+
+        # An unterminated tag: hold from '<' onward until '>' arrives. Only a
+        # short run can still become a tag we care about, so a stray '<' in
+        # prose is released rather than stalling the stream.
+        angle = text.rfind("<")
+        if angle != -1 and ">" not in text[angle:]:
+            if len(text) - angle <= self.MAX_HELD:
+                return len(text) - angle
+
+        # An opening fence. The renderer draws an *unclosed* block as a partial
+        # code card, but only once it has a body, so withholding until the
+        # closing fence would keep a long block invisible while it streams.
+        # Hold only while the opener itself is still meaningless as markup.
+        if text.count("```") % 2 == 1:
+            opener = text.rfind("```")
+            newline = text.find("\n", opener)
+            if newline == -1:
+                # The info string is still arriving: ``` or ```pyth
+                return len(text) - opener
+            if newline == len(text) - 1:
+                # Opener complete, body empty. This is the frame where the
+                # reported flash happened, with ```python shown as prose.
+                return len(text) - opener
+            return 0
+
+        # An inline code span on the current line, the same defect at a smaller
+        # scale. A closing ``` also lands on a line, so skip lines carrying a
+        # fence or its three backticks read as one unbalanced span.
+        line_start = text.rfind("\n") + 1
+        trailing = text[line_start:]
+        if "```" in trailing:
+            return 0
+        if trailing.count("`") % 2 == 1:
+            return len(text) - (line_start + trailing.rfind("`"))
+        return 0
+
+
+class MessageBubble(QFrame):
+    """One message: a rounded, gradient surface wrapping rendered content."""
+
+    def __init__(self, role, tokens, label=None, parent=None):
+        super().__init__(parent)
+        self._role = role
+        self._tokens = tokens
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 12)
+        layout.setSpacing(6)
+
+        self._label = QLabel(label or "", self)
+        self._label.setVisible(bool(label))
+        layout.addWidget(self._label)
+
+        self._body = QTextBrowser(self)
+        self._body.setFrameShape(QFrame.NoFrame)
+        self._body.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._body.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._body.setOpenExternalLinks(False)
+        self._body.setOpenLinks(False)
+        self._body.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+            | Qt.TextSelectableByKeyboard
+            | Qt.LinksAccessibleByMouse
+            | Qt.LinksAccessibleByKeyboard
+        )
+        layout.addWidget(self._body)
+
+        if tokens is not None:
+            self.apply_tokens(tokens)
+
+    # --- content ---------------------------------------------------------
+    @property
+    def anchor_clicked(self):
+        """The body's anchor signal, so a list can route actions centrally."""
+        return self._body.anchorClicked
+
+    def set_html(self, html):
+        """Replace the bubble's content and resize it to the new document."""
+        self._body.setHtml(html)
+        self._resize_to_document()
+
+    def html(self):
+        return self._body.toHtml()
+
+    def plain_text(self):
+        return self._body.toPlainText()
+
+    def _resize_to_document(self):
+        """Height the body to its content, wrapping at the width it paints into.
+
+        The viewport is the surface the document actually renders onto, so the
+        wrap width has to match it. Reading the widget's width instead leaves
+        the document laid out at Qt's default 100px until the first real
+        layout arrives, and a code block then wraps narrower than the card it
+        paints inside: the continuation lines land on the bubble, outside the
+        card's background.
+
+        Before any layout there is no honest width to use, so do nothing and
+        let ``resizeEvent`` call back once there is one.
+        """
+        width = self._body.viewport().width()
+        if width <= 1:
+            width = self.width() - 28
+        if width <= 1:
+            return
+        document = self._body.document()
+        document.setTextWidth(width)
+        self._body.setFixedHeight(int(document.size().height()) + 2)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._resize_to_document()
+
+    # --- appearance ------------------------------------------------------
+    def apply_tokens(self, tokens):
+        """Restyle from the current design tokens."""
+        self._tokens = tokens
+        if tokens is None:
+            return
+        surface = tokens.user if self._role == ROLE_USER else tokens.assistant
+        # The corner nearest the speaker is tightened, which is what makes a
+        # bubble read as coming *from* a side rather than floating.
+        tight = (
+            "border-bottom-right-radius: 5px;"
+            if self._role == ROLE_USER
+            else "border-bottom-left-radius: 5px;"
+        )
+        self.setStyleSheet(
+            "MessageBubble {"
+            f" background: {surface.gradient()};"
+            f" border: 1px solid {surface.border};"
+            f" border-radius: {tokens.radius}px; {tight} }}"
+        )
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(22)
+        shadow.setXOffset(0)
+        shadow.setYOffset(6)
+        shadow.setColor(QColor(0, 0, 0, 150 if tokens.is_dark else 60))
+        self.setGraphicsEffect(shadow)
+
+        label_color = tokens.dim if self._role == ROLE_USER else tokens.accent
+        self._label.setStyleSheet(
+            f"color: {label_color}; font-family: '{tokens.ui_font}';"
+            f" font-size: {tokens.label_size}px; letter-spacing: 1.3px;"
+            " border: none; background: transparent;"
+        )
+        self._body.setStyleSheet(
+            "QTextBrowser { background: transparent; border: none;"
+            f" color: {tokens.text}; font-family: '{tokens.ui_font}';"
+            f" font-size: {tokens.font_size}px; }}"
+        )
+        self._resize_to_document()
+
+
+class MessageRow(QWidget):
+    """A bubble plus its gutter, which is what aligns a turn to one side."""
+
+    def __init__(self, bubble, role, parent=None):
+        super().__init__(parent)
+        self.bubble = bubble
+        self.role = role
+        self.setStyleSheet("background: transparent;")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        if role == ROLE_USER:
+            layout.addStretch(GUTTER_SHARE)
+            layout.addWidget(bubble, BUBBLE_WIDTH_SHARE)
+        else:
+            layout.addWidget(bubble, BUBBLE_WIDTH_SHARE)
+            layout.addStretch(GUTTER_SHARE)
+
+
+class MessageList(QScrollArea):
+    """The transcript: a scrolling column of message bubbles.
+
+    Exposes the same surface the single-document transcript did, so a session
+    can be handed either one.
+    """
+
+    sig_apply_code_requested = Signal(str)
+    sig_starter_action = Signal(str)
+
+    def __init__(self, parent=None, renderer=None, tokens=None):
+        super().__init__(parent)
+        self.setObjectName("aiChatTranscript")
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setAccessibleName("Chat transcript")
+
+        self._renderer = renderer
+        self._tokens = tokens
+        self._rows = []
+        self._stream = StreamBuffer()
+        self._stream_bubble = None
+
+        self._canvas = QWidget()
+        self._canvas.setStyleSheet("background: transparent;")
+        self._column = QVBoxLayout(self._canvas)
+        self._column.setContentsMargins(14, 14, 14, 14)
+        self._column.setSpacing(12)
+        self._column.addStretch(1)
+        self.setWidget(self._canvas)
+
+        self._placeholder_row = None
+        self._show_placeholder()
+
+    # --- wiring ----------------------------------------------------------
+    def set_renderer(self, renderer):
+        self._renderer = renderer
+
+    def apply_tokens(self, tokens):
+        """Push new design tokens to every bubble."""
+        self._tokens = tokens
+        for row in self._rows:
+            row.bubble.apply_tokens(tokens)
+
+    def update_appearance(self, **kwargs):
+        """Accept the appearance contract; colour comes from the tokens.
+
+        The renderer owns fonts and syntax styles, so forward what it
+        understands and ignore the rest rather than duplicating its keys here.
+        """
+        if self._renderer is not None and hasattr(self._renderer, "update"):
+            forwarded = {
+                key: kwargs[key]
+                for key in (
+                    "code_font_family",
+                    "code_font_size",
+                    "pygments_style_dark",
+                    "pygments_style_light",
+                )
+                if key in kwargs
+            }
+            if forwarded:
+                self._renderer.update(**forwarded)
+        tokens = kwargs.get("tokens")
+        if tokens is not None:
+            self.apply_tokens(tokens)
+
+    # --- building blocks -------------------------------------------------
+    def _render(self, text, track_code_blocks=False):
+        if self._renderer is None:
+            return text
+        return self._renderer.render(text, track_code_blocks=track_code_blocks)
+
+    def _show_placeholder(self):
+        """Explain an empty tab, and offer prompts that start a conversation.
+
+        The single-document transcript grew this guidance last round; a blank
+        pane gives a new user nothing to act on. The starter links reuse the
+        same anchors the transcript already emits, so activation routes through
+        one place, and the prompts fill the input rather than sending, since a
+        starter that fired immediately would spend a model call on a guess.
+        """
+        if self._placeholder_row is not None or self._rows:
+            return
+        tokens = self._tokens
+        text = tokens.text if tokens else "#e8ecf6"
+        dim = tokens.dim if tokens else "#8b93a7"
+        accent = tokens.accent if tokens else "#5ac8fa"
+        font = tokens.ui_font if tokens else "sans-serif"
+
+        links = "".join(
+            f'<a href="starter://{index}" '
+            f'style="color:{accent};text-decoration:none;">{label}</a>'
+            + ("<br>" if index < len(STARTER_ACTIONS) - 1 else "")
+            for index, (label, _prompt) in enumerate(STARTER_ACTIONS)
+        )
+        html = (
+            f'<div style="font-family:{font};color:{dim};">'
+            f'<span style="color:{text};">Ask about the file you have open.</span>'
+            "<br>The assistant sees your current file, cursor, selection and "
+            "open tabs.<br><br>"
+            f"{links}</div>"
+        )
+
+        bubble = MessageBubble(ROLE_NOTICE, self._tokens, parent=self._canvas)
+        bubble.set_html(html)
+        bubble.anchor_clicked.connect(self._on_anchor)
+        row = MessageRow(bubble, ROLE_ASSISTANT, parent=self._canvas)
+        self._column.insertWidget(self._column.count() - 1, row)
+        self._placeholder_row = row
+
+    def _clear_placeholder(self):
+        """Remove the guidance once there is a real conversation to show."""
+        if self._placeholder_row is None:
+            return
+        self._column.removeWidget(self._placeholder_row)
+        self._placeholder_row.setParent(None)
+        self._placeholder_row.deleteLater()
+        self._placeholder_row = None
+
+    def _add_bubble(self, role, html, label=None):
+        self._clear_placeholder()
+        bubble = MessageBubble(role, self._tokens, label=label, parent=self._canvas)
+        bubble.set_html(html)
+        bubble.anchor_clicked.connect(self._on_anchor)
+        row = MessageRow(bubble, role, parent=self._canvas)
+        # Insert before the trailing stretch so rows stay at the top.
+        self._column.insertWidget(self._column.count() - 1, row)
+        self._rows.append(row)
+        self._scroll_to_bottom()
+        return bubble
+
+    def _scroll_to_bottom(self):
+        bar = self.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    # --- the transcript contract -----------------------------------------
+    def append_user_message(self, text):
+        self._add_bubble(ROLE_USER, self._render(text), label=ROLE_LABELS[ROLE_USER])
+
+    def append_assistant_message(self, text):
+        self._add_bubble(
+            ROLE_ASSISTANT,
+            self._render(text, track_code_blocks=True),
+            label=ROLE_LABELS[ROLE_ASSISTANT],
+        )
+
+    def start_assistant_message(self):
+        """Open an empty bubble that the stream will fill."""
+        self._stream.clear()
+        self._stream_bubble = self._add_bubble(
+            ROLE_ASSISTANT, "", label=ROLE_LABELS[ROLE_ASSISTANT]
+        )
+
+    def append_chunk(self, text):
+        """Add streamed text, rendering only what is safe to show yet."""
+        if self._stream_bubble is None:
+            self.start_assistant_message()
+        safe = self._stream.add(text)
+        self._stream_bubble.set_html(self._render(safe))
+        self._scroll_to_bottom()
+
+    def finish_assistant_message(self):
+        """Commit the stream, including anything the buffer was holding."""
+        if self._stream_bubble is None:
+            return
+        final = self._stream.full_text()
+        if not final.strip():
+            # An empty reply leaves no bubble behind, rather than an empty one.
+            self.discard_assistant_message()
+            return
+        self._stream_bubble.set_html(self._render(final, track_code_blocks=True))
+        self._stream_bubble = None
+        self._stream.clear()
+        self._scroll_to_bottom()
+
+    def discard_assistant_message(self):
+        """Drop the in-progress bubble without leaving a gap."""
+        if self._stream_bubble is None:
+            return
+        for row in list(self._rows):
+            if row.bubble is self._stream_bubble:
+                self._column.removeWidget(row)
+                row.setParent(None)
+                row.deleteLater()
+                self._rows.remove(row)
+                break
+        self._stream_bubble = None
+        self._stream.clear()
+
+    def _append_notice(self, level, message):
+        bubble = self._add_bubble(
+            ROLE_NOTICE, self._render(message), label=level.upper()
+        )
+        return bubble
+
+    def append_error(self, message):
+        return self._append_notice("error", message)
+
+    def append_warning(self, message):
+        return self._append_notice("warning", message)
+
+    def append_info(self, message):
+        return self._append_notice("info", message)
+
+    def clear_conversation(self):
+        """Remove every bubble and forget the stream."""
+        for row in list(self._rows):
+            self._column.removeWidget(row)
+            row.setParent(None)
+            row.deleteLater()
+        self._rows.clear()
+        self._stream_bubble = None
+        self._stream.clear()
+        if self._renderer is not None and hasattr(self._renderer, "clear_code_blocks"):
+            self._renderer.clear_code_blocks()
+        # An emptied tab is an empty tab: the guidance comes back rather than
+        # leaving a blank pane behind.
+        self._show_placeholder()
+
+    def rebuild_from_messages(self, messages):
+        """Re-render a whole conversation from authoritative history."""
+        self.clear_conversation()
+        for message in messages or []:
+            role = message.get("role")
+            content = message.get("content", "")
+            if role == "user":
+                self.append_user_message(content)
+            elif role == "assistant":
+                self.append_assistant_message(content)
+        self._scroll_to_bottom()
+
+    # --- code actions -----------------------------------------------------
+    def last_code_block(self):
+        """The most recent code block, or None when the chat has none."""
+        blocks = getattr(self._renderer, "code_blocks", None) or []
+        return blocks[-1] if blocks else None
+
+    def copy_last_code_block(self):
+        """Copy the most recent code block; True when there was one."""
+        code = self.last_code_block()
+        if not code:
+            return False
+        QGuiApplication.clipboard().setText(code)
+        return True
+
+    def _on_anchor(self, url):
+        """One route for every action link, however it was activated.
+
+        Parsing has to survive what Qt does to these anchors. The transcript
+        emits ``apply://1``, and QUrl reads the ``1`` as an authority, so
+        ``toString()`` hands back ``apply://0.0.0.1``; ``starter://Explain
+        this`` is invalid outright and stringifies to nothing. The scheme
+        survives both, so route on that and recover the payload from whichever
+        part actually holds it.
+        """
+        scheme, payload = self._split_anchor(url)
+        if scheme not in ("copy", "apply", "starter"):
+            return False
+
+        if scheme == "starter":
+            # The anchor carries an index; the prompt itself would not survive
+            # being put in a URL.
+            try:
+                index = int(payload)
+            except (TypeError, ValueError):
+                return True
+            if 0 <= index < len(STARTER_ACTIONS):
+                self.sig_starter_action.emit(STARTER_ACTIONS[index][1])
+            return True
+
+        blocks = getattr(self._renderer, "code_blocks", None) or []
+        try:
+            index = int(payload)
+        except (TypeError, ValueError):
+            # A malformed index is still our anchor: swallow it rather than
+            # letting the click fall through to the browser.
+            return True
+        if 0 <= index < len(blocks):
+            if scheme == "copy":
+                QGuiApplication.clipboard().setText(blocks[index])
+            else:
+                self.sig_apply_code_requested.emit(blocks[index])
+        return True
+
+    @staticmethod
+    def _split_anchor(url):
+        """Return ``(scheme, payload)`` for an anchor given as QUrl or string."""
+        raw = url if isinstance(url, str) else None
+        scheme = ""
+        payload = ""
+
+        if raw is None and hasattr(url, "scheme"):
+            scheme = url.scheme()
+            # ``apply:1`` keeps its payload in the path; ``apply://1`` moves it
+            # into a host that Qt may have rewritten, so prefer the path and
+            # fall back to the final label of the authority.
+            payload = url.path() or ""
+            if not payload:
+                host = url.host() or ""
+                payload = host.rsplit(".", 1)[-1] if host else ""
+            raw = url.toString()
+
+        if not scheme and raw:
+            scheme, _, rest = raw.partition(":")
+            payload = rest.lstrip("/")
+
+        return scheme, payload
