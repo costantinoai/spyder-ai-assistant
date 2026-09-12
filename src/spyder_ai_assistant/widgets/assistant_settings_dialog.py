@@ -162,6 +162,29 @@ class AssistantSettingsDialog(QDialog):
         tabs = QTabWidget(self)
         layout.addWidget(tabs)
 
+        tabs.addTab(self._build_models_tab(), "Models")
+        tabs.addTab(self._build_generation_tab(), "Generation")
+        tabs.addTab(self._build_shortcuts_tab(), "Shortcuts")
+        tabs.addTab(self._build_appearance_tab(), "Appearance")
+        tabs.addTab(self._build_behavior_tab(), "Behavior")
+        tabs.addTab(self._build_mcp_tab(), "MCP")
+        tabs.addTab(self._build_prompts_tab(), "Prompts")
+
+        self.button_box = QDialogButtonBox(
+            QDialogButtonBox.Cancel | QDialogButtonBox.Save,
+            parent=self,
+        )
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        layout.addWidget(self.button_box)
+
+        self._populate_model_combos()
+        self._load_settings()
+        self.mcp_host_edit.textChanged.connect(self._refresh_mcp_preview)
+        self.mcp_port_spin.valueChanged.connect(self._refresh_mcp_preview)
+
+    def _build_models_tab(self):
+        """Return the Models tab: model choices and the local endpoint."""
         models_tab = QWidget(self)
         models_layout = QVBoxLayout(models_tab)
 
@@ -204,8 +227,10 @@ class AssistantSettingsDialog(QDialog):
         provider_layout.addLayout(provider_button_row)
         models_layout.addWidget(provider_group)
         models_layout.addStretch(1)
-        tabs.addTab(models_tab, "Models")
+        return models_tab
 
+    def _build_generation_tab(self):
+        """Return the Generation tab: chat and completion defaults."""
         generation_tab = QWidget(self)
         generation_layout = QVBoxLayout(generation_tab)
 
@@ -248,8 +273,10 @@ class AssistantSettingsDialog(QDialog):
         completion_form.addRow("Debounce (ms)", self.debounce_spin)
         generation_layout.addWidget(completion_group)
         generation_layout.addStretch(1)
-        tabs.addTab(generation_tab, "Generation")
+        return generation_tab
 
+    def _build_shortcuts_tab(self):
+        """Return the Shortcuts tab: completion keyboard shortcuts."""
         shortcuts_tab = QWidget(self)
         shortcuts_layout = QVBoxLayout(shortcuts_tab)
         shortcuts_group = QGroupBox("Keyboard shortcuts", shortcuts_tab)
@@ -267,8 +294,10 @@ class AssistantSettingsDialog(QDialog):
         shortcuts_note.setWordWrap(True)
         shortcuts_layout.addWidget(shortcuts_note)
         shortcuts_layout.addStretch(1)
-        tabs.addTab(shortcuts_tab, "Shortcuts")
+        return shortcuts_tab
 
+    def _build_appearance_tab(self):
+        """Return the Appearance tab: theme, fonts, and bubble geometry."""
         # --- Appearance tab ---
         appearance_tab = QWidget(self)
         appearance_layout = QVBoxLayout(appearance_tab)
@@ -370,8 +399,10 @@ class AssistantSettingsDialog(QDialog):
         bubble_form.addRow("Spacing", self.bubble_spacing_spin)
         appearance_layout.addWidget(bubble_group)
         appearance_layout.addStretch(1)
-        tabs.addTab(appearance_tab, "Appearance")
+        return appearance_tab
 
+    def _build_behavior_tab(self):
+        """Return the Behavior tab: ghost-text timing, popup policy, access."""
         # --- Behavior tab ---
         behavior_tab = QWidget(self)
         behavior_layout = QVBoxLayout(behavior_tab)
@@ -433,8 +464,10 @@ class AssistantSettingsDialog(QDialog):
         behavior_note.setWordWrap(True)
         behavior_layout.addWidget(behavior_note)
         behavior_layout.addStretch(1)
-        tabs.addTab(behavior_tab, "Behavior")
+        return behavior_tab
 
+    def _build_mcp_tab(self):
+        """Return the MCP tab: embedded server settings and client setup."""
         mcp_tab = QWidget(self)
         mcp_layout = QVBoxLayout(mcp_tab)
 
@@ -532,8 +565,10 @@ class AssistantSettingsDialog(QDialog):
         clients_layout.addLayout(opencode_row)
         mcp_layout.addWidget(clients_group)
         mcp_layout.addStretch(1)
-        tabs.addTab(mcp_tab, "MCP")
+        return mcp_tab
 
+    def _build_prompts_tab(self):
+        """Return the Prompts tab: system prompt and editor action prompts."""
         prompts_tab = QWidget(self)
         prompts_layout = QVBoxLayout(prompts_tab)
 
@@ -554,20 +589,7 @@ class AssistantSettingsDialog(QDialog):
         actions_form.addRow("Add docstring", self.prompt_docstring_edit)
         actions_form.addRow("Ask AI", self.prompt_ask_edit)
         prompts_layout.addWidget(actions_group)
-        tabs.addTab(prompts_tab, "Prompts")
-
-        self.button_box = QDialogButtonBox(
-            QDialogButtonBox.Cancel | QDialogButtonBox.Save,
-            parent=self,
-        )
-        self.button_box.accepted.connect(self.accept)
-        self.button_box.rejected.connect(self.reject)
-        layout.addWidget(self.button_box)
-
-        self._populate_model_combos()
-        self._load_settings()
-        self.mcp_host_edit.textChanged.connect(self._refresh_mcp_preview)
-        self.mcp_port_spin.valueChanged.connect(self._refresh_mcp_preview)
+        return prompts_tab
 
     def _on_theme_preset_changed(self, index):
         """Update color swatches when the user picks a different preset."""
