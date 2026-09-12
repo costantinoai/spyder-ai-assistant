@@ -26,9 +26,23 @@
   `/v1` and asks for `/models` itself, so it would be requested twice), and
   for a remote endpoint left without an API key. A mistyped endpoint used
   to fail silently: its models were simply missing from the dropdown
+- a warning before saving an MCP host or port that would restart the
+  embedded server and drop any connected clients
+- inline notes for two more inputs that used to fail silently: an Ollama
+  host written without a scheme, and an MCP listen host written as a URL
+  or carrying a port
 
 ### Changed
 
+- Assistant Settings is now four tabs grouped by task (Chat, Completions,
+  Appearance and Advanced) instead of seven. Completion options were
+  spread across three of them, and Temperature and Max tokens appeared in
+  two tabs with no stated relationship
+- the per-tab settings are called "Tab settings" in the menu, the dialog
+  title and the tooltip, which now also explains what the "*" on the
+  button means. One concept had three names, and the Settings button
+  opened a different dialog on click than its arrow did, so the per-tab
+  settings hid behind the arrow (GitHub issue #4)
 - a long conversation no longer gets slower with every message. Each new
   message used to re-lay out the whole transcript, so cost grew with
   length; measured over 150 exchanges, the last messages took 101 ms each
@@ -107,6 +121,21 @@
   old Behavior tab instead of Advanced
 - the embedded MCP server no longer logs a reconfiguration line for
   configuration changes that leave it unchanged
+- ghost text managers are released when a file closes. Every closed editor
+  used to keep its manager, two timers, three shortcuts and three event
+  filters alive for the rest of the session, and because CPython reuses
+  id() values a later editor could inherit a stale manager and show
+  another file's ghost text
+- the Advanced settings page no longer draws the OpenCode buttons over the
+  JSON box or cuts a line from the MCP status note. It needed 950px and
+  was given 883; every page now sits in a scroll area, and the dialog
+  opens at 820x900 and can shrink on small screens
+- a setting stored outside its range is corrected consistently now that
+  the bounds have one owner. A stored chat font size of 999 shows as 24, a
+  bubble spacing of -5 shows as 0, and an idle delay of 1 shows as 100;
+  they used to be written twice and could disagree
+- three unguarded plugin lookups would raise on Spyder builds whose
+  `get_plugin` does not take an `error` keyword
 
 ## 0.7.2 - 2026-09-12
 
