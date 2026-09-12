@@ -32,19 +32,23 @@ from typing import Any, Callable, Optional
 
 from spyder_ai_assistant.utils.coerce import bounded_int
 from spyder_ai_assistant.utils.context import SKIP_DIRS
+from spyder_ai_assistant.utils.tool_protocol import (
+    PROJECT_TOOL_NAMES,
+    PROJECT_TOOL_PREFIXES,
+    TOOL_GIT_DIFF,
+    TOOL_GIT_LOG,
+    TOOL_GIT_STATUS,
+    TOOL_PROJECT_LIST_FILES,
+    TOOL_PROJECT_READ_FILE,
+    TOOL_PROJECT_SEARCH,
+)
 
 logger = logging.getLogger(__name__)
 
 # Tool names understood by the chat protocol, the MCP server and the plugin
 # dispatcher. Kept as a tuple so the system prompt can list them verbatim.
-PROJECT_TOOL_NAMES = (
-    "project.list_files",
-    "project.read_file",
-    "project.search",
-    "git.status",
-    "git.diff",
-    "git.log",
-)
+# PROJECT_TOOL_NAMES is imported above from utils.tool_protocol, which owns
+# the spellings, and re-exported here for the existing importers.
 
 MAX_READ_CHARS = 20_000
 MAX_FILE_BYTES = 2_000_000
@@ -65,7 +69,7 @@ def dispatch_chat_tool_request(request, runtime_executor, project_executor):
     tool families separate without teaching the controller about either.
     """
     tool = str((request or {}).get("tool", "") or "")
-    if tool.startswith(("project.", "git.")):
+    if tool.startswith(PROJECT_TOOL_PREFIXES):
         return project_executor(request)
     return runtime_executor(request)
 
@@ -123,12 +127,12 @@ class ProjectToolsService:
             )
 
         handlers = {
-            "project.list_files": self._list_files,
-            "project.read_file": self._read_file,
-            "project.search": self._search,
-            "git.status": self._git_status,
-            "git.diff": self._git_diff,
-            "git.log": self._git_log,
+            TOOL_PROJECT_LIST_FILES: self._list_files,
+            TOOL_PROJECT_READ_FILE: self._read_file,
+            TOOL_PROJECT_SEARCH: self._search,
+            TOOL_GIT_STATUS: self._git_status,
+            TOOL_GIT_DIFF: self._git_diff,
+            TOOL_GIT_LOG: self._git_log,
         }
         handler = handlers.get(tool)
         if handler is None:
@@ -228,7 +232,7 @@ class ProjectToolsService:
         """Return the text of one project file (optionally a line range)."""
         relative = str(args.get("path", "") or "").strip()
         if not relative:
-            raise ValueError("project.read_file needs a 'path' argument.")
+            raise ValueError(f"{TOOL_PROJECT_READ_FILE} needs a 'path' argument.")
         absolute = self._resolve_path(root, relative)
         if not os.path.isfile(absolute):
             raise ValueError(f"File not found in project: {relative}")
@@ -269,7 +273,7 @@ class ProjectToolsService:
         """Search project text files for a pattern (regex, case-insensitive)."""
         pattern = str(args.get("pattern", "") or "")
         if not pattern.strip():
-            raise ValueError("project.search needs a 'pattern' argument.")
+            raise ValueError(f"{TOOL_PROJECT_SEARCH} needs a 'pattern' argument.")
         try:
             regex = re.compile(pattern, re.IGNORECASE)
         except re.error as error:

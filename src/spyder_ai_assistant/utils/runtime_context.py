@@ -24,6 +24,17 @@ from qtpy.QtCore import QObject, Signal
 from spyder.config.base import CHECK_ALL, EXCLUDED_NAMES
 
 from spyder_ai_assistant.utils.coerce import bounded_int
+from spyder_ai_assistant.utils.tool_protocol import (
+    NO_ACTIVE_CONSOLE_MESSAGE,
+    TOOL_RUNTIME_EXECUTE_CODE,
+    TOOL_RUNTIME_GET_CONSOLE_TAIL,
+    TOOL_RUNTIME_GET_LATEST_ERROR,
+    TOOL_RUNTIME_INSPECT_VARIABLE,
+    TOOL_RUNTIME_INSPECT_VARIABLES,
+    TOOL_RUNTIME_LIST_SHELLS,
+    TOOL_RUNTIME_LIST_VARIABLES,
+    TOOL_RUNTIME_STATUS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -365,48 +376,53 @@ class RuntimeContextService(QObject):
             self._resolve_request_shellwidget(args)
         )
         if shellwidget is None:
+            # Same envelope as every served request, built from the one
+            # builder; only the shell metadata differs when nothing can
+            # answer. The shell id/label and timestamps stay empty.
+            detail = shell_error or NO_ACTIVE_CONSOLE_MESSAGE
+            target_shell_id = self._effective_target_shell_id(args)
+            unavailable_context = {
+                "status": "unavailable",
+                "status_detail": detail,
+                "active_shell_id": self._current_shell_id or "",
+                "active_shell_label": self._label_for_shell_id(
+                    self._current_shell_id
+                ),
+                "target_shell_id": target_shell_id,
+                "target_shell_label": self._label_for_shell_id(target_shell_id),
+            }
             result = {
                 "ok": False,
-                "tool": tool,
-                "source": "unavailable",
-                "shell_status": "unavailable",
-                "shell_detail": shell_error or "No active IPython console is available.",
-                "shell_id": "",
-                "shell_label": "",
-                "active_shell_id": self._current_shell_id or "",
-                "active_shell_label": self._label_for_shell_id(self._current_shell_id),
-                "target_shell_id": self._effective_target_shell_id(args),
-                "target_shell_label": self._label_for_shell_id(
-                    self._effective_target_shell_id(args)
+                **self._build_result_base(
+                    tool,
+                    unavailable_context,
+                    "unavailable",
+                    query_note=shell_note,
+                    error=detail,
                 ),
-                "working_directory": "",
-                "last_refreshed_at": "",
-                "payload": {},
-                "query_note": shell_note,
-                "error": shell_error or "No active IPython console is available.",
             }
             self._log_request_result(result)
             return result
 
-        if tool == "runtime.list_shells":
+        if tool == TOOL_RUNTIME_LIST_SHELLS:
             result = self._build_list_shells_result(tool, runtime_context, shell_note)
-        elif tool == "runtime.status":
+        elif tool == TOOL_RUNTIME_STATUS:
             result = self._build_status_result(tool, runtime_context, shell_note)
-        elif tool == "runtime.get_latest_error":
+        elif tool == TOOL_RUNTIME_GET_LATEST_ERROR:
             result = self._build_latest_error_result(tool, runtime_context, shell_note)
-        elif tool == "runtime.get_console_tail":
+        elif tool == TOOL_RUNTIME_GET_CONSOLE_TAIL:
             result = self._build_console_result(tool, runtime_context, args, shell_note)
-        elif tool == "runtime.list_variables":
+        elif tool == TOOL_RUNTIME_LIST_VARIABLES:
             result = self._build_list_variables_result(
                 tool, shellwidget, runtime_context, args, shell_note
             )
-        elif tool == "runtime.inspect_variable":
+        elif tool == TOOL_RUNTIME_INSPECT_VARIABLE:
             name = str(args.get("name", "")).strip()
             names = [name] if name else []
             result = self._build_inspect_variables_result(
                 tool, shellwidget, runtime_context, names, shell_note
             )
-        elif tool == "runtime.inspect_variables":
+        elif tool == TOOL_RUNTIME_INSPECT_VARIABLES:
             raw_names = args.get("names", [])
             if isinstance(raw_names, str):
                 raw_names = [raw_names]
@@ -418,7 +434,7 @@ class RuntimeContextService(QObject):
             result = self._build_inspect_variables_result(
                 tool, shellwidget, runtime_context, names, shell_note
             )
-        elif tool == "runtime.execute_code":
+        elif tool == TOOL_RUNTIME_EXECUTE_CODE:
             result = self._build_execute_code_result(
                 tool, shellwidget, runtime_context, args, shell_note
             )

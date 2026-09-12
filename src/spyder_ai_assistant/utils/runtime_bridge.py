@@ -15,18 +15,20 @@ from spyder_ai_assistant.utils.runtime_context import (
     format_runtime_shell,
     format_runtime_variable,
 )
+from spyder_ai_assistant.utils.tool_protocol import (
+    PROJECT_TOOL_PREFIXES,
+    RUNTIME_TOOL_NAMES,
+    TOOL_RUNTIME_GET_CONSOLE_TAIL,
+    TOOL_RUNTIME_GET_LATEST_ERROR,
+    TOOL_RUNTIME_INSPECT_VARIABLE,
+    TOOL_RUNTIME_INSPECT_VARIABLES,
+    TOOL_RUNTIME_LIST_SHELLS,
+    TOOL_RUNTIME_LIST_VARIABLES,
+    TOOL_RUNTIME_STATUS,
+)
 
 RUNTIME_REQUEST_TAG = "spyder-runtime-request"
 MAX_RUNTIME_TOOL_CALLS_PER_TURN = 4
-RUNTIME_TOOL_NAMES = (
-    "runtime.status",
-    "runtime.list_shells",
-    "runtime.get_latest_error",
-    "runtime.get_console_tail",
-    "runtime.list_variables",
-    "runtime.inspect_variable",
-    "runtime.inspect_variables",
-)
 
 # Every tool the chat model may request through the request block.
 REQUESTABLE_TOOL_NAMES = RUNTIME_TOOL_NAMES + PROJECT_TOOL_NAMES
@@ -260,15 +262,15 @@ def _format_project_payload(payload):
 
 
 def _format_payload(tool, payload):
-    if str(tool).startswith(("project.", "git.")):
+    if str(tool).startswith(PROJECT_TOOL_PREFIXES):
         return _format_project_payload(payload)
-    if tool == "runtime.status":
+    if tool == TOOL_RUNTIME_STATUS:
         return _format_simple_mapping(payload, ("stale",))
 
-    if tool == "runtime.list_shells":
+    if tool == TOOL_RUNTIME_LIST_SHELLS:
         return _format_shells_payload(payload)
 
-    if tool == "runtime.get_latest_error":
+    if tool == TOOL_RUNTIME_GET_LATEST_ERROR:
         latest_error = payload.get("latest_error", "")
         summary = payload.get("summary") or {}
         lines = []
@@ -293,16 +295,16 @@ def _format_payload(tool, payload):
         lines.append(latest_error)
         return lines
 
-    if tool == "runtime.get_console_tail":
+    if tool == TOOL_RUNTIME_GET_CONSOLE_TAIL:
         console_output = payload.get("console_output", "")
         if not console_output:
             return ["No recent console output is available."]
         return [console_output]
 
-    if tool == "runtime.list_variables":
+    if tool == TOOL_RUNTIME_LIST_VARIABLES:
         return _format_variables_payload(payload)
 
-    if tool in {"runtime.inspect_variable", "runtime.inspect_variables"}:
+    if tool in {TOOL_RUNTIME_INSPECT_VARIABLE, TOOL_RUNTIME_INSPECT_VARIABLES}:
         return _format_inspect_payload(payload)
 
     return _format_simple_mapping(payload, ())

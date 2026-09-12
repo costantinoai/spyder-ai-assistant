@@ -35,6 +35,21 @@ except Exception as error:  # pragma: no cover - import guard
 else:  # pragma: no cover - import guard
     _STARLETTE_IMPORT_ERROR = None
 
+from spyder_ai_assistant.utils.tool_protocol import (
+    RUNTIME_RESULT_METADATA_FIELDS,
+    TOOL_GIT_DIFF,
+    TOOL_GIT_LOG,
+    TOOL_GIT_STATUS,
+    TOOL_PROJECT_LIST_FILES,
+    TOOL_PROJECT_READ_FILE,
+    TOOL_PROJECT_SEARCH,
+    TOOL_RUNTIME_EXECUTE_CODE,
+    TOOL_RUNTIME_GET_CONSOLE_TAIL,
+    TOOL_RUNTIME_GET_LATEST_ERROR,
+    TOOL_RUNTIME_INSPECT_VARIABLE,
+    TOOL_RUNTIME_LIST_SHELLS,
+    TOOL_RUNTIME_LIST_VARIABLES,
+)
 from spyder_ai_assistant.mcp.settings import (
     DEFAULT_MCP_HOST,
     DEFAULT_MCP_PATH,
@@ -333,7 +348,7 @@ class SpyderMCPServer:
                                max_entries: int = 300) -> dict[str, Any]:
             """List files under the Spyder project root (bounded, skips caches/VCS dirs)."""
             return self._normalize_runtime_result(self._bridge.execute_project_request(
-                "project.list_files", subdir=subdir, glob=glob, max_entries=max_entries,
+                TOOL_PROJECT_LIST_FILES, subdir=subdir, glob=glob, max_entries=max_entries,
             ))
 
         @mcp.tool()
@@ -344,7 +359,7 @@ class SpyderMCPServer:
             if end_line > 0:
                 args["end_line"] = end_line
             return self._normalize_runtime_result(
-                self._bridge.execute_project_request("project.read_file", **args)
+                self._bridge.execute_project_request(TOOL_PROJECT_READ_FILE, **args)
             )
 
         @mcp.tool()
@@ -352,14 +367,14 @@ class SpyderMCPServer:
                            max_results: int = 50) -> dict[str, Any]:
             """Regex-search text files under the Spyder project root."""
             return self._normalize_runtime_result(self._bridge.execute_project_request(
-                "project.search", pattern=pattern, glob=glob, max_results=max_results,
+                TOOL_PROJECT_SEARCH, pattern=pattern, glob=glob, max_results=max_results,
             ))
 
         @mcp.tool()
         def git_status() -> dict[str, Any]:
             """Short git status (with branch) of the Spyder project."""
             return self._normalize_runtime_result(
-                self._bridge.execute_project_request("git.status")
+                self._bridge.execute_project_request(TOOL_GIT_STATUS)
             )
 
         @mcp.tool()
@@ -367,27 +382,27 @@ class SpyderMCPServer:
                      max_chars: int = 20000) -> dict[str, Any]:
             """Uncommitted (or staged) git diff of the Spyder project, optionally for one path."""
             return self._normalize_runtime_result(self._bridge.execute_project_request(
-                "git.diff", path=path, staged=staged, max_chars=max_chars,
+                TOOL_GIT_DIFF, path=path, staged=staged, max_chars=max_chars,
             ))
 
         @mcp.tool()
         def git_log(max_count: int = 10, path: str = "") -> dict[str, Any]:
             """Recent git commits of the Spyder project, optionally for one path."""
             return self._normalize_runtime_result(self._bridge.execute_project_request(
-                "git.log", max_count=max_count, path=path,
+                TOOL_GIT_LOG, max_count=max_count, path=path,
             ))
 
         @mcp.tool()
         def get_consoles() -> dict[str, Any]:
             """List the available Spyder IPython console targets."""
-            result = self._bridge.execute_runtime_request("runtime.list_shells")
+            result = self._bridge.execute_runtime_request(TOOL_RUNTIME_LIST_SHELLS)
             return self._normalize_runtime_result(result)
 
         @mcp.tool()
         def get_variables(limit: int = 12, shell_id: str = "") -> dict[str, Any]:
             """List visible variables from a Spyder IPython console."""
             result = self._bridge.execute_runtime_request(
-                "runtime.list_variables",
+                TOOL_RUNTIME_LIST_VARIABLES,
                 limit=limit,
                 shell_id=shell_id,
             )
@@ -397,7 +412,7 @@ class SpyderMCPServer:
         def inspect_variable(name: str, shell_id: str = "") -> dict[str, Any]:
             """Inspect one named variable from a Spyder IPython console."""
             result = self._bridge.execute_runtime_request(
-                "runtime.inspect_variable",
+                TOOL_RUNTIME_INSPECT_VARIABLE,
                 name=name,
                 shell_id=shell_id,
             )
@@ -410,7 +425,7 @@ class SpyderMCPServer:
         def get_traceback(shell_id: str = "") -> dict[str, Any]:
             """Get the latest traceback or error from a Spyder IPython console."""
             result = self._bridge.execute_runtime_request(
-                "runtime.get_latest_error",
+                TOOL_RUNTIME_GET_LATEST_ERROR,
                 shell_id=shell_id,
             )
             return self._normalize_runtime_result(result)
@@ -420,7 +435,7 @@ class SpyderMCPServer:
                                shell_id: str = "") -> dict[str, Any]:
             """Get the recent visible console output from a Spyder IPython console."""
             result = self._bridge.execute_runtime_request(
-                "runtime.get_console_tail",
+                TOOL_RUNTIME_GET_CONSOLE_TAIL,
                 max_chars=max_chars,
                 shell_id=shell_id,
             )
@@ -478,7 +493,7 @@ class SpyderMCPServer:
         ) -> dict[str, Any]:
             """Submit explicit code to the active or selected Spyder IPython console."""
             result = self._bridge.execute_runtime_request(
-                "runtime.execute_code",
+                TOOL_RUNTIME_EXECUTE_CODE,
                 code=code,
                 shell_id=shell_id,
                 hidden=hidden,
@@ -514,22 +529,18 @@ class SpyderMCPServer:
 
     @staticmethod
     def _normalize_runtime_result(result):
-        payload = dict((result or {}).get("payload") or {})
-        normalized = {
-            "ok": bool((result or {}).get("ok", False)),
-            "source": (result or {}).get("source", ""),
-            "shell_status": (result or {}).get("shell_status", ""),
-            "shell_detail": (result or {}).get("shell_detail", ""),
-            "shell_id": (result or {}).get("shell_id", ""),
-            "shell_label": (result or {}).get("shell_label", ""),
-            "active_shell_id": (result or {}).get("active_shell_id", ""),
-            "active_shell_label": (result or {}).get("active_shell_label", ""),
-            "target_shell_id": (result or {}).get("target_shell_id", ""),
-            "target_shell_label": (result or {}).get("target_shell_label", ""),
-            "working_directory": (result or {}).get("working_directory", ""),
-            "last_refreshed_at": (result or {}).get("last_refreshed_at", ""),
-            "query_note": (result or {}).get("query_note", ""),
-            "error": (result or {}).get("error", ""),
-        }
+        """Flatten one runtime result into the shape MCP clients receive.
+
+        The envelope keeps ``ok`` and the shared metadata fields, drops
+        ``tool`` (the client knows which tool it called) and merges the
+        payload into the top level. The field list lives in
+        ``utils.tool_protocol`` so it cannot drift from the builder.
+        """
+        source = result or {}
+        payload = dict(source.get("payload") or {})
+        normalized = {"ok": bool(source.get("ok", False))}
+        normalized.update(
+            {field: source.get(field, "") for field in RUNTIME_RESULT_METADATA_FIELDS}
+        )
         normalized.update(payload)
         return normalized
