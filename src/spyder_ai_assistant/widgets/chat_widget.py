@@ -66,7 +66,10 @@ from spyder_ai_assistant.utils.prompt_library import (
 from spyder_ai_assistant.utils.runtime_bridge import (
     build_runtime_bridge_instructions,
 )
-from spyder_ai_assistant.utils.ui_stylesheet import pane_stylesheet
+from spyder_ai_assistant.utils.ui_stylesheet import (
+    apply_dialog_theme,
+    pane_stylesheet,
+)
 from spyder_ai_assistant.utils.ui_tokens import build_tokens
 from spyder_ai_assistant.utils.chat_workflows import (
     DEBUG_ACTION_LABELS,
@@ -343,6 +346,11 @@ class ChatWidget(PluginMainWidget):
             appearance_applier=self._apply_current_appearance,
             generating_session_getter=lambda: self._generating_session,
             session_initializer=self._initialize_session,
+            # Resolved when a dialog opens, not now: the tokens are built at
+            # the end of setup, well after this controller exists.
+            dialog_theme=lambda dialog: apply_dialog_theme(
+                dialog, getattr(self, "_ui_tokens", None)
+            ),
         )
 
         # Create the first tab
@@ -1186,6 +1194,7 @@ class ChatWidget(PluginMainWidget):
             mcp_client_launcher=self._mcp_client_launcher,
             parent=self,
         )
+        apply_dialog_theme(dialog, getattr(self, "_ui_tokens", None))
         dialog.manage_profiles_requested.connect(
             self._open_provider_profiles_dialog
         )
@@ -1300,13 +1309,15 @@ class ChatWidget(PluginMainWidget):
             temperature_override=getattr(session, "temperature_override", None),
             max_tokens_override=getattr(session, "max_tokens_override", None),
         )
-        return ChatSettingsDialog(
+        dialog = ChatSettingsDialog(
             session_title=getattr(session, "title", ""),
             defaults=self._chat_default_options(),
             overrides=overrides,
             prompt_preset_id=getattr(session, "prompt_preset_id", None),
             parent=self,
         )
+        apply_dialog_theme(dialog, getattr(self, "_ui_tokens", None))
+        return dialog
 
     def set_prompt_preset(self, preset_id, session=None):
         """Set the chat mode (prompt preset) of one tab; returns True on change."""
@@ -1542,6 +1553,7 @@ class ChatWidget(PluginMainWidget):
             parent=self,
             connection_tester=self._provider_connection_tester,
         )
+        apply_dialog_theme(dialog, getattr(self, "_ui_tokens", None))
         try:
             if dialog.exec_() != dialog.Accepted:
                 return False

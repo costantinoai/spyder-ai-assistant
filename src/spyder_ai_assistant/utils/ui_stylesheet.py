@@ -365,6 +365,29 @@ QDialog#aiChatDialog QPushButton:disabled {{
 """
 
 
+DIALOG_OBJECT_NAME = "aiChatDialog"
+
+
+def apply_dialog_theme(dialog, tokens):
+    """Give one dialog the assistant's look.
+
+    The object name is what `dialog_qss` selects on, so setting it here keeps
+    that contract in a single place rather than repeated in every dialog.
+
+    Tokens are passed in rather than read from configuration because these
+    dialogs take everything by injection and stay Qt-only, which is what makes
+    them unit-testable. A caller without tokens gets a dialog that simply
+    inherits Spyder's look, which is a reasonable outcome and never a crash.
+    """
+    if dialog is None:
+        return False
+    dialog.setObjectName(DIALOG_OBJECT_NAME)
+    if tokens is None:
+        return False
+    dialog.setStyleSheet(dialog_qss(tokens))
+    return True
+
+
 def pane_stylesheet(tokens: UiTokens):
     """The whole pane in one sheet: transcript, composer, controls, tabs."""
     return "".join((

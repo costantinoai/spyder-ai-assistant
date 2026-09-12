@@ -67,6 +67,7 @@ from spyder_ai_assistant.utils.code_apply import (
     apply_code_plan,
 )
 from spyder_ai_assistant.utils.logging import configure_package_logging
+from spyder_ai_assistant.utils.ui_stylesheet import apply_dialog_theme
 from spyder_ai_assistant.utils.runtime_context import RuntimeContextService
 from spyder_ai_assistant.widgets.chat_widget import ChatWidget
 from spyder_ai_assistant.widgets.config_page import AIChatConfigPage
@@ -1294,6 +1295,7 @@ class AIChatPlugin(SpyderDockablePlugin):
             return
 
         cursor = editor.textCursor()
+        widget = self.get_widget()
         dialog = CodeApplyDialog(
             filename=editor_plugin.get_current_filename() or "Untitled",
             document_text=editor.toPlainText(),
@@ -1304,8 +1306,11 @@ class AIChatPlugin(SpyderDockablePlugin):
             default_mode=(
                 APPLY_MODE_REPLACE if cursor.hasSelection() else APPLY_MODE_INSERT
             ),
-            parent=self.get_widget(),
+            parent=widget,
         )
+        # The preview is opened from here rather than from the pane, so the
+        # tokens come from the widget instead of being rebuilt.
+        apply_dialog_theme(dialog, getattr(widget, "_ui_tokens", None))
         logger.info(
             "Opened chat code apply preview for %s (selection=%s, cursor=%d)",
             editor_plugin.get_current_filename() or "Untitled",
