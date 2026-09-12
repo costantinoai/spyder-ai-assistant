@@ -1208,9 +1208,11 @@ class ChatDisplay(QTextEdit):
         """Highlight one snippet; see ``MarkdownRenderer.highlight_code``."""
         return self._renderer.highlight_code(code, language, cache=cache)
 
-    def _code_block_html(self, lang, escaped_code, highlighted):
+    def _code_block_html(self, lang, escaped_code, highlighted, actions=""):
         """Return the styled ``<pre>`` block for one fenced code snippet."""
-        return self._renderer.code_block_html(lang, escaped_code, highlighted)
+        return self._renderer.code_block_html(
+            lang, escaped_code, highlighted, actions
+        )
 
     def _apply_inline_formatting(self, text):
         """Apply bold, italic, strikethrough and bare-URL formatting."""

@@ -360,23 +360,28 @@ class MarkdownRenderer:
             # Falls back to plain <pre> for unknown languages or no hint.
             highlighted = self.highlight_code(raw_code, lang, cache=complete)
 
-            block_html = self.code_block_html(lang, code, highlighted)
-
+            actions = ""
             if with_actions:
                 # Store the raw code for code-apply actions and "Copy"
                 # actions. Uses the unescaped version so insertions clean.
                 index = len(self._code_blocks)
                 self._code_blocks.append(raw_code)
-                # Action links below the code block: Copy + Apply preview
-                block_html += (
-                    f'<a href="copy://{index}" style="color:{link_color};'
-                    f' font-size:10pt; font-weight:600; text-decoration:underline;">'
-                    f'Copy</a>'
-                    f'&nbsp;&nbsp;│&nbsp;&nbsp;'
-                    f'<a href="apply://{index}" style="color:{link_color};'
-                    f' font-size:10pt; font-weight:600; text-decoration:underline;">'
-                    f'Apply...</a>'
+                # The actions ride in the header strip beside the language
+                # rather than trailing under the block, so they read as
+                # controls belonging to the card. No underline there: the
+                # strip already frames them.
+                action_style = (
+                    f'color:{link_color}; font-size:'
+                    f'{max(7, self.code_font_size - 1)}pt; font-weight:600;'
+                    ' text-decoration:none;'
                 )
+                actions = (
+                    f'<a href="copy://{index}" style="{action_style}">Copy</a>'
+                    f'&nbsp;&nbsp;&nbsp;'
+                    f'<a href="apply://{index}" style="{action_style}">Apply...</a>'
+                )
+
+            block_html = self.code_block_html(lang, code, highlighted, actions)
 
             # Store the rendered HTML and return a unique placeholder.
             # The placeholder uses a pattern that cannot appear in normal
@@ -716,7 +721,7 @@ class MarkdownRenderer:
     # These are extracted from render() to keep the main method readable
     # while handling the complexity of each element type.
 
-    def code_block_html(self, lang, escaped_code, highlighted):
+    def code_block_html(self, lang, escaped_code, highlighted, actions=""):
         """Return the styled ``<pre>`` block for one fenced code snippet.
 
         Shared by complete and partial (still streaming) fences so both
@@ -728,19 +733,21 @@ class MarkdownRenderer:
             lang: Language hint from the fence (may be empty).
             escaped_code: HTML-escaped source, used when not highlighted.
             highlighted: Pygments HTML or ``None``.
+            actions: Ready-made action markup for the header strip. Empty
+                while a fence is still streaming, since the block's index is
+                not stable until it closes.
         """
         t = self.theme
-        lang_label = (
-            f'<span style="color:{t["lang_label"]}; font-size:0.85em;">'
-            f'{lang}</span><br>'
-            if lang else ""
-        )
         body = highlighted if highlighted else escaped_code
         # Plain blocks need an explicit text colour; Pygments spans carry
         # their own colours.
         color = "" if highlighted else f' color:{t["code_block_text"]};'
         # Explicit vertical margin: Qt's default <pre> margin is larger than
         # the spacing used around lists and tables in the transcript.
+        # The strip lives inside the <pre>, never in a wrapper around it. A
+        # table wrapper stops <pre> being the block opener, which the
+        # transcript pins, and contributes its own block spacing on top of the
+        # block margin, which brings back the blank gap fixed in 0.7.2.
         return (
             f'<pre style="background-color:{t["code_block_bg"]};{color}'
             f' margin:6px 0;'
@@ -748,8 +755,40 @@ class MarkdownRenderer:
             f' font-size:{self.code_font_size}pt;'
             f' padding:8px 12px; white-space:pre-wrap;'
             f' word-wrap:break-word;">'
-            f'{lang_label}{body}</pre>'
+            f'{self.code_header_html(lang, actions)}{body}</pre>'
         )
+
+    def code_header_html(self, lang, actions=""):
+        """Return the first line of a code block: its language, then actions.
+
+        The actions used to trail underneath the block, which read as loose
+        links rather than controls belonging to the card. Putting them on the
+        block's own first line ties them to it.
+
+        They sit to the *right* of the language rather than at the right edge
+        because Qt's HTML subset offers no way to reach it from inside a
+        ``<pre>``: ``float`` is ignored, an aligned ``<p>`` breaks out of the
+        block and renders above it, and a nested table adds a leading line and
+        its own spacing.
+
+        Returns "" when there is neither a language nor an action, so a bare
+        fence keeps its plain block.
+        """
+        if not lang and not actions:
+            return ""
+        t = self.theme
+        size = max(7, self.code_font_size - 1)
+        parts = []
+        if lang:
+            # Kept lowercase: it is the fence's own info string, and the
+            # transcript tests look for it verbatim.
+            parts.append(
+                f'<span style="color:{t["lang_label"]}; font-size:{size}pt;">'
+                f'{lang}</span>'
+            )
+        if actions:
+            parts.append(actions)
+        return "&nbsp;&nbsp;&nbsp;&nbsp;".join(parts) + "<br>"
 
     def apply_inline_formatting(self, text):
         """Apply inline markdown formatting to a text fragment.
