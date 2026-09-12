@@ -16,6 +16,7 @@ import logging
 import os
 import time
 from functools import partial
+from uuid import uuid4
 
 from qtpy.QtCore import QObject, Qt, QEvent, QTimer
 from qtpy.QtGui import QTextCursor
@@ -242,8 +243,8 @@ class AIChatPlugin(SpyderDockablePlugin):
         # this on each message send to enrich the system prompt.
         widget.set_context_provider(self._context_service.get_full_context)
 
-        # Ghost text managers: one per editor, keyed by editor widget id.
-        # Maps editor id() → GhostTextManager instance.
+        # Ghost text managers: one per editor, keyed by the token stored on
+        # the editor itself (see _ghost_token).
         self._ghost_managers = {}
         # Reverse map: filename → editor widget, for routing ghost text
         # from the completion provider to the correct editor.
@@ -536,6 +537,17 @@ class AIChatPlugin(SpyderDockablePlugin):
         editor_plugin.sig_codeeditor_changed.connect(
             self._on_codeeditor_changed
         )
+        # Tear down ghost text wiring when an editor closes. Guarded because
+        # the signal is only present in recent Spyder 6 releases.
+        try:
+            editor_plugin.sig_codeeditor_deleted.connect(
+                self._on_codeeditor_deleted
+            )
+        except AttributeError:
+            logger.warning(
+                "This Spyder build has no sig_codeeditor_deleted; ghost text "
+                "managers will only be released at shutdown"
+            )
 
         # Register actions on any editors that were already open
         # before our plugin loaded (e.g., files restored from session)
@@ -562,6 +574,12 @@ class AIChatPlugin(SpyderDockablePlugin):
         editor_plugin.sig_codeeditor_changed.disconnect(
             self._on_codeeditor_changed
         )
+        try:
+            editor_plugin.sig_codeeditor_deleted.disconnect(
+                self._on_codeeditor_deleted
+            )
+        except (AttributeError, TypeError):
+            pass  # Never connected on this Spyder build
 
     @on_plugin_available(plugin=Plugins.Projects)
     def on_projects_available(self):
@@ -588,100 +606,205 @@ class AIChatPlugin(SpyderDockablePlugin):
 
     # --- Editor event handlers ---
 
+    # Ghost text managers are keyed by a token stored on the editor itself.
+    # id(codeeditor) is not a safe key: CPython reuses the number once an
+    # editor is freed, so a later editor could inherit a stale manager and
+    # display another file's ghost text.
+    _GHOST_TOKEN_ATTR = "_ai_chat_ghost_token"
+
+    # Completion shortcuts installed on every editor, as
+    # (config key, manager method, attribute that keeps the shortcut alive).
+    # The attribute names are part of the live validation contract
+    # (tools/spyder_validation/run_completion_validation.py).
+    _COMPLETION_SHORTCUTS = (
+        (
+            "completion_shortcut",
+            "request_completion",
+            "_ai_chat_completion_shortcut",
+        ),
+        (
+            "completion_accept_word_shortcut",
+            "accept_next_word",
+            "_ai_chat_completion_accept_word_shortcut",
+        ),
+        (
+            "completion_accept_line_shortcut",
+            "accept_next_line",
+            "_ai_chat_completion_accept_line_shortcut",
+        ),
+    )
+
+    def _ghost_token(self, codeeditor, create=False):
+        """Return the ghost registry token carried by one editor.
+
+        Args:
+            codeeditor: The CodeEditor widget instance.
+            create: Assign a fresh token when the editor has none yet.
+
+        Returns:
+            The token string, or "" when the editor carries none and
+            ``create`` is False.
+        """
+        token = getattr(codeeditor, self._GHOST_TOKEN_ATTR, "")
+        if not token and create:
+            token = uuid4().hex
+            setattr(codeeditor, self._GHOST_TOKEN_ATTR, token)
+        return token
+
+    def _ghost_manager_for(self, codeeditor):
+        """Return the ghost text manager installed on one editor, if any."""
+        token = self._ghost_token(codeeditor)
+        if not token:
+            return None
+        return self._ghost_managers.get(token)
+
     def _on_codeeditor_created(self, codeeditor):
         """Add AI context menu actions and ghost text to a new code editor.
-
-        Creates four context menu actions (Ask AI, Explain, Fix, Add Docstring)
-        and installs a GhostTextManager for inline AI completions.
 
         Args:
             codeeditor: The CodeEditor widget instance.
         """
         # A new tab means the set of open files changed.
         self._context_service.invalidate_open_files()
+        self._install_ghost_manager(codeeditor)
+        self._install_context_menu_actions(codeeditor)
 
-        # Install ghost text manager for this editor
-        editor_id = id(codeeditor)
+    def _on_codeeditor_deleted(self, codeeditor):
+        """Drop the AI wiring for an editor Spyder is closing.
+
+        Spyder emits ``sig_codeeditor_deleted`` while the editor is still
+        alive, so the manager can disconnect its signals and remove its event
+        filters normally. Without this teardown every closed file left a
+        manager, its timers, shortcuts and event filters running for the rest
+        of the session.
+
+        Args:
+            codeeditor: The CodeEditor widget being closed.
+        """
+        token = self._ghost_token(codeeditor)
+        manager = self._ghost_managers.pop(token, None) if token else None
+        if manager is not None:
+            try:
+                manager.cleanup()
+            except Exception:
+                logger.exception(
+                    "Ghost text cleanup failed for a closing editor"
+                )
+
+        # Drop the filename → editor entries pointing at this editor so a late
+        # completion is not routed to a widget that is going away.
+        stale_documents = [
+            document_id
+            for document_id, editor in self._filename_to_editor.items()
+            if editor is codeeditor
+        ]
+        for document_id in stale_documents:
+            del self._filename_to_editor[document_id]
+
+        # The set of open files changed.
+        self._context_service.invalidate_open_files()
+        logger.info(
+            "Removed AI wiring for closed editor %s (manager=%s, mappings=%d)",
+            getattr(codeeditor, "filename", "") or "<untitled>",
+            manager is not None,
+            len(stale_documents),
+        )
+
+    def _install_ghost_manager(self, codeeditor):
+        """Install one ghost text manager and its shortcuts on an editor.
+
+        Does nothing when the editor already carries a manager, so the method
+        is safe to call again from the manual completion fallback path.
+
+        Args:
+            codeeditor: The CodeEditor widget instance.
+        """
+        if self._ghost_manager_for(codeeditor) is not None:
+            return
+
         document_id = self._get_editor_completion_document_id(codeeditor)
-        if editor_id not in self._ghost_managers:
-            manager = GhostTextManager(
+        manager = GhostTextManager(
+            codeeditor,
+            lifecycle_callback=self._on_ghost_lifecycle_event,
+            manual_completion_requester=partial(
+                self._request_manual_ai_completion,
                 codeeditor,
-                lifecycle_callback=self._on_ghost_lifecycle_event,
-                manual_completion_requester=partial(
-                    self._request_manual_ai_completion,
-                    codeeditor,
-                ),
-                idle_completion_delay_ms=self.get_conf(
-                    "idle_completion_delay_ms", default=1000,
-                ),
-                post_accept_completion_delay_ms=self.get_conf(
-                    "post_accept_completion_delay_ms", default=75,
-                ),
-                native_popup_policy=self.get_conf(
-                    "native_popup_policy",
-                    default=ASSISTANT_CONF_DEFAULTS["native_popup_policy"],
-                ),
-                ai_available=self._inline_ai_available,
-            )
-            self._ghost_managers[editor_id] = manager
-            logger.info(
-                "Installed ghost text manager on editor %d for %s (document_id=%s)",
-                editor_id,
-                getattr(codeeditor, "filename", "") or "<untitled>",
-                document_id,
-            )
+            ),
+            idle_completion_delay_ms=self.get_conf(
+                "idle_completion_delay_ms",
+                default=ASSISTANT_CONF_DEFAULTS["idle_completion_delay_ms"],
+            ),
+            post_accept_completion_delay_ms=self.get_conf(
+                "post_accept_completion_delay_ms",
+                default=ASSISTANT_CONF_DEFAULTS[
+                    "post_accept_completion_delay_ms"
+                ],
+            ),
+            native_popup_policy=self.get_conf(
+                "native_popup_policy",
+                default=ASSISTANT_CONF_DEFAULTS["native_popup_policy"],
+            ),
+            ai_available=self._inline_ai_available,
+        )
+        token = self._ghost_token(codeeditor, create=True)
+        self._ghost_managers[token] = manager
+        logger.info(
+            "Installed ghost text manager on editor %s for %s (document_id=%s)",
+            token,
+            getattr(codeeditor, "filename", "") or "<untitled>",
+            document_id,
+        )
 
-            # Add keyboard shortcut to trigger AI completion manually.
-            # Default: Ctrl+Shift+Space (configurable in Preferences).
-            # Keep this as a single plain QShortcut on the CodeEditor.
-            # The simpler setup was reliable in earlier shipped builds.
-            from qtpy.QtWidgets import QShortcut
-            from qtpy.QtGui import QKeySequence
-            key_combo = self.get_conf("completion_shortcut")
+        combos = self._install_completion_shortcuts(codeeditor, manager)
+        logger.info(
+            "Registered AI completion shortcuts for %s: document_id=%s trigger=%s accept_word=%s accept_line=%s",
+            getattr(codeeditor, "filename", "") or "<untitled>",
+            document_id,
+            combos["completion_shortcut"],
+            combos["completion_accept_word_shortcut"],
+            combos["completion_accept_line_shortcut"],
+        )
+
+        self._filename_to_editor[document_id] = codeeditor
+        logger.info(
+            "Registered editor mapping for %s during editor creation",
+            document_id,
+        )
+
+    def _install_completion_shortcuts(self, codeeditor, manager):
+        """Bind the completion shortcuts of one editor to its manager.
+
+        Each shortcut is stored on the editor twice: as a single attribute and
+        as a one-item list, because both spellings are read elsewhere. Qt owns
+        the shortcut through the editor parent; the attributes keep the Python
+        wrapper referenced.
+
+        Args:
+            codeeditor: The CodeEditor widget instance.
+            manager: The GhostTextManager bound to that editor.
+
+        Returns:
+            Mapping of config key to the key sequence that was bound.
+        """
+        from qtpy.QtWidgets import QShortcut
+        from qtpy.QtGui import QKeySequence
+
+        combos = {}
+        for conf_key, method_name, attribute in self._COMPLETION_SHORTCUTS:
+            key_combo = self.get_conf(conf_key)
             shortcut = QShortcut(QKeySequence(key_combo), codeeditor)
-            shortcut.activated.connect(manager.request_completion)
-            codeeditor._ai_chat_completion_shortcut = shortcut
-            codeeditor._ai_chat_completion_shortcuts = [shortcut]
+            shortcut.activated.connect(getattr(manager, method_name))
+            setattr(codeeditor, attribute, shortcut)
+            setattr(codeeditor, f"{attribute}s", [shortcut])
+            combos[conf_key] = key_combo
+        return combos
 
-            accept_word_combo = self.get_conf("completion_accept_word_shortcut")
-            accept_word_shortcut = QShortcut(
-                QKeySequence(accept_word_combo),
-                codeeditor,
-            )
-            accept_word_shortcut.activated.connect(manager.accept_next_word)
-            codeeditor._ai_chat_completion_accept_word_shortcut = (
-                accept_word_shortcut
-            )
-            codeeditor._ai_chat_completion_accept_word_shortcuts = [
-                accept_word_shortcut
-            ]
+    def _install_context_menu_actions(self, codeeditor):
+        """Add the four AI actions to one editor's context menu.
 
-            accept_line_combo = self.get_conf("completion_accept_line_shortcut")
-            accept_line_shortcut = QShortcut(
-                QKeySequence(accept_line_combo),
-                codeeditor,
-            )
-            accept_line_shortcut.activated.connect(manager.accept_next_line)
-            codeeditor._ai_chat_completion_accept_line_shortcut = (
-                accept_line_shortcut
-            )
-            codeeditor._ai_chat_completion_accept_line_shortcuts = [
-                accept_line_shortcut
-            ]
-            logger.info(
-                "Registered AI completion shortcuts for %s: document_id=%s trigger=%s accept_word=%s accept_line=%s",
-                getattr(codeeditor, "filename", "") or "<untitled>",
-                document_id,
-                key_combo,
-                accept_word_combo,
-                accept_line_combo,
-            )
-            self._filename_to_editor[document_id] = codeeditor
-            logger.info(
-                "Registered editor mapping for %s during editor creation",
-                document_id,
-            )
-
+        Args:
+            codeeditor: The CodeEditor widget instance.
+        """
         # Import here to avoid import errors if editor plugin is not available
         from spyder.plugins.editor.widgets.codeeditor.codeeditor import (
             CodeEditorContextMenuSections,
@@ -1113,9 +1236,9 @@ class AIChatPlugin(SpyderDockablePlugin):
             logger.info("No editor found for %s, skipping ghost text", filename)
             return
 
-        manager = self._ghost_managers.get(id(editor))
+        manager = self._ghost_manager_for(editor)
         if manager is None:
-            logger.info("No ghost manager for editor %d", id(editor))
+            logger.info("No ghost manager for editor of %s", filename)
             return
 
         logger.info(
@@ -1229,7 +1352,7 @@ class AIChatPlugin(SpyderDockablePlugin):
         # A visible ghost is temporary document text: the provider must see
         # the document as the user sees it (without the ghost) and the cursor
         # where the user is, not after the inserted suggestion.
-        manager = self._ghost_managers.get(id(codeeditor))
+        manager = self._ghost_manager_for(codeeditor)
         if manager is not None:
             editor_text, cursor_position = manager.document_state_without_ghost()
         else:
@@ -1431,10 +1554,10 @@ class AIChatPlugin(SpyderDockablePlugin):
             )
             return False
 
-        manager = self._ghost_managers.get(id(codeeditor))
+        manager = self._ghost_manager_for(codeeditor)
         if manager is None:
             self._on_codeeditor_created(codeeditor)
-            manager = self._ghost_managers.get(id(codeeditor))
+            manager = self._ghost_manager_for(codeeditor)
         if manager is None:
             logger.info(
                 "Manual AI completion shortcut from %s ignored because the ghost manager is unavailable",
