@@ -18,6 +18,7 @@ Multi-tab design:
 
 import logging
 import os
+from functools import partial
 from uuid import uuid4
 from datetime import datetime
 
@@ -66,11 +67,13 @@ from spyder_ai_assistant.utils.prompt_library import (
 from spyder_ai_assistant.utils.runtime_bridge import (
     build_runtime_bridge_instructions,
 )
+from spyder_ai_assistant.utils.markdown_render import MarkdownRenderer
 from spyder_ai_assistant.utils.ui_stylesheet import (
     apply_dialog_theme,
     pane_stylesheet,
 )
-from spyder_ai_assistant.utils.ui_tokens import build_tokens
+from spyder_ai_assistant.utils.ui_tokens import build_tokens, solve_surface, tint
+from spyder_ai_assistant.widgets.message_bubble import MessageList
 from spyder_ai_assistant.utils.chat_workflows import (
     DEBUG_ACTION_LABELS,
     build_debug_prompt,
@@ -346,6 +349,12 @@ class ChatWidget(PluginMainWidget):
             appearance_applier=self._apply_current_appearance,
             generating_session_getter=lambda: self._generating_session,
             session_initializer=self._initialize_session,
+            # Injected once here so every construction path inside the
+            # controller builds the same kind of transcript, rather than each
+            # call site having to remember the factory.
+            session_factory=partial(
+                ChatSession, display_factory=self._make_transcript
+            ),
             # Resolved when a dialog opens, not now: the tokens are built at
             # the end of setup, well after this controller exists.
             dialog_theme=lambda dialog: apply_dialog_theme(
@@ -766,7 +775,10 @@ class ChatWidget(PluginMainWidget):
 
     def _add_new_tab(self, notify=True):
         """Create a new chat session tab and switch to it."""
-        session = ChatSession(parent=self._tab_widget)
+        session = ChatSession(
+            parent=self._tab_widget,
+            display_factory=self._make_transcript,
+        )
         return self._add_session(session, notify=notify)
 
     def _close_tab(self, index):
@@ -1106,6 +1118,49 @@ class ChatWidget(PluginMainWidget):
         if kwargs:
             display.update_appearance(**kwargs)
 
+    def _transcript_theme(self, tokens, colors):
+        """Theme for a bubble's content, with code surfaces re-derived.
+
+        The preset's code and inline-code colours were authored for an opaque
+        bubble. On a gradient surface they read muddy: solarized light came
+        out olive on khaki with inline chips that were almost invisible. So
+        derive those few keys from the surface the code actually sits on, and
+        leave every other colour to the preset.
+        """
+        theme = dict(colors)
+        # A code card sits *inside* a bubble, so it separates from the bubble
+        # rather than from the pane, and always recedes: lifting it on a dark
+        # theme made the card light enough that the highlighter chose its light
+        # palette, giving navy keywords on a dark block.
+        card = solve_surface(
+            tokens.assistant.mid, tokens.is_dark, target=1.35, lighter=False
+        )
+        theme["code_block_bg"] = card.mid
+        theme["inline_code_bg"] = tint(tokens.accent, 0.18)
+        theme["inline_code_text"] = tokens.accent
+        theme["lang_label"] = tokens.dim
+        return theme
+
+    def _make_transcript(self, parent=None):
+        """Build one transcript: message bubbles with their own renderer.
+
+        Each tab owns its renderer because the renderer carries that tab's
+        code blocks, which the Copy and Apply links index into.
+        """
+        tokens = getattr(self, "_ui_tokens", None)
+        colors = getattr(self, "_ui_theme_colors", {}) or {}
+        renderer = None
+        if tokens is not None:
+            renderer = MarkdownRenderer(
+                self._transcript_theme(tokens, colors),
+                code_font_family=self.get_conf("code_font_family", default="Courier New"),
+                code_font_size=self.get_conf("code_font_size", default=9),
+                pygments_style_dark=self.get_conf("pygments_style_dark", default="monokai"),
+                pygments_style_light=self.get_conf("pygments_style_light", default="default"),
+                is_dark=tokens.is_dark,
+            )
+        return MessageList(parent=parent, renderer=renderer, tokens=tokens)
+
     def _apply_ui_theme(self):
         """Rebuild the pane stylesheet from the active theme.
 
@@ -1123,8 +1178,19 @@ class ChatWidget(PluginMainWidget):
             overrides = {}
 
         colors = get_theme_colors(preset, is_dark, overrides)
+        self._ui_theme_colors = colors
         self._ui_tokens = build_tokens(colors, is_dark)
         self.setStyleSheet(pane_stylesheet(self._ui_tokens))
+
+        # Existing transcripts follow the new theme, content included.
+        theme = self._transcript_theme(self._ui_tokens, colors)
+        for session in self._session_ctrl.ordered_sessions():
+            display = session.display
+            renderer = getattr(display, "_renderer", None)
+            if renderer is not None and hasattr(renderer, "update"):
+                renderer.update(theme=theme, is_dark=is_dark)
+            if hasattr(display, "apply_tokens"):
+                display.apply_tokens(self._ui_tokens)
 
     def changeEvent(self, event):
         """Follow Spyder's own light/dark swap, which arrives as a palette change."""

@@ -145,7 +145,8 @@ class Surface:
         )
 
 
-def solve_surface(behind, is_dark, target=SURFACE_TARGET_RATIO, spread=None):
+def solve_surface(behind, is_dark, target=SURFACE_TARGET_RATIO, spread=None,
+                  lighter=None):
     """Build a surface that provably separates from the colour behind it.
 
     Walks lightness away from `behind` (up on dark grounds, down on light ones),
@@ -153,12 +154,19 @@ def solve_surface(behind, is_dark, target=SURFACE_TARGET_RATIO, spread=None):
     `target`. When a palette cannot reach the target at all, the best available
     step is used rather than failing, so an extreme preset degrades instead of
     breaking.
+
+    `lighter` overrides that direction for surfaces whose role fixes it. A code
+    card has to recede whatever the theme: lifting it on a dark theme not only
+    reads wrong, it makes the card light enough that the syntax highlighter
+    picks its *light* palette, so a dark theme ends up with navy keywords on a
+    grey block.
     """
     pane = QColor(behind)
     if not pane.isValid():
         pane = QColor("#808080")
     hue, saturation, lightness, alpha = pane.getHsl()
-    direction = 1 if is_dark else -1
+    go_lighter = is_dark if lighter is None else lighter
+    direction = 1 if go_lighter else -1
 
     best_step, best_ratio, best = 0, 1.0, pane
     for step in range(1, 140):
