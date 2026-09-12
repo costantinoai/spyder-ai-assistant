@@ -54,6 +54,25 @@
 
 ### Fixed
 
+- the Copy and Apply actions under a code block are no longer mouse-only.
+  The chat menu gained "Copy last code block" and "Apply last code
+  block...", and placing the text cursor on either link in the transcript
+  and pressing Return, Enter or Space now activates it
+- the chat pane now has an explicit tab order (model, console, transcript,
+  input, then the action row) instead of following the order its widgets
+  happened to be built in
+- focus returns to the input after sending, rather than staying on the Send
+  button
+- the colour swatches in Appearance were labelled "User message background"
+  and "User message text", which wrapped in their narrow columns so both
+  showed "User message" and looked like the same swatch. All eight labels
+  now fit on one line
+- the kernel indicator says "Kernel: none" when no console has been opened,
+  instead of "unavailable", which read like a fault before anything had
+  started
+- a long file path in the context label is shortened with an ellipsis in the
+  middle and keeps the full path in its tooltip; in a narrow dock it was
+  simply cut off
 - dimmed reasoning text, error text and one message label were hard to read
   in several colour presets. Measuring every preset in both interface modes
   found six colour pairs below a 3:1 contrast ratio, the worst being nord's

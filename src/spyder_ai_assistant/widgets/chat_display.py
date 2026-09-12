@@ -39,7 +39,7 @@ import re
 import time
 
 from qtpy.QtGui import QColor, QTextCursor, QTextFrameFormat
-from qtpy.QtCore import QTimer, Signal, QSize, QEvent
+from qtpy.QtCore import Qt, QTimer, Signal, QSize, QEvent
 from qtpy.QtWidgets import QApplication, QTextEdit, QToolButton
 
 from spyder_ai_assistant.utils.chat_themes import (
@@ -122,6 +122,16 @@ class ChatDisplay(QTextEdit):
         super().__init__(parent)
         self.setReadOnly(True)
         self.setAcceptRichText(True)
+        # A read-only QTextEdit reaches links with the mouse only. Adding
+        # LinksAccessibleByKeyboard lets Tab move between the transcript's
+        # Copy and Apply actions; keyPressEvent activates the focused one.
+        self.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+            | Qt.TextSelectableByKeyboard
+            | Qt.LinksAccessibleByMouse
+            | Qt.LinksAccessibleByKeyboard
+        )
+        self.setAccessibleName("Chat transcript")
 
         # Detect dark vs light theme from the widget's background color.
         # If the background luminance is below 128, we're on a dark theme.
@@ -1833,29 +1843,61 @@ class ChatDisplay(QTextEdit):
             .replace("&amp;", "&")
         )
 
-    def mousePressEvent(self, event):
-        """Handle clicks on code block action links.
+    def keyPressEvent(self, event):
+        """Activate the focused link from the keyboard.
 
-        Detects clicks on custom URLs embedded below code blocks:
-        - apply://<index> -> emit sig_apply_code_requested
-        - copy://<index> -> copy code to system clipboard
-
-        Falls through to default behavior for all other clicks.
+        The transcript's actions live in HTML anchors, which Qt reaches
+        with Tab once LinksAccessibleByKeyboard is set, but which it never
+        *activates* on its own: QTextEdit has no anchorClicked. Without
+        this, Copy and Apply were mouse-only.
         """
-        anchor = self.anchorAt(event.pos())
-        if not anchor:
-            super().mousePressEvent(event)
-            return
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            anchor = self.textCursor().charFormat().anchorHref()
+            if anchor and self._activate_anchor(anchor):
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
+    def mousePressEvent(self, event):
+        """Handle clicks on the transcript's action links."""
+        anchor = self.anchorAt(event.pos())
+        if not anchor or not self._activate_anchor(anchor):
+            super().mousePressEvent(event)
+
+    def last_code_block(self):
+        """Return the most recent tracked code block, or "" when there is none."""
+        return self._code_blocks[-1] if self._code_blocks else ""
+
+    def copy_last_code_block(self):
+        """Copy the most recent code block; return whether one existed.
+
+        Kept here rather than in the widget so every clipboard write for
+        the transcript goes through one place.
+        """
+        code = self.last_code_block()
+        if not code:
+            return False
+        QApplication.clipboard().setText(code)
+        return True
+
+    def _activate_anchor(self, anchor):
+        """Run the action behind one anchor; return whether it was handled.
+
+        Shared by the mouse and the keyboard so both routes cannot drift
+        apart:
+        - starter://<index> -> emit sig_starter_action with its prompt
+        - apply://<index>   -> emit sig_apply_code_requested
+        - copy://<index>    -> copy the code to the system clipboard
+        """
         # Starter links carry a prompt for the input, not a code block.
         if anchor.startswith("starter://"):
             try:
                 starter_index = int(anchor[len("starter://"):])
             except ValueError:
-                return
+                return True
             if 0 <= starter_index < len(_STARTER_ACTIONS):
                 self.sig_starter_action.emit(_STARTER_ACTIONS[starter_index][1])
-            return
+            return True
 
         # Parse the action and code block index from the URL
         if anchor.startswith("apply://"):
@@ -1863,15 +1905,20 @@ class ChatDisplay(QTextEdit):
         elif anchor.startswith("copy://"):
             prefix = "copy://"
         else:
-            super().mousePressEvent(event)
-            return
+            # Not one of ours: let the caller fall through to Qt, which
+            # handles ordinary links and text selection.
+            return False
 
+        # A malformed or stale index is still one of our anchors, so it
+        # counts as handled: doing nothing is the intended outcome, and
+        # reporting otherwise would make a click select text underneath
+        # and a keypress reach the base class.
         try:
             index = int(anchor[len(prefix):])
             if not (0 <= index < len(self._code_blocks)):
-                return
+                return True
         except (ValueError, IndexError):
-            return
+            return True
 
         code = self._code_blocks[index]
 
@@ -1881,3 +1928,4 @@ class ChatDisplay(QTextEdit):
             # Copy code to the system clipboard
             clipboard = QApplication.clipboard()
             clipboard.setText(code)
+        return True

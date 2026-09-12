@@ -38,15 +38,20 @@ THEME_COLOR_KEYS = [
 
 # The 8 most user-relevant color keys shown as swatch buttons in settings.
 # Other keys are still overridable via the JSON blob but not shown in the UI.
+# Short on purpose. These label the swatches in Assistant Settings, which
+# sit in fixed 90 px columns with word wrap, and the longer wording wrapped
+# onto a second line: "User message background" and "User message text"
+# both showed "User message" first and read as the same swatch. Measured
+# against the 8pt label font, every name below fits its column on one line.
 EXPOSED_COLOR_KEYS = [
-    ("user_bg", "User message background"),
-    ("user_text", "User message text"),
-    ("assistant_bg", "AI message background"),
-    ("assistant_text", "AI message text"),
-    ("code_block_bg", "Code block background"),
-    ("code_block_text", "Code block text"),
-    ("inline_code_bg", "Inline code background"),
-    ("link_color", "Link color"),
+    ("user_bg", "User bubble"),
+    ("user_text", "User text"),
+    ("assistant_bg", "AI bubble"),
+    ("assistant_text", "AI text"),
+    ("code_block_bg", "Code block"),
+    ("code_block_text", "Code text"),
+    ("inline_code_bg", "Inline code"),
+    ("link_color", "Links"),
 ]
 
 # ---------------------------------------------------------------------------

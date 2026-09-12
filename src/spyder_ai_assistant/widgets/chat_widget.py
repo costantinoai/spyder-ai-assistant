@@ -256,6 +256,21 @@ class ChatWidget(PluginMainWidget):
             text="Export Chat...",
             triggered=self._export_chat,
         )
+        # Copy and Apply otherwise exist only as links in the transcript.
+        # A link can be activated by putting the cursor on it and pressing
+        # Return, but Qt does not let Tab walk between them inside a
+        # read-only text edit, so the menu is what actually makes them
+        # reachable without a mouse.
+        self._copy_code_action = self.create_action(
+            "ai_chat_copy_last_code",
+            text="Copy last code block",
+            triggered=self._copy_last_code_block,
+        )
+        self._apply_code_action = self.create_action(
+            "ai_chat_apply_last_code",
+            text="Apply last code block...",
+            triggered=self._apply_last_code_block,
+        )
         self._delete_exchange_action = self.create_action(
             "ai_chat_delete_exchange",
             text="Delete Exchange...",
@@ -287,6 +302,8 @@ class ChatWidget(PluginMainWidget):
         self.add_item_to_menu(self._assistant_settings_action, menu=options_menu)
         self.add_item_to_menu(self._provider_profiles_action, menu=options_menu)
         self.add_item_to_menu(self._chat_settings_action, menu=options_menu)
+        self.add_item_to_menu(self._copy_code_action, menu=options_menu)
+        self.add_item_to_menu(self._apply_code_action, menu=options_menu)
         self.add_item_to_menu(self._delete_exchange_action, menu=options_menu)
         self.add_item_to_menu(self._history_action, menu=options_menu)
         self.add_item_to_menu(self._export_action, menu=options_menu)
@@ -439,6 +456,25 @@ class ChatWidget(PluginMainWidget):
 
         self.setLayout(content_layout)
 
+        # Explicit tab order. Qt's default follows construction order, which
+        # here put the toolbar combos and the action buttons in an order
+        # that did not match the pane's reading order, and nothing in this
+        # plugin set one at all. This is the order a keyboard user expects:
+        # choose a model, choose a console, read the transcript, type, then
+        # reach the actions.
+        for earlier, later in (
+            (self.model_combo, self.runtime_target_combo),
+            (self.runtime_target_combo, self._tab_widget),
+            (self._tab_widget, self.chat_input),
+            (self.chat_input, self.debug_menu_btn),
+            (self.debug_menu_btn, self.regenerate_btn),
+            (self.regenerate_btn, self.session_btn),
+            (self.session_btn, self.chat_settings_btn),
+            (self.chat_settings_btn, self.stop_btn),
+            (self.stop_btn, self.send_btn),
+        ):
+            self.setTabOrder(earlier, later)
+
         # --- Background worker thread ---
         self._thread = QThread(None)
         self._worker = ChatWorker(settings=self._chat_provider_settings())
@@ -494,6 +530,9 @@ class ChatWidget(PluginMainWidget):
         """Switch the action row between labelled and icon-only buttons."""
         super().resizeEvent(event)
         self._apply_action_row_style(event.size().width())
+        # The context label's width changes with the dock, so its elision
+        # has to be recomputed from the stored full text.
+        self._apply_context_elision()
 
     def _apply_action_row_style(self, panel_width):
         """Apply the responsive tool-button style to the action row."""
@@ -978,6 +1017,27 @@ class ChatWidget(PluginMainWidget):
         session.display.sig_apply_code_requested.connect(self.sig_apply_code)
         session.display.sig_starter_action.connect(self._on_starter_action)
 
+    def _copy_last_code_block(self):
+        """Copy the active tab's most recent code block to the clipboard."""
+        session = self._active_session
+        if session is None:
+            return
+        if session.display.copy_last_code_block():
+            self.status_label.setText("Code copied")
+        else:
+            session.display.append_info("There is no code block to copy yet.")
+
+    def _apply_last_code_block(self):
+        """Open the apply preview for the most recent code block."""
+        session = self._active_session
+        if session is None:
+            return
+        code = session.display.last_code_block()
+        if not code:
+            session.display.append_info("There is no code block to apply yet.")
+            return
+        self.sig_apply_code.emit(code)
+
     def _on_starter_action(self, prompt):
         """Prefill the input from a starter link, leaving the send to the user."""
         logger.info("Starter action selected from the empty transcript")
@@ -1292,7 +1352,30 @@ class ChatWidget(PluginMainWidget):
         Args:
             context_str: String like "main.py:42", or "" to clear.
         """
-        self.context_label.setText(context_str)
+        # Kept in full so a later resize can re-elide from the original: the
+        # label has an Ignored size policy, so in a narrow dock Qt simply
+        # cut the text off with no ellipsis and no way to see the rest.
+        self._context_text = context_str or ""
+        self._apply_context_elision()
+
+    def _apply_context_elision(self):
+        """Fit the context text to the label, with an ellipsis and a tooltip."""
+        # Qt can deliver a resize while the layout is still being built, so
+        # this has to tolerate the label not existing yet, exactly as
+        # _apply_action_row_style does for the action buttons.
+        label = getattr(self, "context_label", None)
+        if label is None:
+            return
+        text = getattr(self, "_context_text", "")
+        available = max(0, label.width())
+        if not text or not available:
+            label.setText(text)
+            label.setToolTip(text)
+            return
+        elided = label.fontMetrics().elidedText(text, Qt.ElideMiddle, available)
+        label.setText(elided)
+        # The full path is worth keeping reachable once it no longer fits.
+        label.setToolTip(text if elided != text else "")
 
     def update_runtime_context(self, runtime_context):
         """Update the runtime toolbar label from a public runtime snapshot."""
@@ -1302,6 +1385,13 @@ class ChatWidget(PluginMainWidget):
         label = f"Kernel: {status}"
         if status == "errored":
             label = "Kernel: error"
+        elif status == "unavailable" and not self._runtime_context_snapshot.get(
+            "active_shell_label"
+        ):
+            # No console has been opened at all, which is a different
+            # situation from one that exists but cannot be reached, and
+            # "unavailable" read like a fault before anything had started.
+            label = "Kernel: none"
         self.runtime_label.setText(label)
         self.runtime_label.setToolTip(
             self._build_runtime_tooltip(detail=detail)
@@ -1480,6 +1570,10 @@ class ChatWidget(PluginMainWidget):
             return False
 
         self.chat_input.clear_text()
+        # Focus belongs back in the input: the next thing a user does after
+        # sending is almost always type again, and clicking Send moved
+        # focus to the button.
+        self.chat_input.setFocus()
         session.display.append_user_message(prompt_text)
         session.messages.append({"role": "user", "content": prompt_text})
         session.touch()
