@@ -440,29 +440,57 @@ class MessageList(QScrollArea):
         return True
 
     def _on_anchor(self, url):
-        """One route for every action link, however it was activated."""
-        anchor = url.toString() if hasattr(url, "toString") else str(url)
-        blocks = getattr(self._renderer, "code_blocks", None) or []
+        """One route for every action link, however it was activated.
 
-        if anchor.startswith("copy://"):
-            index = self._anchor_index(anchor, len("copy://"))
-            if index is not None and 0 <= index < len(blocks):
+        Parsing has to survive what Qt does to these anchors. The transcript
+        emits ``apply://1``, and QUrl reads the ``1`` as an authority, so
+        ``toString()`` hands back ``apply://0.0.0.1``; ``starter://Explain
+        this`` is invalid outright and stringifies to nothing. The scheme
+        survives both, so route on that and recover the payload from whichever
+        part actually holds it.
+        """
+        scheme, payload = self._split_anchor(url)
+        if scheme not in ("copy", "apply", "starter"):
+            return False
+
+        if scheme == "starter":
+            self.sig_starter_action.emit(payload)
+            return True
+
+        blocks = getattr(self._renderer, "code_blocks", None) or []
+        try:
+            index = int(payload)
+        except (TypeError, ValueError):
+            # A malformed index is still our anchor: swallow it rather than
+            # letting the click fall through to the browser.
+            return True
+        if 0 <= index < len(blocks):
+            if scheme == "copy":
                 QGuiApplication.clipboard().setText(blocks[index])
-            return True
-        if anchor.startswith("apply://"):
-            index = self._anchor_index(anchor, len("apply://"))
-            if index is not None and 0 <= index < len(blocks):
+            else:
                 self.sig_apply_code_requested.emit(blocks[index])
-            return True
-        if anchor.startswith("starter://"):
-            self.sig_starter_action.emit(anchor[len("starter://"):])
-            return True
-        return False
+        return True
 
     @staticmethod
-    def _anchor_index(anchor, prefix_length):
-        """Parse the index out of an action anchor, or None when malformed."""
-        try:
-            return int(anchor[prefix_length:])
-        except (TypeError, ValueError):
-            return None
+    def _split_anchor(url):
+        """Return ``(scheme, payload)`` for an anchor given as QUrl or string."""
+        raw = url if isinstance(url, str) else None
+        scheme = ""
+        payload = ""
+
+        if raw is None and hasattr(url, "scheme"):
+            scheme = url.scheme()
+            # ``apply:1`` keeps its payload in the path; ``apply://1`` moves it
+            # into a host that Qt may have rewritten, so prefer the path and
+            # fall back to the final label of the authority.
+            payload = url.path() or ""
+            if not payload:
+                host = url.host() or ""
+                payload = host.rsplit(".", 1)[-1] if host else ""
+            raw = url.toString()
+
+        if not scheme and raw:
+            scheme, _, rest = raw.partition(":")
+            payload = rest.lstrip("/")
+
+        return scheme, payload
