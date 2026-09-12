@@ -617,7 +617,10 @@ class ChatWidget(PluginMainWidget):
         )
         if models_available:
             if error_count:
-                self.status_label.setText(f"Ready ({error_count} provider issue)")
+                issues = "issue" if error_count == 1 else "issues"
+                self.status_label.setText(
+                    f"Ready ({error_count} provider {issues})"
+                )
             else:
                 self.status_label.setText("Ready")
         elif error_count:

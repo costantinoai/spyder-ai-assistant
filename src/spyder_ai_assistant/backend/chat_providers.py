@@ -21,6 +21,7 @@ from spyder_ai_assistant.utils.provider_profiles import compatible_api_url
 
 from spyder_ai_assistant.backend.client import OllamaClient
 from spyder_ai_assistant.utils.constants import DEFAULT_OLLAMA_HOST
+from spyder_ai_assistant.utils.error_messages import describe_provider_failure
 from spyder_ai_assistant.utils.provider_profiles import (
     DEFAULT_COMPATIBLE_PROFILE_LABEL,
     PROVIDER_KIND_OLLAMA,
@@ -321,7 +322,12 @@ def probe_compatible_profile(profile):
     try:
         models = provider.list_models()
     except Exception as error:
-        result["error"] = f"{type(error).__name__}: {error}"
+        result["error"] = describe_provider_failure(
+            error,
+            provider_label=str(profile.get("label") or "The endpoint"),
+            endpoint=result["endpoint"],
+            provider_kind=PROVIDER_KIND_OPENAI_COMPATIBLE,
+        )
         return result
     finally:
         provider.close()
@@ -402,7 +408,14 @@ class ChatProviderRegistry:
                 )
                 diagnostic["status"] = "error"
                 diagnostic["model_count"] = 0
-                diagnostic["message"] = str(error)
+                # Rendered into the status tooltip, so it has to read like
+                # advice rather than like an exception.
+                diagnostic["message"] = describe_provider_failure(
+                    error,
+                    provider_label=provider.provider_label,
+                    endpoint=provider.endpoint,
+                    provider_kind=provider.provider_kind or provider.provider_id,
+                )
             diagnostics.append(diagnostic)
         models.sort(key=lambda model: (model["provider_label"], model["name"]))
         diagnostics.sort(

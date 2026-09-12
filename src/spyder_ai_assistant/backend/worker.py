@@ -10,12 +10,11 @@ from __future__ import annotations
 
 import logging
 
-import httpx
-from ollama import ResponseError
 from qtpy.QtCore import QObject, QMutex, QMutexLocker, Signal
 
 from spyder_ai_assistant.backend.chat_providers import ChatProviderRegistry
 from spyder_ai_assistant.utils.constants import DEFAULT_OLLAMA_HOST
+from spyder_ai_assistant.utils.error_messages import describe_provider_failure
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +120,9 @@ class ChatWorker(QObject):
                 model,
                 error,
             )
-            self.error_occurred.emit(self._format_error(error, provider_id))
+            self.error_occurred.emit(
+                self._format_error(error, provider_id, model=model)
+            )
 
     def list_models(self):
         """Fetch models from every configured chat provider."""
@@ -157,42 +158,26 @@ class ChatWorker(QObject):
         if self._registry is None:
             self._registry = ChatProviderRegistry(self._settings)
 
-    def _format_error(self, error, provider_id=""):
-        """Convert provider errors to concise user-facing messages."""
-        if isinstance(error, ResponseError):
-            if error.status_code == 404:
-                return f"Model not found: {error.error}"
-            return f"Ollama error: {error.error}"
+    def _format_error(self, error, provider_id="", model=""):
+        """Convert provider errors to one actionable user-facing message.
 
-        if isinstance(error, httpx.HTTPStatusError):
-            provider_label = self._provider_label(provider_id)
-            status_code = error.response.status_code
-            return (
-                f"{provider_label} request failed with HTTP {status_code}. "
-                "Check the configured endpoint and model."
-            )
+        The classification and the wording live in utils.error_messages, so
+        the transcript, the provider diagnostics tooltip and the profile
+        connection test all describe the same outage the same way.
+        """
+        return describe_provider_failure(
+            error,
+            provider_label=self._provider_label(provider_id),
+            endpoint=self._provider_endpoint(provider_id),
+            provider_kind=self._provider_kind(provider_id),
+            model=model,
+        )
 
-        if isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout)):
-            provider_label = self._provider_label(provider_id)
-            endpoint = self._provider_endpoint(provider_id)
-            return (
-                f"Cannot connect to {provider_label} at {endpoint}. "
-                "Check that the service is reachable."
-            )
-
-        error_str = str(error)
-        if "Connect" in error_str or "refused" in error_str:
-            provider_label = self._provider_label(provider_id)
-            endpoint = self._provider_endpoint(provider_id)
-            return (
-                f"Cannot connect to {provider_label} at {endpoint}. "
-                "Check that the service is reachable."
-            )
-
-        provider_label = self._provider_label(provider_id)
-        if provider_id:
-            return f"{provider_label} error: {error}"
-        return f"Unexpected error: {error}"
+    def _provider_kind(self, provider_id):
+        """Return the provider kind, which decides the suggested remedy."""
+        self._ensure_registry()
+        record = self._registry.describe_provider(provider_id)
+        return record.get("provider_kind", "") or record.get("provider_id", "")
 
     def _provider_label(self, provider_id):
         """Return one user-facing provider label for errors."""

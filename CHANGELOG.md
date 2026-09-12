@@ -48,6 +48,18 @@
 
 ### Fixed
 
+- a provider failure now says what to do about it instead of showing an
+  exception. An unreachable local Ollama says to start it with
+  `ollama serve`, a missing model gives the `ollama pull` command for that
+  model, and a rejected API key, a rate limit and a server error each get
+  their own message. Two paths used to put raw exception text in front of
+  the user: the chat transcript's last-resort fallback, and the provider
+  diagnostics behind the status label, which rendered the exception
+  directly. Failures are also classified by exception type and HTTP status
+  rather than by searching the message for words like "refused", which
+  only ever matched one library's wording
+- the status label no longer reads "1 provider issue" for one issue and
+  "2 provider issue" for two
 - restored the MCP editor tools: `preview_file_edit` and `apply_file_edit`
   raised `NameError` because the shared plugin lookup was not imported when
   it was centralised
