@@ -23,6 +23,25 @@ from __future__ import annotations
 from spyder_ai_assistant.utils.provider_profiles import PROVIDER_KIND_OLLAMA
 
 
+def format_provider_problem(provider_label, message):
+    """Return one line naming a provider problem, without stuttering.
+
+    Every message from ``describe_provider_failure`` already opens with the
+    provider label, so prefixing the label again produced "Work GPU: Work
+    GPU is not reachable at ..." on screen. The label is added only when
+    the message does not already lead with it, which is the case for
+    messages that come from elsewhere (a provider's own diagnostic text,
+    for instance).
+    """
+    label = str(provider_label or "").strip() or "Provider"
+    text = str(message or "").strip()
+    if not text:
+        return f"{label} is unavailable."
+    if text.startswith(label):
+        return text
+    return f"{label}: {text}"
+
+
 def _status_code(error):
     """Return the HTTP status code carried by ``error``, if any.
 

@@ -4,6 +4,12 @@
 
 ### Added
 
+- an empty chat tab now says what the assistant can see and offers three
+  starter prompts. Clicking one fills the input instead of sending it, so
+  it can be edited first
+- the first provider problem is shown in the chat pane itself rather than
+  only in the status label's tooltip, which stayed invisible until hovered,
+  so a misconfigured endpoint looked like silence
 - "Test connection" in Provider Profiles: probe the endpoint you are
   editing and see how many models it returns, or the transport error if it
   cannot be reached. The probe runs on a worker thread, so the dialog stays

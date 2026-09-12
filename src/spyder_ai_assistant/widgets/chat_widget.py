@@ -42,6 +42,7 @@ from spyder_ai_assistant.utils.chat_inference import (
     resolve_chat_inference_options,
 )
 from spyder_ai_assistant.utils.context import build_system_context_block
+from spyder_ai_assistant.utils.error_messages import format_provider_problem
 from spyder_ai_assistant.utils.provider_profiles import (
     PROVIDER_KIND_OPENAI_COMPATIBLE,
     resolve_preferred_profile,
@@ -196,6 +197,14 @@ class ChatWidget(PluginMainWidget):
 
         self.status_label = QLabel("Connecting...")
         self.status_label.ID = "ai_chat_status_label"
+
+        # The first provider problem, shown in the pane rather than only in
+        # the status label's tooltip: a tooltip is invisible until hovered,
+        # so a misconfigured endpoint just looked like silence.
+        self.provider_issue_label = QLabel("")
+        self.provider_issue_label.ID = "ai_chat_provider_issue_label"
+        self.provider_issue_label.setWordWrap(True)
+        self.provider_issue_label.setVisible(False)
 
         # Context label: shows current file and cursor line (e.g. "main.py:42")
         self.context_label = QLabel("")
@@ -417,6 +426,7 @@ class ChatWidget(PluginMainWidget):
         content_layout.addLayout(context_row)
         content_layout.addWidget(splitter)
         content_layout.addLayout(controls_layout)
+        content_layout.addWidget(self.provider_issue_label)
         footer = QHBoxLayout()
         input_hint = QLabel("Enter to send · Shift+Enter for a new line")
         hint_font = input_hint.font()
@@ -628,6 +638,25 @@ class ChatWidget(PluginMainWidget):
         else:
             self.status_label.setText("No models available")
         self.status_label.setToolTip(self._build_provider_diagnostics_tooltip())
+        self._refresh_provider_issue_label(diagnostics)
+
+    def _refresh_provider_issue_label(self, diagnostics):
+        """Show the first provider problem inline; hide it when healthy."""
+        problem = next(
+            (record for record in diagnostics if record.get("status") == "error"),
+            None,
+        )
+        if problem is None:
+            self.provider_issue_label.clear()
+            self.provider_issue_label.setVisible(False)
+            return
+        self.provider_issue_label.setText(
+            format_provider_problem(
+                problem.get("provider_label") or problem.get("provider_id"),
+                problem.get("message", ""),
+            )
+        )
+        self.provider_issue_label.setVisible(True)
 
     # --- Tab management ---
 
@@ -793,6 +822,11 @@ class ChatWidget(PluginMainWidget):
         """Store provider diagnostics emitted after a model refresh."""
         self._provider_diagnostics = list(diagnostics or [])
         self.status_label.setToolTip(self._build_provider_diagnostics_tooltip())
+        # Refreshed here as well as from _sync_provider_status_label: in the
+        # normal flow diagnostics arrive just before the model list, but
+        # diagnostics that arrive alone would otherwise leave a stale
+        # problem line on screen.
+        self._refresh_provider_issue_label(self._provider_diagnostics)
 
     def _on_error(self, message):
         """Handle an error from the worker.
@@ -942,6 +976,14 @@ class ChatWidget(PluginMainWidget):
     def _initialize_session(self, session):
         """Attach widget-owned signal wiring to one chat session."""
         session.display.sig_apply_code_requested.connect(self.sig_apply_code)
+        session.display.sig_starter_action.connect(self._on_starter_action)
+
+    def _on_starter_action(self, prompt):
+        """Prefill the input from a starter link, leaving the send to the user."""
+        logger.info("Starter action selected from the empty transcript")
+        self.chat_input.setPlainText(prompt)
+        self.chat_input.setFocus()
+        self._sync_send_controls()
 
     def _apply_current_appearance(self, display):
         """Apply all current appearance config values to one ChatDisplay."""

@@ -32,6 +32,16 @@ stalled model. Those tools run on a worker thread, so the rest of Spyder keeps
 responding while one is in flight; the turn itself stays open, which is why
 `Send` remains disabled until the answer arrives.
 
+An empty chat tab is not blank: it says what the assistant can see and
+offers a few starter prompts. Clicking one fills the input rather than
+sending it, so the prompt can be edited first.
+
+When a provider cannot be reached, the problem is stated in the pane, under
+the controls, with the next step to take (for example starting Ollama, or
+installing a model). The status label still summarises it and its tooltip
+still lists every provider, but a tooltip is invisible until hovered, so a
+misconfigured endpoint used to look like silence.
+
 The **Settings** button next to the input opens the per-tab chat settings.
 Each tab can choose its own working mode there (a preset instruction block
 prepended to the system prompt; the default is Coding):

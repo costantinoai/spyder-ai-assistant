@@ -59,6 +59,18 @@ _SCROLL_BOTTOM_THRESHOLD_PX = 30
 # streaming markdown, so rendering each token is pure waste.
 _STREAM_RENDER_INTERVAL_S = 0.033
 
+# Offered in an empty transcript: (link label, prompt). Clicking one
+# prefills the input instead of sending, so the user can edit it first --
+# a starter that fired immediately would spend a model call on a guess.
+_STARTER_ACTIONS = (
+    ("Explain the current file", "Explain what the current file does."),
+    (
+        "Review it for bugs",
+        "Review the current file and explain the riskiest problem you find.",
+    ),
+    ("Add docstrings", "Add docstrings to the functions in the current file."),
+)
+
 # Highlighted code is cached per (language, style, code). While a response
 # streams, every already-closed code block in it is re-rendered about 30
 # times a second even though it can no longer change; highlighting measured
@@ -96,6 +108,9 @@ class ChatDisplay(QTextEdit):
     # Emitted when the user clicks "Apply..." on a code block.
     # Carries the raw code text to preview in the active editor.
     sig_apply_code_requested = Signal(str)
+    # Emitted with a prompt when a starter link in the empty transcript is
+    # clicked. The widget prefills the input; it does not send.
+    sig_starter_action = Signal(str)
 
     sig_theme_changed = Signal()
 
@@ -165,6 +180,9 @@ class ChatDisplay(QTextEdit):
         # (language, style, code) -> highlighted HTML or None. See
         # _HIGHLIGHT_CACHE_MAX for why this exists.
         self._highlight_cache = {}
+        # True while the empty-state guidance occupies the document. It is
+        # never part of _html_content; see _render_placeholder.
+        self._placeholder_showing = False
 
         # --- Smart auto-scroll state ---
         # Tracks whether the user has manually scrolled away from the
@@ -201,6 +219,7 @@ class ChatDisplay(QTextEdit):
 
         # Initialize the document (empty chat)
         self.setHtml(self._html_content)
+        self._render_placeholder()
 
     # --- Appearance configuration ---
 
@@ -298,6 +317,8 @@ class ChatDisplay(QTextEdit):
             self.verticalScrollBar().setValue(position)
         else:
             self._do_scroll_to_bottom()
+        # Re-render the guidance in the new theme when there is no history.
+        self._render_placeholder()
 
     def changeEvent(self, event):
         """Refresh existing bubbles when the application palette changes."""
@@ -650,6 +671,8 @@ class ChatDisplay(QTextEdit):
         """
         if self._batch_render:
             return
+        # A first response streams into an otherwise empty transcript.
+        self._clear_placeholder()
         self._programmatic_scroll = True
         cursor = QTextCursor(self.document())
         cursor.movePosition(QTextCursor.End)
@@ -820,6 +843,8 @@ class ChatDisplay(QTextEdit):
         self._user_scrolled_away = False
         self._scroll_btn.hide()
         self._set_document_html(self._html_content)
+        # An emptied tab is a fresh tab: offer the guidance again.
+        self._render_placeholder()
 
     def rebuild_from_messages(self, messages):
         """Re-render the full conversation from authoritative history."""
@@ -859,8 +884,9 @@ class ChatDisplay(QTextEdit):
         if self._batch_render:
             return
         # setHtml replaces the whole document, so any streaming frame
-        # created earlier no longer exists.
+        # created earlier no longer exists, and so does any placeholder.
         self._stream_frame = None
+        self._placeholder_showing = False
         self._stream_render_timer.stop()
         position = self.verticalScrollBar().value()
         self._programmatic_scroll = True
@@ -869,6 +895,64 @@ class ChatDisplay(QTextEdit):
         # Clear the guard via QTimer.singleShot(0) to ensure it
         # persists through any deferred valueChanged signals that Qt
         # delivers on the next event loop tick after setHtml().
+        QTimer.singleShot(0, self._clear_programmatic_scroll)
+
+    def _placeholder_html(self):
+        """Return the empty-state guidance plus one link per starter."""
+        # Body text, not the dimmed "thinking" colour: measured against the
+        # presets, thinking_text falls to 1.69:1 on nord dark and 2.18:1 on
+        # solarized light, so guidance drawn in it would be close to
+        # invisible in exactly the themes a new user might be running.
+        body = self._theme["assistant_text"]
+        link_color = self._theme["link_color"]
+        links = "".join(
+            f'<div style="margin:3px 0;">'
+            f'<a href="starter://{index}" style="color:{link_color};'
+            f' font-size:{self._font_size}pt; text-decoration:underline;">'
+            f'{self._escape_html(label)}</a></div>'
+            for index, (label, _prompt) in enumerate(_STARTER_ACTIONS)
+        )
+        return (
+            f'<table width="100%" cellpadding="{self._bubble_padding}"'
+            f' cellspacing="0"><tr><td style="color:{body};'
+            f' font-family:{self._font_family};'
+            f' font-size:{self._font_size}pt;'
+            f' line-height:{self._line_height};">'
+            "Ask about the file you have open, an error in your console, or a "
+            "variable you are looking at. The assistant reads your editor and "
+            "consoles only when a question needs them."
+            f'<div style="margin-top:10px;">{links}</div>'
+            "</td></tr></table>"
+        )
+
+    def _render_placeholder(self):
+        """Show the empty-state guidance while the transcript has no messages.
+
+        Written straight to the document and deliberately *not* into
+        ``_html_content``. That string is the authoritative transcript: a
+        theme change re-renders every bubble from it and the session layer
+        persists the conversation, so guidance text must never join it.
+        """
+        if self._batch_render or self._html_content or self._is_streaming:
+            return
+        self._placeholder_showing = True
+        self._programmatic_scroll = True
+        self.setHtml(self._placeholder_html())
+        QTimer.singleShot(0, self._clear_programmatic_scroll)
+
+    def _clear_placeholder(self):
+        """Drop the guidance before the first real content is appended.
+
+        Clears the document directly rather than going through ``setHtml``:
+        there is no HTML to parse, and appending a message must not reload
+        the document even once, which is the property the transcript's
+        append path is built on.
+        """
+        if not self._placeholder_showing:
+            return
+        self._placeholder_showing = False
+        self._programmatic_scroll = True
+        self.document().clear()
         QTimer.singleShot(0, self._clear_programmatic_scroll)
 
     def _append_document_html(self, html):
@@ -886,6 +970,8 @@ class ChatDisplay(QTextEdit):
         """
         if self._batch_render:
             return
+        # The guidance is document-only, so it has to go before content.
+        self._clear_placeholder()
         # insertHtml moves the scrollbar; the guard keeps
         # _on_scrollbar_moved from reading that as the user scrolling.
         self._programmatic_scroll = True
@@ -1759,6 +1845,16 @@ class ChatDisplay(QTextEdit):
         anchor = self.anchorAt(event.pos())
         if not anchor:
             super().mousePressEvent(event)
+            return
+
+        # Starter links carry a prompt for the input, not a code block.
+        if anchor.startswith("starter://"):
+            try:
+                starter_index = int(anchor[len("starter://"):])
+            except ValueError:
+                return
+            if 0 <= starter_index < len(_STARTER_ACTIONS):
+                self.sig_starter_action.emit(_STARTER_ACTIONS[starter_index][1])
             return
 
         # Parse the action and code block index from the URL
