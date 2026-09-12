@@ -46,6 +46,7 @@ Restart Spyder, open **View > Panes > AI Chat** and pick your model from the dro
 - Ghost text replaces Spyder's automatic popup by default. **Assistant Settings > Behavior** can instead show Spyder's popup first, or show it and replace it when the AI answers.
 - The completion model loads when Spyder starts and stays loaded for 30 minutes of inactivity. The status bar shows its state: `AI: <model>`, `loading`, `generating`, `offline` or `disabled`.
 - The trigger, accept-word and accept-line keys can be changed in **Assistant Settings > Shortcuts** (restart Spyder afterwards).
+- To stop suggestions arriving as you type, turn on **Only suggest when I ask** in **Assistant Settings > Completions**. `Ctrl+Shift+Space` then becomes the only way to request one.
 
 </details>
 
