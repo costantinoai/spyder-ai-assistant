@@ -47,6 +47,15 @@ ROLE_NOTICE = "notice"
 
 ROLE_LABELS = {ROLE_USER: "YOU", ROLE_ASSISTANT: "ASSISTANT"}
 
+# Prompts offered on an empty tab. Kept here beside the widget that shows
+# them, and indexed rather than embedded in the anchor, because a prompt with
+# spaces makes an invalid URL that Qt stringifies to nothing.
+STARTER_ACTIONS = (
+    ("Explain this file", "Explain what the open file does."),
+    ("Find a bug", "Review the open file and point out likely bugs."),
+    ("Write a docstring", "Write a docstring for the function at my cursor."),
+)
+
 
 class StreamBuffer:
     """Holds back markup that is still arriving, so it is never painted raw.
@@ -178,9 +187,24 @@ class MessageBubble(QFrame):
         return self._body.toPlainText()
 
     def _resize_to_document(self):
-        """Height the body to its content; a bubble must hug its own text."""
+        """Height the body to its content, wrapping at the width it paints into.
+
+        The viewport is the surface the document actually renders onto, so the
+        wrap width has to match it. Reading the widget's width instead leaves
+        the document laid out at Qt's default 100px until the first real
+        layout arrives, and a code block then wraps narrower than the card it
+        paints inside: the continuation lines land on the bubble, outside the
+        card's background.
+
+        Before any layout there is no honest width to use, so do nothing and
+        let ``resizeEvent`` call back once there is one.
+        """
+        width = self._body.viewport().width()
+        if width <= 1:
+            width = self.width() - 28
+        if width <= 1:
+            return
         document = self._body.document()
-        width = self._body.width() or max(160, self.width() - 28) or 420
         document.setTextWidth(width)
         self._body.setFixedHeight(int(document.size().height()) + 2)
 
@@ -278,6 +302,9 @@ class MessageList(QScrollArea):
         self._column.addStretch(1)
         self.setWidget(self._canvas)
 
+        self._placeholder_row = None
+        self._show_placeholder()
+
     # --- wiring ----------------------------------------------------------
     def set_renderer(self, renderer):
         self._renderer = renderer
@@ -317,7 +344,55 @@ class MessageList(QScrollArea):
             return text
         return self._renderer.render(text, track_code_blocks=track_code_blocks)
 
+    def _show_placeholder(self):
+        """Explain an empty tab, and offer prompts that start a conversation.
+
+        The single-document transcript grew this guidance last round; a blank
+        pane gives a new user nothing to act on. The starter links reuse the
+        same anchors the transcript already emits, so activation routes through
+        one place, and the prompts fill the input rather than sending, since a
+        starter that fired immediately would spend a model call on a guess.
+        """
+        if self._placeholder_row is not None or self._rows:
+            return
+        tokens = self._tokens
+        text = tokens.text if tokens else "#e8ecf6"
+        dim = tokens.dim if tokens else "#8b93a7"
+        accent = tokens.accent if tokens else "#5ac8fa"
+        font = tokens.ui_font if tokens else "sans-serif"
+
+        links = "".join(
+            f'<a href="starter://{index}" '
+            f'style="color:{accent};text-decoration:none;">{label}</a>'
+            + ("<br>" if index < len(STARTER_ACTIONS) - 1 else "")
+            for index, (label, _prompt) in enumerate(STARTER_ACTIONS)
+        )
+        html = (
+            f'<div style="font-family:{font};color:{dim};">'
+            f'<span style="color:{text};">Ask about the file you have open.</span>'
+            "<br>The assistant sees your current file, cursor, selection and "
+            "open tabs.<br><br>"
+            f"{links}</div>"
+        )
+
+        bubble = MessageBubble(ROLE_NOTICE, self._tokens, parent=self._canvas)
+        bubble.set_html(html)
+        bubble.anchor_clicked.connect(self._on_anchor)
+        row = MessageRow(bubble, ROLE_ASSISTANT, parent=self._canvas)
+        self._column.insertWidget(self._column.count() - 1, row)
+        self._placeholder_row = row
+
+    def _clear_placeholder(self):
+        """Remove the guidance once there is a real conversation to show."""
+        if self._placeholder_row is None:
+            return
+        self._column.removeWidget(self._placeholder_row)
+        self._placeholder_row.setParent(None)
+        self._placeholder_row.deleteLater()
+        self._placeholder_row = None
+
     def _add_bubble(self, role, html, label=None):
+        self._clear_placeholder()
         bubble = MessageBubble(role, self._tokens, label=label, parent=self._canvas)
         bubble.set_html(html)
         bubble.anchor_clicked.connect(self._on_anchor)
@@ -412,6 +487,9 @@ class MessageList(QScrollArea):
         self._stream.clear()
         if self._renderer is not None and hasattr(self._renderer, "clear_code_blocks"):
             self._renderer.clear_code_blocks()
+        # An emptied tab is an empty tab: the guidance comes back rather than
+        # leaving a blank pane behind.
+        self._show_placeholder()
 
     def rebuild_from_messages(self, messages):
         """Re-render a whole conversation from authoritative history."""
@@ -454,7 +532,14 @@ class MessageList(QScrollArea):
             return False
 
         if scheme == "starter":
-            self.sig_starter_action.emit(payload)
+            # The anchor carries an index; the prompt itself would not survive
+            # being put in a URL.
+            try:
+                index = int(payload)
+            except (TypeError, ValueError):
+                return True
+            if 0 <= index < len(STARTER_ACTIONS):
+                self.sig_starter_action.emit(STARTER_ACTIONS[index][1])
             return True
 
         blocks = getattr(self._renderer, "code_blocks", None) or []
