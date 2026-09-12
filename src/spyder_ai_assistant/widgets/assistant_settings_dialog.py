@@ -14,12 +14,14 @@ from qtpy.QtWidgets import (
     QDoubleSpinBox,
     QFontComboBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTabWidget,
     QTextEdit,
@@ -141,7 +143,9 @@ class AssistantSettingsDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("Assistant Settings")
-        self.resize(760, 720)
+        # Tall enough that the common tabs need no scrolling; the scroll
+        # areas below only take over on dense tabs or small screens.
+        self.resize(820, 900)
 
         self._models = [dict(model) for model in (models or []) if isinstance(model, dict)]
         self._settings = AssistantSettings.from_mapping(settings).to_conf_dict()
@@ -152,9 +156,8 @@ class AssistantSettingsDialog(QDialog):
         layout = QVBoxLayout(self)
 
         intro = QLabel(
-            "Configure models, generation, shortcuts, appearance, behavior, "
-            "prompt templates, and the embedded MCP server here. "
-            "Provider endpoints are managed through Provider Profiles."
+            "Defaults for every chat tab. Per-tab values live in "
+            "Settings > Tab settings, provider endpoints in Provider Profiles."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -162,13 +165,17 @@ class AssistantSettingsDialog(QDialog):
         tabs = QTabWidget(self)
         layout.addWidget(tabs)
 
-        tabs.addTab(self._build_models_tab(), "Models")
-        tabs.addTab(self._build_generation_tab(), "Generation")
-        tabs.addTab(self._build_shortcuts_tab(), "Shortcuts")
-        tabs.addTab(self._build_appearance_tab(), "Appearance")
-        tabs.addTab(self._build_behavior_tab(), "Behavior")
-        tabs.addTab(self._build_mcp_tab(), "MCP")
-        tabs.addTab(self._build_prompts_tab(), "Prompts")
+        # Tabs are grouped by the task the user came to do. All four are
+        # built before the populate/load calls below, so every widget the
+        # settings are pushed into already exists.
+        tabs.addTab(self._as_scrollable(self._build_chat_tab()), "Chat")
+        tabs.addTab(
+            self._as_scrollable(self._build_completions_tab()), "Completions"
+        )
+        tabs.addTab(
+            self._as_scrollable(self._build_appearance_tab()), "Appearance"
+        )
+        tabs.addTab(self._as_scrollable(self._build_advanced_tab()), "Advanced")
 
         self.button_box = QDialogButtonBox(
             QDialogButtonBox.Cancel | QDialogButtonBox.Save,
@@ -183,30 +190,132 @@ class AssistantSettingsDialog(QDialog):
         self.mcp_host_edit.textChanged.connect(self._refresh_mcp_preview)
         self.mcp_port_spin.valueChanged.connect(self._refresh_mcp_preview)
 
-    def _build_models_tab(self):
-        """Return the Models tab: model choices and the local endpoint."""
-        models_tab = QWidget(self)
-        models_layout = QVBoxLayout(models_tab)
+    def _as_scrollable(self, page):
+        """Return ``page`` wrapped in a vertical-only scroll area.
 
-        models_group = QGroupBox("Models", models_tab)
+        Without this the dialog's minimum height grows to the tallest tab.
+        The Advanced tab needs 950 px, so the dialog opened 1080 px tall and
+        still squeezed that page: the OpenCode buttons were drawn over the
+        JSON box and the MCP status note lost a line. Scrolling keeps the
+        dialog at its intended 760x720 and lets a page exceed the window.
+        """
+        area = QScrollArea(self)
+        area.setWidget(page)
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.NoFrame)
+        # Every group wraps its own text, so a horizontal bar would only
+        # hide content that could have been laid out narrower.
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        return area
+
+    def _build_chat_tab(self):
+        """Return the Chat tab: everything that shapes a chat reply.
+
+        Model choice, the defaults every chat tab starts from, and the
+        prompt templates live together so a chat change needs one tab.
+        """
+        chat_tab = QWidget(self)
+        layout = QVBoxLayout(chat_tab)
+        layout.addWidget(self._build_chat_model_group(chat_tab))
+        layout.addWidget(self._build_chat_defaults_group(chat_tab))
+        layout.addWidget(self._build_system_prompt_group(chat_tab))
+        layout.addWidget(self._build_editor_action_prompts_group(chat_tab))
+        layout.addStretch(1)
+        return chat_tab
+
+    def _build_completions_tab(self):
+        """Return the Completions tab: everything about ghost text.
+
+        Model, generation defaults, the two delays, who owns the popup and
+        the keyboard shortcuts were previously spread over three tabs.
+        """
+        completions_tab = QWidget(self)
+        layout = QVBoxLayout(completions_tab)
+        layout.addWidget(self._build_completion_model_group(completions_tab))
+        layout.addWidget(self._build_completion_defaults_group(completions_tab))
+        layout.addWidget(self._build_ghost_text_group(completions_tab))
+        layout.addWidget(self._build_native_popup_group(completions_tab))
+        layout.addWidget(self._build_shortcuts_group(completions_tab))
+        layout.addStretch(1)
+        return completions_tab
+
+    def _build_appearance_tab(self):
+        """Return the Appearance tab: theme, fonts, and bubble geometry."""
+        appearance_tab = QWidget(self)
+        layout = QVBoxLayout(appearance_tab)
+        layout.addWidget(self._build_color_theme_group(appearance_tab))
+        layout.addWidget(self._build_chat_font_group(appearance_tab))
+        layout.addWidget(self._build_code_blocks_group(appearance_tab))
+        layout.addWidget(self._build_message_bubbles_group(appearance_tab))
+        layout.addStretch(1)
+        return appearance_tab
+
+    def _build_advanced_tab(self):
+        """Return the Advanced tab: endpoints, access, and the MCP server.
+
+        Set-once plumbing that neither chatting nor completing needs day to
+        day, kept out of the way of the two task tabs.
+        """
+        advanced_tab = QWidget(self)
+        layout = QVBoxLayout(advanced_tab)
+        layout.addWidget(self._build_local_endpoint_group(advanced_tab))
+        layout.addWidget(self._build_providers_group(advanced_tab))
+        layout.addWidget(self._build_project_access_group(advanced_tab))
+        layout.addWidget(self._build_mcp_server_group(advanced_tab))
+        layout.addWidget(self._build_client_setup_group(advanced_tab))
+        layout.addStretch(1)
+        return advanced_tab
+
+    def _build_chat_model_group(self, parent):
+        """Return the Chat model group: which model answers in the chat.
+
+        The chat model also fixes which provider the completion model may
+        come from, so its selection signal rebuilds that other list.
+        """
+        models_group = QGroupBox("Chat model", parent)
         models_form = QFormLayout(models_group)
         self.chat_model_combo = QComboBox(models_group)
         self.chat_model_combo.currentIndexChanged.connect(
             self._refresh_completion_model_options
         )
-        self.completion_model_combo = QComboBox(models_group)
         models_form.addRow("Default chat model", self.chat_model_combo)
-        models_form.addRow("Default completion model", self.completion_model_combo)
-        models_layout.addWidget(models_group)
+        return models_group
 
-        local_group = QGroupBox("Local endpoint", models_tab)
+    def _build_completion_model_group(self, parent):
+        """Return the Completion model group: the ghost-text model.
+
+        Populated by ``_refresh_completion_model_options`` from the chat
+        model's provider, which is why no options are added here.
+        """
+        completion_model_group = QGroupBox("Completion model", parent)
+        completion_model_form = QFormLayout(completion_model_group)
+        self.completion_model_combo = QComboBox(completion_model_group)
+        completion_model_form.addRow(
+            "Default completion model", self.completion_model_combo
+        )
+        return completion_model_group
+
+    def _build_local_endpoint_group(self, parent):
+        """Return the Local endpoint group: the local Ollama host."""
+        local_group = QGroupBox("Local endpoint", parent)
         local_form = QFormLayout(local_group)
         self.ollama_host_edit = QLineEdit(local_group)
         self.ollama_host_edit.setPlaceholderText(DEFAULT_OLLAMA_HOST)
+        # A mistyped endpoint used to fail silently: models simply never
+        # appeared. Say so while the field is being edited instead.
+        self.ollama_host_note_label = QLabel(local_group)
+        self.ollama_host_note_label.setWordWrap(True)
+        self.ollama_host_note_label.setVisible(False)
+        self.ollama_host_edit.textChanged.connect(
+            self._refresh_ollama_host_note
+        )
         local_form.addRow("Ollama host", self.ollama_host_edit)
-        models_layout.addWidget(local_group)
+        local_form.addRow("", self.ollama_host_note_label)
+        return local_group
 
-        provider_group = QGroupBox("Providers", models_tab)
+    def _build_providers_group(self, parent):
+        """Return the Providers group: where model dropdowns come from."""
+        provider_group = QGroupBox("Providers", parent)
         provider_layout = QVBoxLayout(provider_group)
         provider_note = QLabel(
             "OpenAI-compatible endpoints are managed through Provider Profiles. "
@@ -225,16 +334,15 @@ class AssistantSettingsDialog(QDialog):
         provider_button_row.addWidget(self.manage_profiles_btn)
         provider_button_row.addStretch()
         provider_layout.addLayout(provider_button_row)
-        models_layout.addWidget(provider_group)
-        models_layout.addStretch(1)
-        return models_tab
+        return provider_group
 
-    def _build_generation_tab(self):
-        """Return the Generation tab: chat and completion defaults."""
-        generation_tab = QWidget(self)
-        generation_layout = QVBoxLayout(generation_tab)
+    def _build_chat_defaults_group(self, parent):
+        """Return the Chat defaults group: temperature and token budget.
 
-        chat_group = QGroupBox("Chat defaults", generation_tab)
+        The title names "all tabs" because these are the values a new chat
+        tab starts from, not the setting of whichever tab is open.
+        """
+        chat_group = QGroupBox("Chat defaults (all tabs)", parent)
         chat_form = QFormLayout(chat_group)
         self.chat_temperature_spin = QDoubleSpinBox(chat_group)
         self.chat_temperature_spin.setDecimals(1)
@@ -245,9 +353,11 @@ class AssistantSettingsDialog(QDialog):
         self.chat_max_tokens_spin.setSingleStep(64)
         chat_form.addRow("Temperature", self.chat_temperature_spin)
         chat_form.addRow("Max tokens", self.chat_max_tokens_spin)
-        generation_layout.addWidget(chat_group)
+        return chat_group
 
-        completion_group = QGroupBox("Completion defaults", generation_tab)
+    def _build_completion_defaults_group(self, parent):
+        """Return the Completion defaults group: ghost-text generation."""
+        completion_group = QGroupBox("Completion defaults", parent)
         completion_form = QFormLayout(completion_group)
         self.completions_enabled_checkbox = QCheckBox(
             "Enable AI ghost-text completions",
@@ -271,15 +381,11 @@ class AssistantSettingsDialog(QDialog):
         completion_form.addRow("Temperature", self.completion_temperature_spin)
         completion_form.addRow("Max tokens", self.completion_max_tokens_spin)
         completion_form.addRow("Debounce (ms)", self.debounce_spin)
-        generation_layout.addWidget(completion_group)
-        generation_layout.addStretch(1)
-        return generation_tab
+        return completion_group
 
-    def _build_shortcuts_tab(self):
-        """Return the Shortcuts tab: completion keyboard shortcuts."""
-        shortcuts_tab = QWidget(self)
-        shortcuts_layout = QVBoxLayout(shortcuts_tab)
-        shortcuts_group = QGroupBox("Keyboard shortcuts", shortcuts_tab)
+    def _build_shortcuts_group(self, parent):
+        """Return the Keyboard shortcuts group for completion commands."""
+        shortcuts_group = QGroupBox("Keyboard shortcuts", parent)
         shortcuts_form = QFormLayout(shortcuts_group)
         self.completion_shortcut_edit = QLineEdit(shortcuts_group)
         self.accept_word_shortcut_edit = QLineEdit(shortcuts_group)
@@ -287,23 +393,19 @@ class AssistantSettingsDialog(QDialog):
         shortcuts_form.addRow("Trigger completion", self.completion_shortcut_edit)
         shortcuts_form.addRow("Accept next word", self.accept_word_shortcut_edit)
         shortcuts_form.addRow("Accept next line", self.accept_line_shortcut_edit)
-        shortcuts_layout.addWidget(shortcuts_group)
+        # The note sits inside the group so it stays attached to the three
+        # shortcut rows it qualifies, wherever the group is composed.
         shortcuts_note = QLabel(
             "Shortcut changes take effect after restarting Spyder."
         )
         shortcuts_note.setWordWrap(True)
-        shortcuts_layout.addWidget(shortcuts_note)
-        shortcuts_layout.addStretch(1)
-        return shortcuts_tab
+        shortcuts_form.addRow(shortcuts_note)
+        return shortcuts_group
 
-    def _build_appearance_tab(self):
-        """Return the Appearance tab: theme, fonts, and bubble geometry."""
-        # --- Appearance tab ---
-        appearance_tab = QWidget(self)
-        appearance_layout = QVBoxLayout(appearance_tab)
-
+    def _build_color_theme_group(self, parent):
+        """Return the Color theme group: preset plus per-color overrides."""
         # Color theme preset and per-color overrides
-        theme_group = QGroupBox("Color theme", appearance_tab)
+        theme_group = QGroupBox("Color theme", parent)
         theme_layout = QVBoxLayout(theme_group)
         theme_form = QFormLayout()
         self.theme_preset_combo = QComboBox(theme_group)
@@ -344,10 +446,12 @@ class AssistantSettingsDialog(QDialog):
         reset_row.addWidget(self.reset_colors_btn)
         reset_row.addStretch()
         theme_layout.addLayout(reset_row)
-        appearance_layout.addWidget(theme_group)
+        return theme_group
 
+    def _build_chat_font_group(self, parent):
+        """Return the Chat font group: family, size, and line height."""
         # Chat font settings
-        chat_font_group = QGroupBox("Chat font", appearance_tab)
+        chat_font_group = QGroupBox("Chat font", parent)
         chat_font_form = QFormLayout(chat_font_group)
         self.chat_font_combo = QFontComboBox(chat_font_group)
         self.chat_font_size_spin = QSpinBox(chat_font_group)
@@ -362,10 +466,12 @@ class AssistantSettingsDialog(QDialog):
         chat_font_form.addRow("Font family", self.chat_font_combo)
         chat_font_form.addRow("Font size", self.chat_font_size_spin)
         chat_font_form.addRow("Line height", self.chat_line_height_spin)
-        appearance_layout.addWidget(chat_font_group)
+        return chat_font_group
 
+    def _build_code_blocks_group(self, parent):
+        """Return the Code blocks group: code font and syntax themes."""
         # Code block font settings
-        code_font_group = QGroupBox("Code blocks", appearance_tab)
+        code_font_group = QGroupBox("Code blocks", parent)
         code_font_form = QFormLayout(code_font_group)
         self.code_font_combo = QFontComboBox(code_font_group)
         self.code_font_size_spin = QSpinBox(code_font_group)
@@ -378,10 +484,12 @@ class AssistantSettingsDialog(QDialog):
         code_font_form.addRow("Code font size", self.code_font_size_spin)
         code_font_form.addRow("Syntax theme (dark)", self.pygments_dark_combo)
         code_font_form.addRow("Syntax theme (light)", self.pygments_light_combo)
-        appearance_layout.addWidget(code_font_group)
+        return code_font_group
 
+    def _build_message_bubbles_group(self, parent):
+        """Return the Message bubbles group: padding, radius, spacing."""
         # Message bubble geometry
-        bubble_group = QGroupBox("Message bubbles", appearance_tab)
+        bubble_group = QGroupBox("Message bubbles", parent)
         bubble_form = QFormLayout(bubble_group)
         self.bubble_padding_spin = QSpinBox(bubble_group)
         self.bubble_padding_spin.setRange(*ASSISTANT_OPTION_RANGES["bubble_padding"])
@@ -397,17 +505,11 @@ class AssistantSettingsDialog(QDialog):
         bubble_form.addRow("Padding", self.bubble_padding_spin)
         bubble_form.addRow("Border radius", self.bubble_radius_spin)
         bubble_form.addRow("Spacing", self.bubble_spacing_spin)
-        appearance_layout.addWidget(bubble_group)
-        appearance_layout.addStretch(1)
-        return appearance_tab
+        return bubble_group
 
-    def _build_behavior_tab(self):
-        """Return the Behavior tab: ghost-text timing, popup policy, access."""
-        # --- Behavior tab ---
-        behavior_tab = QWidget(self)
-        behavior_layout = QVBoxLayout(behavior_tab)
-
-        ghost_group = QGroupBox("Ghost text timing", behavior_tab)
+    def _build_ghost_text_group(self, parent):
+        """Return the Ghost text timing group: the two suggestion delays."""
+        ghost_group = QGroupBox("Ghost text timing", parent)
         ghost_form = QFormLayout(ghost_group)
         self.idle_delay_spin = QSpinBox(ghost_group)
         self.idle_delay_spin.setRange(
@@ -423,12 +525,23 @@ class AssistantSettingsDialog(QDialog):
         self.post_accept_delay_spin.setSuffix(" ms")
         ghost_form.addRow("Idle completion delay", self.idle_delay_spin)
         ghost_form.addRow("Post-accept delay", self.post_accept_delay_spin)
-        behavior_layout.addWidget(ghost_group)
+        # The note sits inside the group so the two delays are explained
+        # exactly where they are edited.
+        behavior_note = QLabel(
+            "Idle delay: how long after you stop typing before ghost text "
+            "appears. Post-accept delay: pause after accepting a suggestion "
+            "before requesting the next one."
+        )
+        behavior_note.setWordWrap(True)
+        ghost_form.addRow(behavior_note)
+        return ghost_group
 
+    def _build_native_popup_group(self, parent):
+        """Return the group choosing who owns Spyder's completion popup."""
         # Ownership between ghost text and Spyder's own automatic popup
         # (pylsp etc.). The description below the combo explains the
         # selected policy so the user does not have to guess.
-        popup_group = QGroupBox("Spyder's automatic completion popup", behavior_tab)
+        popup_group = QGroupBox("Spyder's automatic completion popup", parent)
         popup_layout = QVBoxLayout(popup_group)
         self.native_popup_policy_combo = QComboBox(popup_group)
         for policy in NATIVE_POPUP_POLICIES:
@@ -442,9 +555,11 @@ class AssistantSettingsDialog(QDialog):
         self.native_popup_policy_description = QLabel(popup_group)
         self.native_popup_policy_description.setWordWrap(True)
         popup_layout.addWidget(self.native_popup_policy_description)
-        behavior_layout.addWidget(popup_group)
+        return popup_group
 
-        access_group = QGroupBox("Project access", behavior_tab)
+    def _build_project_access_group(self, parent):
+        """Return the Project access group: opt-in read-only file access."""
+        access_group = QGroupBox("Project access", parent)
         access_form = QFormLayout(access_group)
         self.project_tools_checkbox = QCheckBox(
             "Let the assistant read project files and git history on request",
@@ -455,23 +570,11 @@ class AssistantSettingsDialog(QDialog):
             "current file's folder), with size caps; also exposed as MCP tools."
         )
         access_form.addRow(self.project_tools_checkbox)
-        behavior_layout.addWidget(access_group)
-        behavior_note = QLabel(
-            "Idle delay: how long after you stop typing before ghost text "
-            "appears. Post-accept delay: pause after accepting a suggestion "
-            "before requesting the next one."
-        )
-        behavior_note.setWordWrap(True)
-        behavior_layout.addWidget(behavior_note)
-        behavior_layout.addStretch(1)
-        return behavior_tab
+        return access_group
 
-    def _build_mcp_tab(self):
-        """Return the MCP tab: embedded server settings and client setup."""
-        mcp_tab = QWidget(self)
-        mcp_layout = QVBoxLayout(mcp_tab)
-
-        mcp_server_group = QGroupBox("Embedded MCP server", mcp_tab)
+    def _build_mcp_server_group(self, parent):
+        """Return the Embedded MCP server group: host, port, and status."""
+        mcp_server_group = QGroupBox("Embedded MCP server", parent)
         mcp_server_form = QFormLayout(mcp_server_group)
         self.mcp_enabled_checkbox = QCheckBox(
             "Start the local Spyder MCP server automatically",
@@ -479,6 +582,12 @@ class AssistantSettingsDialog(QDialog):
         )
         self.mcp_host_edit = QLineEdit(mcp_server_group)
         self.mcp_host_edit.setPlaceholderText(DEFAULT_MCP_HOST)
+        # The listen host is a bare host or IP, never a URL; a pasted
+        # "http://..." silently fell back to the default on save.
+        self.mcp_host_note_label = QLabel(mcp_server_group)
+        self.mcp_host_note_label.setWordWrap(True)
+        self.mcp_host_note_label.setVisible(False)
+        self.mcp_host_edit.textChanged.connect(self._refresh_mcp_host_note)
         self.mcp_port_spin = QSpinBox(mcp_server_group)
         self.mcp_port_spin.setRange(*ASSISTANT_OPTION_RANGES["mcp_port"])
         self.mcp_port_spin.setValue(DEFAULT_MCP_PORT)
@@ -492,15 +601,24 @@ class AssistantSettingsDialog(QDialog):
             mcp_server_group,
         )
         self.mcp_status_note_label.setWordWrap(True)
+        # Shown by _refresh_mcp_restart_warning once the edited endpoint
+        # differs from the one the running server is serving.
+        self.mcp_restart_warning_label = QLabel(mcp_server_group)
+        self.mcp_restart_warning_label.setWordWrap(True)
+        self.mcp_restart_warning_label.setVisible(False)
         mcp_server_form.addRow(self.mcp_enabled_checkbox)
         mcp_server_form.addRow("Listen host", self.mcp_host_edit)
+        mcp_server_form.addRow("", self.mcp_host_note_label)
         mcp_server_form.addRow("Listen port", self.mcp_port_spin)
         mcp_server_form.addRow("Endpoint URL", self.mcp_endpoint_edit)
         mcp_server_form.addRow("Current status", self.mcp_status_label)
         mcp_server_form.addRow("", self.mcp_status_note_label)
-        mcp_layout.addWidget(mcp_server_group)
+        mcp_server_form.addRow("", self.mcp_restart_warning_label)
+        return mcp_server_group
 
-        clients_group = QGroupBox("Client setup", mcp_tab)
+    def _build_client_setup_group(self, parent):
+        """Return the Client setup group: copy-ready client snippets."""
+        clients_group = QGroupBox("Client setup", parent)
         clients_layout = QVBoxLayout(clients_group)
         clients_note = QLabel(
             "Use these copy-ready snippets to connect Claude Code, Codex, "
@@ -563,22 +681,19 @@ class AssistantSettingsDialog(QDialog):
         opencode_row.addWidget(self.mcp_action_feedback, stretch=1)
         opencode_row.addStretch()
         clients_layout.addLayout(opencode_row)
-        mcp_layout.addWidget(clients_group)
-        mcp_layout.addStretch(1)
-        return mcp_tab
+        return clients_group
 
-    def _build_prompts_tab(self):
-        """Return the Prompts tab: system prompt and editor action prompts."""
-        prompts_tab = QWidget(self)
-        prompts_layout = QVBoxLayout(prompts_tab)
-
-        system_group = QGroupBox("System prompt", prompts_tab)
+    def _build_system_prompt_group(self, parent):
+        """Return the System prompt group: the standing chat instruction."""
+        system_group = QGroupBox("System prompt", parent)
         system_layout = QVBoxLayout(system_group)
         self.system_prompt_edit = QTextEdit(system_group)
         system_layout.addWidget(self.system_prompt_edit)
-        prompts_layout.addWidget(system_group)
+        return system_group
 
-        actions_group = QGroupBox("Editor action prompts", prompts_tab)
+    def _build_editor_action_prompts_group(self, parent):
+        """Return the Editor action prompts group: one prompt per action."""
+        actions_group = QGroupBox("Editor action prompts", parent)
         actions_form = QFormLayout(actions_group)
         self.prompt_explain_edit = QTextEdit(actions_group)
         self.prompt_fix_edit = QTextEdit(actions_group)
@@ -588,8 +703,7 @@ class AssistantSettingsDialog(QDialog):
         actions_form.addRow("Fix", self.prompt_fix_edit)
         actions_form.addRow("Add docstring", self.prompt_docstring_edit)
         actions_form.addRow("Ask AI", self.prompt_ask_edit)
-        prompts_layout.addWidget(actions_group)
-        return prompts_tab
+        return actions_group
 
     def _on_theme_preset_changed(self, index):
         """Update color swatches when the user picks a different preset."""
@@ -667,6 +781,57 @@ class AssistantSettingsDialog(QDialog):
         self.claude_command_edit.setText(snippets["claude_command"])
         self.codex_command_edit.setText(snippets["codex_command"])
         self.opencode_config_edit.setPlainText(snippets["opencode_config"])
+        self._refresh_mcp_restart_warning(snippets["url"])
+
+    def _refresh_ollama_host_note(self, *_args):
+        """Flag an Ollama endpoint that is not a usable http(s) URL.
+
+        Empty falls back to the default on save, which is fine and needs no
+        warning; anything else must carry a scheme and a host.
+        """
+        text = self.ollama_host_edit.text().strip()
+        if not text:
+            problem = ""
+        elif not text.startswith(("http://", "https://")):
+            problem = "Include the scheme, for example http://localhost:11434"
+        elif not text.split("//", 1)[1].strip(" /"):
+            problem = "Add the host, for example http://localhost:11434"
+        else:
+            problem = ""
+        self.ollama_host_note_label.setText(problem)
+        self.ollama_host_note_label.setVisible(bool(problem))
+
+    def _refresh_mcp_host_note(self, *_args):
+        """Flag a listen host that is a URL or carries a port."""
+        text = self.mcp_host_edit.text().strip()
+        if not text:
+            problem = ""
+        elif "//" in text or text.startswith(("http:", "https:")):
+            problem = "Use a bare host or IP here, for example 127.0.0.1"
+        elif text.count(":") == 1:
+            # One colon means "host:port"; several mean an IPv6 address.
+            problem = "Set the port in the field below, not in the host"
+        else:
+            problem = ""
+        self.mcp_host_note_label.setText(problem)
+        self.mcp_host_note_label.setVisible(bool(problem))
+
+    def _refresh_mcp_restart_warning(self, previewed_url):
+        """Warn that saving will move the running server to a new endpoint.
+
+        Saving MCP host or port changes restarts the embedded server, which
+        drops any connected client. The warning appears only once the edited
+        endpoint actually differs from the one the server is serving.
+        """
+        running_url = str((self._mcp_status or {}).get("endpoint_url", "") or "")
+        moves_server = bool(running_url) and previewed_url != running_url
+        self.mcp_restart_warning_label.setText(
+            "Saving restarts the embedded server on this endpoint. "
+            "Connected clients have to reconnect."
+            if moves_server
+            else ""
+        )
+        self.mcp_restart_warning_label.setVisible(moves_server)
 
     def _refresh_mcp_status_label(self):
         """Update the MCP status label for the currently saved server."""
@@ -849,6 +1014,11 @@ class AssistantSettingsDialog(QDialog):
         )
         self._select_native_popup_policy(settings["native_popup_policy"])
 
+        # Stored values are already valid, so these start clear; they react to
+        # what the user types next.
+        self._refresh_ollama_host_note()
+        self._refresh_mcp_host_note()
+
         self._select_chat_model()
         self._refresh_completion_model_options()
         self._refresh_mcp_preview()
@@ -870,7 +1040,7 @@ class AssistantSettingsDialog(QDialog):
         )
 
     def selected_native_popup_policy(self):
-        """Return the popup policy chosen in the Behavior tab."""
+        """Return the popup policy chosen in the Completions tab."""
         return self.native_popup_policy_combo.currentData() or DEFAULT_NATIVE_POPUP_POLICY
 
     def _select_chat_model(

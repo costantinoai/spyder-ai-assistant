@@ -34,7 +34,9 @@ class ChatSettingsDialog(QDialog):
     def __init__(self, session_title, defaults, overrides=None, parent=None,
                  prompt_preset_id=None):
         super().__init__(parent)
-        self.setWindowTitle("Chat Settings")
+        # One name for this concept across the pane: the menu item, this
+        # title and the button marker all say "Tab settings".
+        self.setWindowTitle("Tab settings")
         self.resize(440, 320)
         self._prompt_preset_id = normalize_chat_prompt_preset(prompt_preset_id)
 

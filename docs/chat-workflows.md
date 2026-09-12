@@ -92,8 +92,8 @@ The active chat tab also owns its own optional inference overrides.
 
 Controls:
 
-- `Settings > Tab Overrides...` in the chat pane
-- `Tab Overrides...` action in the pane options menu
+- `Settings > Tab settings...` in the chat pane
+- `Tab settings...` action in the pane options menu
 
 Available overrides:
 

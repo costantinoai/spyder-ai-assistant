@@ -67,7 +67,7 @@ The chat sees your current file, cursor, selection and open tabs. Code blocks in
 - One conversation per tab. Answers stream in; **Stop** cancels and **Regenerate** reruns the last turn.
 - Switch models mid-conversation from the dropdown.
 - Reasoning from models that emit `<think>` blocks shows in a dimmed section.
-- Per-tab chat mode (Coding, Debugging, Review, Data Analysis, Explanation, Documentation), temperature and max tokens: **Tab Overrides...** in the **Settings** menu.
+- Per-tab chat mode (Coding, Debugging, Review, Data Analysis, Explanation, Documentation), temperature and max tokens: **Tab settings...** in the **Settings** menu.
 - Delete single exchanges or export a chat to Markdown from the **Sessions** menu.
 - `Enter` sends, `Shift+Enter` adds a line.
 
@@ -83,7 +83,7 @@ Ask about an error or a variable and the model can read the latest traceback, re
 
 ### Project files and git
 
-When asked, the model can list, read and search files in your project and look at `git status`, diffs and recent commits. Access is read-only, stays inside the project folder and skips `.git`, virtual environments and build output. Turn it off in **Assistant Settings > Behavior > Project access**.
+When asked, the model can list, read and search files in your project and look at `git status`, diffs and recent commits. Access is read-only, stays inside the project folder and skips `.git`, virtual environments and build output. Turn it off in **Assistant Settings > Advanced > Project access**.
 
 ### Sessions
 
@@ -105,7 +105,7 @@ codex mcp add spyder --url http://127.0.0.1:8769/mcp
 **Assistant Settings > MCP** switches the server on or off, sets host and port, shows its status, copies config snippets (OpenCode included) and launches each agent in your project folder.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/costantinoai/spyder-ai-assistant/main/docs/screenshots/settings-mcp.png" width="560" alt="MCP tab of Assistant Settings with server status and launch buttons">
+  <img src="https://raw.githubusercontent.com/costantinoai/spyder-ai-assistant/main/docs/screenshots/settings-advanced.png" width="560" alt="Advanced tab of Assistant Settings with the embedded MCP server status and launch buttons">
 </p>
 
 <details>
@@ -141,12 +141,12 @@ Completions use the chat model unless a separate completion model is installed a
 
 ## Settings
 
-All settings are in the chat pane's **Settings** button. Clicking it opens **Assistant Settings** (models and Ollama host, generation, shortcuts, appearance, behaviour, MCP, prompt templates). Its menu adds **Tab Overrides...** for the current tab's chat mode, temperature and max tokens (the button reads `Settings*` while a tab differs from the defaults) and **Provider Profiles...**.
+The chat pane's **Settings** button opens a menu: **Assistant Settings...**, **Tab settings...** and **Provider Profiles...**. Assistant Settings has four tabs — **Chat** (chat model, its defaults, prompt templates), **Completions** (completion model, ghost-text timing, shortcuts), **Appearance** (theme, fonts, message bubbles) and **Advanced** (Ollama host, project access, the embedded MCP server). **Tab settings...** holds the current tab's chat mode, temperature and max tokens; the button reads `Settings*` while a tab differs from the defaults.
 
 <details>
 <summary>Screenshot</summary>
 
-<img src="https://raw.githubusercontent.com/costantinoai/spyder-ai-assistant/main/docs/screenshots/settings-models.png" width="560" alt="Models tab of Assistant Settings">
+<img src="https://raw.githubusercontent.com/costantinoai/spyder-ai-assistant/main/docs/screenshots/settings-chat.png" width="560" alt="Chat tab of Assistant Settings">
 
 </details>
 
@@ -155,7 +155,7 @@ All settings are in the chat pane's **Settings** button. Clicking it opens **Ass
 | Problem | Fix |
 |---|---|
 | No models in the dropdown | Check that Ollama runs: `curl http://localhost:11434/api/tags`. Pull a model if the list is empty. For a provider profile, check that the endpoint answers on `/v1/models`. |
-| No inline suggestions | Check the status bar. `AI: offline`: the model or provider can't be reached. `AI: disabled`: completions are off (**Assistant Settings > Generation**). |
+| No inline suggestions | Check the status bar. `AI: offline`: the model or provider can't be reached. `AI: disabled`: completions are off (**Assistant Settings > Completions**). |
 | AI Chat missing from **View > Panes** | The plugin is in a different environment from Spyder. Run `python -c "import spyder_ai_assistant"` with Spyder's Python. |
 | Slow answers or high memory use | Use a smaller model. The first request waits for the model to load. `ollama ps` lists loaded models, `ollama stop <model>` unloads one. |
 | Vague answers about variables or errors | Kernel inspection needs a model that follows instructions well. Qwen models work reliably. |

@@ -12,34 +12,50 @@ The plugin has a three-layer settings system:
    system under the `"ai_chat"` section.
 
 2. **In-pane AssistantSettingsDialog**
-   The primary user-facing settings UI, opened via the "Settings" button or the
-   hamburger menu in the chat pane. This is a `QDialog` with six tabs.
+   The primary user-facing settings UI, opened from the "Settings" button menu
+   or the hamburger menu in the chat pane. A `QDialog` with four tabs grouped
+   by task: **Chat**, **Completions**, **Appearance** and **Advanced**. Each
+   tab page sits in a `QScrollArea`, so the dialog stays at its default size
+   and a dense tab scrolls instead of squeezing its controls.
 
 3. **Per-tab ChatSettingsDialog**
-   Per-session overrides for temperature and max tokens only. Accessible via
-   "Tab Overrides..." in the pane menu.
+   Per-session chat mode, temperature and max tokens. Accessible via
+   "Tab settings..." in the Settings menu or the pane menu.
 
 There is also a Spyder Preferences page (`AIChatConfigPage` in `config_page.py`)
 which serves as a redirect — it tells the user to use the in-pane dialog.
 
 ## Settings Tabs
 
-### Models
+The four tabs are grouped by task. The sections below list the settings each
+one holds, with the config key and default behind every control.
 
-Controls which AI models and endpoints are used.
+| Tab | Holds |
+|-----|-------|
+| **Chat** | chat model, chat generation defaults, system and editor-action prompts |
+| **Completions** | completion model, completion generation defaults, ghost-text timing, popup ownership, shortcuts |
+| **Appearance** | color theme, fonts, message bubble geometry |
+| **Advanced** | Ollama host, provider profiles, project access, embedded MCP server, client setup |
+
+### Chat and Completions: models
+
+Controls which AI models and endpoints are used. The chat model lives on the
+**Chat** tab, the completion model on **Completions**, and the endpoint plus
+provider profiles on **Advanced**.
 
 | Setting | Config Key | Default |
 |---------|-----------|---------|
-| Default chat model | `chat_model` | `gpt-oss-20b-abliterated` |
-| Default completion model | `completion_model` | `qooba/qwen3-coder-30b-a3b-instruct:q3_k_m` |
+| Default chat model | `chat_model` | `qwen3-coder-next` |
+| Default completion model | `completion_model` | `qwen3-coder-next` |
 | Ollama host | `ollama_host` | `http://localhost:11434` |
 | Chat provider | `chat_provider` | `ollama` |
 | Provider profile ID | `chat_provider_profile_id` | `""` |
 | Provider profiles (JSON) | `provider_profiles` | `"[]"` |
 
-### Generation
+### Chat and Completions: generation
 
-Controls inference parameters for chat and completions.
+Controls inference parameters. The chat rows are on the **Chat** tab
+("Chat defaults (all tabs)"), the completion rows on **Completions**.
 
 | Setting | Config Key | Default | Range |
 |---------|-----------|---------|-------|
@@ -50,9 +66,9 @@ Controls inference parameters for chat and completions.
 | Completion max tokens | `completion_max_tokens` | `256` | 16-4096 |
 | Debounce (ms) | `debounce_ms` | `300` | 0-5000 |
 
-### Shortcuts
+### Completions: shortcuts
 
-Keyboard shortcuts for completion interactions.
+Keyboard shortcuts for completion interactions, on the **Completions** tab.
 
 | Setting | Config Key | Default |
 |---------|-----------|---------|
@@ -101,9 +117,10 @@ All 23 theme color keys can be overridden via the JSON blob for power users.
 
 Appearance changes apply immediately to all open chat sessions.
 
-### Behavior
+### Completions: timing and popup ownership
 
-Controls ghost text completion timing.
+Controls ghost text completion timing, on the **Completions** tab. Project
+access moved to **Advanced**.
 
 | Setting | Config Key | Default | Range |
 |---------|-----------|---------|-------|
@@ -131,9 +148,9 @@ Controls ghost text completion timing.
 
 Behavior changes apply immediately to all open editors.
 
-### Prompts
+### Chat: prompts
 
-Customizable prompt templates for chat and editor actions.
+Customizable prompt templates for chat and editor actions, on the **Chat** tab.
 
 | Setting | Config Key |
 |---------|-----------|
@@ -153,7 +170,7 @@ decorator system:
 - **Appearance keys** -> `plugin._propagate_appearance_setting()` ->
   `ChatWidget.update_all_display_appearance()` -> each `ChatDisplay.update_appearance()`
 - **Behavior keys** -> `GhostTextManager.update_timing()` on each editor's manager
-- **Generation keys** -> `_sync_completion_provider_settings()` on the completion provider
+- **Completion keys** -> `_sync_completion_provider_settings()` on the completion provider
 - **Provider keys** -> `_refresh_chat_provider_settings()` -> model rediscovery
 
 ## ChatDisplay Styling System

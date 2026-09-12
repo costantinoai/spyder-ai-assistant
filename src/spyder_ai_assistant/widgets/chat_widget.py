@@ -252,7 +252,7 @@ class ChatWidget(PluginMainWidget):
         )
         self._chat_settings_action = self.create_action(
             "ai_chat_tab_settings",
-            text="Tab Overrides...",
+            text="Tab settings...",
             triggered=self._open_chat_settings_dialog,
         )
         self._assistant_settings_action = self.create_action(
@@ -350,9 +350,12 @@ class ChatWidget(PluginMainWidget):
         self.chat_settings_btn.setText("Settings")
         self.chat_settings_btn.setIcon(ima.icon("configure"))
         self.chat_settings_btn.setToolTip(
-            "Open assistant settings. Use the menu for tab overrides and providers."
+            "Settings for the assistant and this chat tab"
         )
-        self.chat_settings_btn.setPopupMode(QToolButton.MenuButtonPopup)
+        # The whole button opens the menu. A split button that opened a
+        # different dialog on click than its arrow did hid the per-tab
+        # settings behind the arrow (GitHub issue #4).
+        self.chat_settings_btn.setPopupMode(QToolButton.InstantPopup)
         settings_menu = QMenu(self.chat_settings_btn)
         settings_menu.addAction(self._assistant_settings_action)
         settings_menu.addAction(self._chat_settings_action)
@@ -457,7 +460,6 @@ class ChatWidget(PluginMainWidget):
         self.chat_input.submit_requested.connect(self._send_message)
         self.send_btn.clicked.connect(self._send_message)
         self.stop_btn.clicked.connect(self._stop_generation)
-        self.chat_settings_btn.clicked.connect(self._open_assistant_settings_dialog)
         self.session_btn.clicked.connect(self._open_history_browser)
         self.regenerate_btn.clicked.connect(self._regenerate_last_turn)
         self.model_combo.currentIndexChanged.connect(
@@ -501,7 +503,7 @@ class ChatWidget(PluginMainWidget):
         if session is None:
             self.chat_settings_btn.setText("Settings")
             self.chat_settings_btn.setToolTip(
-                "Open assistant settings. Use the menu for tab overrides and providers."
+                "Settings for the assistant and this chat tab"
             )
             return
 
@@ -516,7 +518,8 @@ class ChatWidget(PluginMainWidget):
         self.chat_settings_btn.setToolTip(
             "\n".join(
                 [
-                    "Open assistant settings. Use the menu for tab overrides and providers.",
+                    "Settings for the assistant and this chat tab.",
+                    "A * marks a tab whose settings differ from the defaults.",
                     self._build_chat_settings_tooltip(metadata),
                 ]
             )
