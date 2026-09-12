@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from urllib.parse import urlsplit
 
 
 PROVIDER_KIND_OLLAMA = "ollama"
@@ -157,16 +158,33 @@ def base_url_host(base_url):
     Credentials, port and IPv6 brackets are stripped so the result can be
     compared against a plain host list.
     """
+    try:
+        return urlsplit(str(base_url or "").strip()).hostname or ""
+    except ValueError:
+        return ""
+
+
+def describe_http_url_problem(base_url, example="https://api.example.com/v1"):
+    """Validate the URL components used by both endpoint settings pages."""
     text = str(base_url or "").strip()
-    if "//" not in text:
+    if not text:
         return ""
-    remainder = text.split("//", 1)[1].strip(" /")
-    if not remainder:
-        return ""
-    authority = remainder.split("/", 1)[0].rsplit("@", 1)[-1]
-    if authority.startswith("["):
-        return authority[1:].split("]", 1)[0]
-    return authority.split(":", 1)[0]
+    if any(character.isspace() for character in text):
+        return "Remove spaces and line breaks from the URL"
+    try:
+        parsed = urlsplit(text)
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return f"Include the scheme, for example {example}"
+        if not parsed.hostname:
+            return f"Add the host, for example {example}"
+        port = parsed.port
+        if port is not None and not 1 <= port <= 65535:
+            return "Use a port between 1 and 65535"
+    except ValueError:
+        return "Check the host, IPv6 brackets, and port (1 to 65535)"
+    if parsed.query or parsed.fragment:
+        return "Remove the query or fragment; enter only the endpoint URL"
+    return ""
 
 
 def describe_base_url_problem(base_url):
@@ -180,10 +198,9 @@ def describe_base_url_problem(base_url):
     text = str(base_url or "").strip()
     if not text:
         return ""
-    if not text.startswith(("http://", "https://")):
-        return "Include the scheme, for example https://api.example.com/v1"
-    if not base_url_host(text):
-        return "Add the host, for example https://api.example.com/v1"
+    problem = describe_http_url_problem(text)
+    if problem:
+        return problem
     lowered = text.rstrip("/").lower()
     if lowered.endswith("/models") or "/chat/completions" in lowered:
         # compatible_api_url appends /v1 and the client then requests

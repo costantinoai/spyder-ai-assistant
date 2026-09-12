@@ -33,11 +33,14 @@ Usage (from plugin.py):
 """
 
 from spyder_ai_assistant.utils.assistant_settings import (
+    ASSISTANT_CONF_DEFAULTS,
+    ASSISTANT_OPTION_RANGES,
     DEFAULT_NATIVE_POPUP_POLICY,
     NATIVE_POPUP_POLICIES,
     NATIVE_POPUP_POLICY_AI_FIRST,
     NATIVE_POPUP_POLICY_NATIVE_FIRST,
 )
+from spyder_ai_assistant.utils.coerce import bounded_int
 from spyder_ai_assistant.utils.text_positions import python_index, utf16_length
 
 import logging
@@ -284,9 +287,10 @@ class GhostTextManager:
         # applying extra selections (gray overlay) on the range.
         self._ghost_start = -1
         self._ghost_end = -1
-        self._idle_completion_delay_ms = max(
-            250,
-            int(idle_completion_delay_ms or IDLE_COMPLETION_DELAY_MS),
+        self._idle_completion_delay_ms = bounded_int(
+            idle_completion_delay_ms,
+            ASSISTANT_CONF_DEFAULTS["idle_completion_delay_ms"],
+            *ASSISTANT_OPTION_RANGES["idle_completion_delay_ms"],
         )
         self._last_manual_request_at = 0.0
         self._last_manual_request_state = None
@@ -298,9 +302,10 @@ class GhostTextManager:
         )
         self._post_accept_completion_timer = QTimer(editor)
         self._post_accept_completion_timer.setSingleShot(True)
-        self._post_accept_completion_delay_ms = max(
-            0, int(post_accept_completion_delay_ms
-                   or POST_ACCEPT_COMPLETION_DELAY_MS),
+        self._post_accept_completion_delay_ms = bounded_int(
+            post_accept_completion_delay_ms,
+            ASSISTANT_CONF_DEFAULTS["post_accept_completion_delay_ms"],
+            *ASSISTANT_OPTION_RANGES["post_accept_completion_delay_ms"],
         )
         self._post_accept_completion_timer.setInterval(
             self._post_accept_completion_delay_ms
@@ -391,12 +396,18 @@ class GhostTextManager:
         Only updates values that are explicitly provided.
         """
         if idle_ms is not None:
-            self._idle_completion_delay_ms = max(250, int(idle_ms))
+            self._idle_completion_delay_ms = bounded_int(
+                idle_ms, ASSISTANT_CONF_DEFAULTS["idle_completion_delay_ms"],
+                *ASSISTANT_OPTION_RANGES["idle_completion_delay_ms"],
+            )
             self._idle_completion_timer.setInterval(
                 self._idle_completion_delay_ms
             )
         if post_accept_ms is not None:
-            self._post_accept_completion_delay_ms = max(0, int(post_accept_ms))
+            self._post_accept_completion_delay_ms = bounded_int(
+                post_accept_ms, ASSISTANT_CONF_DEFAULTS["post_accept_completion_delay_ms"],
+                *ASSISTANT_OPTION_RANGES["post_accept_completion_delay_ms"],
+            )
             self._post_accept_completion_timer.setInterval(
                 self._post_accept_completion_delay_ms
             )
@@ -796,6 +807,9 @@ class GhostTextManager:
         self._idle_completion_timer.stop()
         self._post_accept_completion_timer.stop()
         self._post_accept_pending = False
+        self._request_is_manual = source not in {"idle", "post_accept"}
+        if self._manual_only and not self._request_is_manual:
+            return
         if source not in {"idle", "post_accept"}:
             self.resume_suggestions(f"{source} request")
             self._hide_completion_popup()

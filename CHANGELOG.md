@@ -22,10 +22,12 @@
   usable while the request is in flight, and every profile keeps its own
   last result
 - inline notes in Provider Profiles for a Base URL with no scheme or no
-  host, for one that already includes the request path (the client appends
+  host, an out of range port, unbalanced IPv6 brackets, a stray query or
+  fragment, one that already includes the request path (the client appends
   `/v1` and asks for `/models` itself, so it would be requested twice), and
-  for a remote endpoint left without an API key. A mistyped endpoint used
-  to fail silently: its models were simply missing from the dropdown
+  a remote endpoint left without an API key. A mistyped endpoint used to
+  fail silently: its models were simply missing from the dropdown. The
+  Ollama host field is checked by the same rules rather than its own
 - a warning before saving an MCP host or port that would restart the
   embedded server and drop any connected clients
 - inline notes for two more inputs that used to fail silently: an Ollama
@@ -71,6 +73,40 @@
 - inspecting several variables at once now opens one kernel client for the
   batch and stops fetching live values after a 3 second budget, instead of
   one blocking kernel round trip per variable
+- `project.search` runs in a separate short lived process under a 3 second
+  budget instead of inside the tool worker. A pathological pattern such as
+  `(a+)+$` against a long line used to spin a worker thread that nothing
+  could interrupt, because a running regular expression does not return to
+  Python often enough to be cancelled. Matches found before the deadline
+  are kept and the result is marked truncated
+- project listing and search are bounded by a traversal budget (20,000
+  directory entries, 3 seconds, 100 levels deep) and no longer follow
+  directory symlinks, so a deep or self referencing tree cannot walk on
+  indefinitely
+- git tools run with their output capped and their environment pinned: no
+  pager, no external diff or textconv driver, no terminal credential
+  prompt, and the whole process group is killed at the timeout so a
+  command whose child still holds the output cannot outlive it.
+  `git status` and `git log` now report truncation the way `git diff` did
+- the pool that runs project and git tools is two worker threads with a
+  queue of eight. Shutting down drops queued work and pending callbacks at
+  once instead of waiting for a blocking search or git command to return
+- MCP tool calls run on worker threads, four at a time, rather than on the
+  transport event loop, so one slow project or git tool no longer stalls
+  every other request on the connection
+- the embedded MCP server reports a startup that never completes. Starting
+  it no longer waits for the handshake, and a startup still unfinished
+  after 5 seconds stops the server and records why, instead of leaving it
+  silently not listening
+- saving Assistant Settings applies the whole burst once. Each changed key
+  used to fire its own reaction, so one save could rebuild the provider
+  settings several times and restart the MCP server once per changed MCP
+  key, dropping connected clients more than once
+- inspecting a variable transfers a value only when the namespace metadata
+  proves it small: numeric arrays up to 64 KB, under one shared byte and
+  time budget. Containers, frames, images and object arrays keep the
+  kernel's own summary, so an inspection cannot pull an arbitrarily large
+  object across the comm
 
 ### Fixed
 
@@ -136,6 +172,53 @@
   they used to be written twice and could disagree
 - three unguarded plugin lookups would raise on Spyder builds whose
   `get_plugin` does not take an `error` keyword
+- a reply from a stopped or superseded request no longer lands in the
+  chat. Every request carries an id, and tokens, answers and errors that
+  arrive after Stop, or after the next message was sent, are dropped
+  instead of being appended to the new turn or re-enabling Send. A request
+  stopped while still queued never reaches the provider at all
+- a failure while listing models no longer interrupts a running answer. It
+  updates the status label instead of ending the turn and writing the
+  error into the transcript
+- one misconfigured provider profile no longer hides every working
+  provider's models. The HTTP client is built when it is first used rather
+  than when the profile is loaded, so a Base URL such as
+  `http://localhost:notaport` reports an invalid endpoint for that profile
+  while the others still list their models
+- a suggestion computed for the previous model or endpoint can no longer
+  appear after switching. Completion requests and model warm-ups are
+  tagged with the backend they started on, and results from a superseded
+  backend are discarded; a warm-up for the old endpoint used to be able to
+  mark the new one as loaded
+- **Only suggest when I ask** is honoured on the editor's own completion
+  path, which reaches ghost text without passing through the ghost
+  manager's timers
+- an empty or whitespace-only response no longer leaves an empty message
+  bubble in the transcript
+- a long streaming answer no longer evicts syntax highlighting that was
+  already computed. The cache was cleared whole when it filled, and every
+  partial code block during streaming took a slot; it now drops the oldest
+  entry and does not store blocks that are still streaming
+- a tool result belonging to an abandoned turn can no longer resume a new
+  turn in the same tab: the callback is bound to the turn that asked for
+  it, not to the tab
+- the two ghost-text delays are clamped to the same bounds as the settings
+  that write them. The manager applied its own floor of 250 ms, so a
+  stored value could behave differently from the one shown in Settings
+- the project file tools refuse a file that grew past the size limit after
+  it was measured, and search stops at a total byte budget instead of
+  trusting each file's reported size
+- a fresh variable namespace is kept when the follow-up properties query
+  times out, with a note, instead of falling back to the whole cached
+  namespace
+- array variables are reported with their real type, shape and dtype.
+  Spyder reports them as `NDArray` with a `numpy_type` of "Array" and a
+  JSON list shape, which the summary did not decode, and the comm's
+  conversion to plain lists dropped the original dtype, so `float32` read
+  back as `float64`
+- the Assistant Settings, tab settings and Provider Profiles dialogs are
+  released when they close instead of staying alive for the rest of the
+  session
 
 ## 0.7.2 - 2026-09-12
 

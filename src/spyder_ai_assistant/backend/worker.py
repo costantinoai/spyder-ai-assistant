@@ -24,6 +24,9 @@ class ChatWorker(QObject):
 
     chunk_received = Signal(str)
     response_ready = Signal(str, dict)
+    request_chunk_received = Signal(str, str)
+    request_response_ready = Signal(str, str, dict)
+    request_error_occurred = Signal(str, str)
     models_listed = Signal(list)
     provider_diagnostics_ready = Signal(list)
     error_occurred = Signal(str)
@@ -34,6 +37,7 @@ class ChatWorker(QObject):
         self._settings = dict(settings or {})
         self._registry = None
         self._abort = False
+        self._cancelled_requests = set()
         self._mutex = QMutex()
 
     def update_settings(self, settings):
@@ -52,9 +56,29 @@ class ChatWorker(QObject):
 
     def send_chat(self, provider_id, model, messages, options):
         """Send a streaming chat request through the selected provider."""
+        options = dict(options or {})
+        request_id = options.pop("_spyder_request_id", "")
         with QMutexLocker(self._mutex):
+            if request_id and request_id in self._cancelled_requests:
+                self._cancelled_requests.discard(request_id)
+                return
             self._abort = False
+        try:
+            self._stream_chat(provider_id, model, messages, options, request_id)
+        finally:
+            with QMutexLocker(self._mutex):
+                self._cancelled_requests.discard(request_id)
 
+    def _emit_chat_result(self, name, request_id, *args):
+        with QMutexLocker(self._mutex):
+            if self._abort or request_id in self._cancelled_requests:
+                return
+        if request_id:
+            getattr(self, "request_" + name).emit(request_id, *args)
+        else:
+            getattr(self, name).emit(*args)
+
+    def _stream_chat(self, provider_id, model, messages, options, request_id):
         self.status_changed.emit("generating")
 
         try:
@@ -77,7 +101,7 @@ class ChatWorker(QObject):
                 content = chunk_data.get("content", "") or ""
                 if content:
                     chunks.append(content)
-                    self.chunk_received.emit(content)
+                    self._emit_chat_result("chunk_received", request_id, content)
 
                 if chunk_data.get("done"):
                     full_response = "".join(chunks)
@@ -96,7 +120,7 @@ class ChatWorker(QObject):
                         model,
                         len(full_response),
                     )
-                    self.response_ready.emit(full_response, metrics)
+                    self._emit_chat_result("response_ready", request_id, full_response, metrics)
                     return
 
             full_response = "".join(chunks)
@@ -105,7 +129,8 @@ class ChatWorker(QObject):
                 provider_id,
                 model,
             )
-            self.response_ready.emit(
+            self._emit_chat_result(
+                "response_ready", request_id,
                 full_response,
                 {
                     "eval_count": 0,
@@ -114,13 +139,17 @@ class ChatWorker(QObject):
                 },
             )
         except Exception as error:  # pragma: no cover - threaded guard
+            with QMutexLocker(self._mutex):
+                if self._abort or request_id in self._cancelled_requests:
+                    return
             logger.warning(
                 "Chat worker request failed for %s/%s: %s",
                 provider_id,
                 model,
                 error,
             )
-            self.error_occurred.emit(
+            self._emit_chat_result(
+                "error_occurred", request_id,
                 self._format_error(error, provider_id, model=model)
             )
 
@@ -148,10 +177,12 @@ class ChatWorker(QObject):
             logger.warning("Chat worker failed to list models: %s", error)
             self.error_occurred.emit(self._format_error(error))
 
-    def abort(self):
+    def abort(self, request_id=""):
         """Request cancellation of the current streaming operation."""
         with QMutexLocker(self._mutex):
             self._abort = True
+            if request_id:
+                self._cancelled_requests.add(request_id)
 
     def _ensure_registry(self):
         """Create the provider registry lazily on the worker thread."""
@@ -175,14 +206,12 @@ class ChatWorker(QObject):
 
     def _provider_kind(self, provider_id):
         """Return the provider kind, which decides the suggested remedy."""
-        self._ensure_registry()
-        record = self._registry.describe_provider(provider_id)
+        record = self._provider_record(provider_id)
         return record.get("provider_kind", "") or record.get("provider_id", "")
 
     def _provider_label(self, provider_id):
         """Return one user-facing provider label for errors."""
-        self._ensure_registry()
-        record = self._registry.describe_provider(provider_id)
+        record = self._provider_record(provider_id)
         if record.get("provider_label"):
             return record["provider_label"]
         if provider_id == "openai_compatible":
@@ -191,13 +220,18 @@ class ChatWorker(QObject):
 
     def _provider_endpoint(self, provider_id):
         """Return the configured endpoint for one provider."""
-        self._ensure_registry()
-        record = self._registry.describe_provider(provider_id)
+        record = self._provider_record(provider_id)
         if record.get("endpoint"):
             return record["endpoint"]
         if provider_id == "openai_compatible":
             return self._settings.get("openai_compatible_base_url", "<unset>")
         return self._settings.get("ollama_host", DEFAULT_OLLAMA_HOST)
+
+    def _provider_record(self, provider_id):
+        """Describe without constructing clients while handling a failure."""
+        if self._registry is None:
+            return {}
+        return self._registry.describe_provider(provider_id)
 
 
 # Backward-compatible alias kept for older imports and docs.

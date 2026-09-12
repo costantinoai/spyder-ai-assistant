@@ -14,7 +14,9 @@ Runtime snapshots include:
 
 from __future__ import annotations
 
+import ast
 import copy
+from itertools import islice
 import logging
 import re
 import time
@@ -56,10 +58,10 @@ MAX_RUNTIME_REQUEST_NAMES = 5
 MAX_RUNTIME_REQUEST_TIMEOUT = 2
 # Total wall-clock budget for enriching inspected variables with their live
 # values. Every fetch is a blocking kernel round trip on the GUI thread, so
-# without one shared budget an inspection of N variables could freeze
-# Spyder for N * MAX_RUNTIME_REQUEST_TIMEOUT seconds. One in-flight fetch
-# can still overrun the budget by up to that timeout.
+# without one shared deadline an inspection of N variables could freeze
+# Spyder for N * MAX_RUNTIME_REQUEST_TIMEOUT seconds.
 MAX_RUNTIME_LIVE_VALUE_BUDGET = 3.0
+MAX_RUNTIME_LIVE_VALUE_BYTES = 65_536
 MAX_RUNTIME_SHELLS = 12
 MAX_RUNTIME_EXECUTE_CODE_CHARS = 12_000
 MAX_RUNTIME_EXECUTE_PREVIEW_CHARS = 240
@@ -941,7 +943,7 @@ class RuntimeContextService(QObject):
         # Enriching with live values is one batch under one budget, not one
         # blocking kernel round trip per variable.
         budget_note = ""
-        if source == "live" and found:
+        if source == "live" and found and not namespace_note:
             found, budget_note = self._attach_live_values(shellwidget, found)
 
         error = ""
@@ -1074,13 +1076,13 @@ class RuntimeContextService(QObject):
             )
 
         self._ensure_namespace_settings(shellwidget)
+        deadline = time.monotonic() + MAX_RUNTIME_REQUEST_TIMEOUT
         try:
             kernel_client = shellwidget.call_kernel(
                 blocking=True,
                 timeout=MAX_RUNTIME_REQUEST_TIMEOUT,
             )
             namespace_view = kernel_client.get_namespace_view() or {}
-            var_properties = kernel_client.get_var_properties() or {}
         except Exception as error:
             logger.warning(
                 "Runtime request %s failed to refresh namespace state: %s",
@@ -1096,6 +1098,20 @@ class RuntimeContextService(QObject):
                     str(error),
                 )
             return {}, {}, "cached", "", str(error)
+
+        properties_note = ""
+        try:
+            # Spyder 6's Qt comm timer accepts whole seconds only. Floor
+            # the remaining budget so no call can exceed the deadline.
+            remaining = int(deadline - time.monotonic())
+            if remaining < 1:
+                raise TimeoutError("Namespace query exhausted its time budget.")
+            kernel_client = shellwidget.call_kernel(blocking=True, timeout=remaining)
+            var_properties = kernel_client.get_var_properties() or {}
+        except Exception as error:
+            logger.debug("Runtime properties query failed: %s", error)
+            var_properties = cached_properties
+            properties_note = "Fresh namespace previews with cached variable properties."
 
         snapshot["_namespace_view"] = namespace_view
         snapshot["_var_properties"] = var_properties
@@ -1113,54 +1129,38 @@ class RuntimeContextService(QObject):
             tool,
             snapshot["shell_id"],
         )
-        return namespace_view, var_properties, "live", "", ""
+        return namespace_view, var_properties, "live", properties_note, ""
 
     def _attach_live_values(self, shellwidget, variables):
-        """Enrich inspected variables with live kernel values, under a budget.
+        """Fetch small numeric arrays under shared byte and time budgets.
 
-        Returns ``(variables, note)``. Two things keep this off the list of
-        ways to freeze Spyder: one kernel client is opened for the whole
-        batch rather than one per variable (opening it is itself a blocking
-        round trip), and the fetching stops once
-        MAX_RUNTIME_LIVE_VALUE_BUDGET is spent. Variables that were not
-        reached keep the summary already built from the namespace view, so
-        the answer is less detailed rather than absent.
+        Namespace previews already cover scalar values. Containers, frames,
+        images and object arrays can contain arbitrarily large objects, so
+        inspecting those keeps the kernel's namespace summary.
         """
-        candidates = [
-            index for index, variable in enumerate(variables)
-            if self._wants_live_value(variable)
-        ]
-        if not candidates:
-            return list(variables), ""
-
-        try:
-            kernel_client = shellwidget.call_kernel(
-                blocking=True,
-                timeout=MAX_RUNTIME_REQUEST_TIMEOUT,
-            )
-        except Exception as error:
-            logger.debug(
-                "Runtime inspect could not open a kernel client: %s", error
-            )
-            return list(variables), ""
-
         enriched = list(variables)
         deadline = time.monotonic() + MAX_RUNTIME_LIVE_VALUE_BUDGET
+        remaining_bytes = MAX_RUNTIME_LIVE_VALUE_BYTES
         skipped = 0
-        for position, index in enumerate(candidates):
-            if time.monotonic() >= deadline:
-                skipped = len(candidates) - position
-                logger.info(
-                    "Runtime inspect stopped fetching live values after %.1fs; "
-                    "%d variable(s) keep their namespace summary",
-                    MAX_RUNTIME_LIVE_VALUE_BUDGET,
-                    skipped,
+        for index, variable in enumerate(variables):
+            size = self._live_value_bytes(variable)
+            if size is None or size > remaining_bytes:
+                continue
+            remaining_time = int(deadline - time.monotonic())
+            if remaining_time < 1:
+                skipped += 1
+                continue
+            try:
+                kernel_client = shellwidget.call_kernel(
+                    blocking=True,
+                    timeout=min(MAX_RUNTIME_REQUEST_TIMEOUT, remaining_time),
                 )
-                break
-            enriched[index] = self._with_live_value(
-                kernel_client, enriched[index]
-            )
-
+            except Exception as error:
+                logger.debug("Runtime inspect could not open a kernel client: %s", error)
+                skipped += 1
+                continue
+            remaining_bytes -= size
+            enriched[index] = self._with_live_value(kernel_client, variable)
         note = ""
         if skipped:
             note = (
@@ -1170,26 +1170,35 @@ class RuntimeContextService(QObject):
         return enriched, note
 
     @staticmethod
+    def _live_value_bytes(variable):
+        """Prove a numeric ndarray's transfer size from namespace metadata."""
+        if variable.get("kind") != "array" or variable.get("type") != "ndarray":
+            return None
+        shape = variable.get("shape", "")
+        if not isinstance(shape, str) or len(shape) > 100:
+            return None
+        try:
+            import numpy as np
+            dimensions = ast.literal_eval(shape)
+            dtype = np.dtype(variable.get("dtype") or "object")
+            if (not isinstance(dimensions, tuple) or len(dimensions) > 8
+                    or dtype.kind not in "biufc"):
+                return None
+            count = 1
+            for dimension in dimensions:
+                if type(dimension) is not int or dimension < 0:
+                    return None
+                count *= dimension
+                if count > MAX_RUNTIME_LIVE_VALUE_BYTES:
+                    return None
+            size = count * dtype.itemsize
+            return size if size <= MAX_RUNTIME_LIVE_VALUE_BYTES else None
+        except (TypeError, ValueError, SyntaxError, OverflowError):
+            return None
+
+    @staticmethod
     def _wants_live_value(variable):
-        """Return whether one variable is worth a live kernel round trip.
-
-        Large containers are skipped: their namespace summary already says
-        as much as a fetched copy would, at no cost.
-        """
-        kind = variable.get("kind")
-        if kind not in {
-                "scalar", "list", "tuple", "set", "dict",
-                "array", "image", "dataframe", "series"}:
-            return False
-
-        length = variable.get("length")
-        if kind in {"list", "tuple", "set", "dict"} and length not in ("", None):
-            try:
-                if int(length) > 20:
-                    return False
-            except (TypeError, ValueError):
-                pass
-        return True
+        return RuntimeContextService._live_value_bytes(variable) is not None
 
     @staticmethod
     def _with_live_value(kernel_client, variable):
@@ -1212,6 +1221,10 @@ class RuntimeContextService(QObject):
         if live_summary:
             updated = dict(variable)
             updated.update(live_summary)
+            # The comm serializer can convert ndarrays to plain lists;
+            # inferring their dtype would discard precision (e.g. float32).
+            if variable.get("dtype"):
+                updated["dtype"] = variable["dtype"]
             return updated
         return variable
 
@@ -1354,7 +1367,7 @@ def build_runtime_variable_summaries(namespace_view, var_properties):
         return []
 
     summaries = []
-    for name, info in list(namespace_view.items())[:MAX_RUNTIME_VARIABLES]:
+    for name, info in islice(namespace_view.items(), MAX_RUNTIME_VARIABLES):
         properties = var_properties.get(name, {}) if var_properties else {}
         summaries.append(_build_variable_summary(name, info, properties))
     return summaries
@@ -1491,7 +1504,7 @@ def summarize_runtime_value(value, kind="", fallback_type=""):
     if _is_pandas_dataframe(value):
         shape = getattr(value, "shape", ())
         columns = list(getattr(value, "columns", [])[:6])
-        dtypes_items = list(getattr(value, "dtypes", []).items())[:4]
+        dtypes_items = list(islice(getattr(value, "dtypes", []).items(), 4))
         return {
             "kind": "dataframe",
             "type": fallback_type or type(value).__name__,
@@ -1549,7 +1562,7 @@ def summarize_runtime_value(value, kind="", fallback_type=""):
             "kind": "dict",
             "type": fallback_type or type(value).__name__,
             "length": len(value),
-            "preview": _clip_preview(repr(dict(list(value.items())[:5]))),
+            "preview": _clip_preview(repr(dict(islice(value.items(), 5)))),
         }
 
     if isinstance(value, (list, tuple, set)):
@@ -1648,15 +1661,29 @@ def _build_runtime_console_block(runtime_context):
 
 def _build_variable_summary(name, info, properties):
     preview = _clip_preview(info.get("view", ""))
+    kind = _infer_variable_kind(info, properties)
+    type_name = info.get("type") or info.get("python_type") or "object"
+    dtype = _normalize_dtype(info.get("numpy_type"))
+    # Spyder reports "Array"/"Scalar" as numpy_type, puts the actual dtype
+    # in the human-readable type, and converts tuple shapes to JSON lists.
+    if dtype in {"Array", "Scalar"}:
+        dtype = type_name.removeprefix("Array of ") if type_name.startswith("Array of ") else ""
+    if info.get("python_type") == "NDArray":
+        type_name = "ndarray"
+    shape = properties.get("array_shape")
+    if shape is None and kind in {"array", "dataframe", "series"}:
+        shape = info.get("size") if isinstance(info.get("size"), (list, tuple)) else None
+    if isinstance(shape, list):
+        shape = tuple(shape)
     variable = {
         "name": name,
-        "kind": _infer_variable_kind(info, properties),
-        "type": info.get("type") or info.get("python_type") or "object",
+        "kind": kind,
+        "type": type_name,
         "size": _stringify_metric(info.get("size")),
         "length": properties.get("len"),
-        "shape": _stringify_metric(properties.get("array_shape")),
+        "shape": _stringify_metric(shape),
         "ndim": properties.get("array_ndim"),
-        "dtype": _normalize_dtype(info.get("numpy_type")),
+        "dtype": dtype,
         "preview": preview,
         "columns": "",
         "dtypes": "",
@@ -1688,6 +1715,12 @@ def _infer_variable_kind(info, properties):
         return "set"
 
     python_type = info.get("python_type", "")
+    if python_type in {"NDArray", "MaskedArray", "Matrix", "ndarray"}:
+        return "array"
+    if python_type == "DataFrame":
+        return "dataframe"
+    if python_type == "Series":
+        return "series"
     if python_type == "tuple":
         return "tuple"
     if python_type in SCALAR_PYTHON_TYPES:
@@ -1830,7 +1863,7 @@ def _summarize_live_value(value):
     if isinstance(value, bytes):
         return _clip_preview(repr(value))
     if isinstance(value, dict):
-        items = list(value.items())[:5]
+        items = list(islice(value.items(), 5))
         preview = "{" + ", ".join(
             f"{repr(key)}: {repr(item)}" for key, item in items
         )

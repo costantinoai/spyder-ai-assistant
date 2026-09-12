@@ -37,6 +37,7 @@ n messages on every one of m streaming tokens.
 import logging
 import re
 import time
+from collections import OrderedDict
 
 from qtpy.QtGui import QColor, QTextCursor, QTextFrameFormat
 from qtpy.QtCore import Qt, QTimer, Signal, QSize, QEvent
@@ -189,7 +190,7 @@ class ChatDisplay(QTextEdit):
         self._batch_render = False
         # (language, style, code) -> highlighted HTML or None. See
         # _HIGHLIGHT_CACHE_MAX for why this exists.
-        self._highlight_cache = {}
+        self._highlight_cache = OrderedDict()
         # True while the empty-state guidance occupies the document. It is
         # never part of _html_content; see _render_placeholder.
         self._placeholder_showing = False
@@ -740,6 +741,10 @@ class ChatDisplay(QTextEdit):
         if not self._is_streaming:
             return
 
+        if not self._streaming_buffer.strip():
+            self.discard_assistant_message()
+            return
+
         self._stream_render_timer.stop()
         self._render_messages.append(("streamed", self._streaming_buffer))
         # Parse thinking vs response for the final version
@@ -1217,7 +1222,7 @@ class ChatDisplay(QTextEdit):
         # renders correctly (see lessons.md Qt HTML constraints).
         link_color = self._theme["link_color"]
 
-        def _protect_fenced_block(match, with_actions):
+        def _protect_fenced_block(match, with_actions, complete=True):
             """Replace one fenced code block with a placeholder.
 
             Renders the block to HTML (with Pygments highlighting if a
@@ -1239,7 +1244,7 @@ class ChatDisplay(QTextEdit):
 
             # Syntax-highlight with Pygments if a language is specified.
             # Falls back to plain <pre> for unknown languages or no hint.
-            highlighted = self._highlight_code(raw_code, lang)
+            highlighted = self._highlight_code(raw_code, lang, cache=complete)
 
             block_html = self._code_block_html(lang, code, highlighted)
 
@@ -1284,7 +1289,7 @@ class ChatDisplay(QTextEdit):
         # Same renderer as above, without the Copy/Apply actions.
         text = re.sub(
             r"```(\w+)?\n(.+)$",
-            lambda match: _protect_fenced_block(match, False),
+            lambda match: _protect_fenced_block(match, False, complete=False),
             text,
             flags=re.DOTALL,
         )
@@ -1764,7 +1769,7 @@ class ChatDisplay(QTextEdit):
             return self._is_dark
         return color.lightness() < 128
 
-    def _highlight_code(self, code, language=""):
+    def _highlight_code(self, code, language="", *, cache=True):
         """Syntax-highlight code using Pygments with inline styles.
 
         Uses inline styles (noclasses=True) because QTextEdit does not
@@ -1791,7 +1796,8 @@ class ChatDisplay(QTextEdit):
         style = (self._pygments_style_dark if self._code_card_is_dark()
                  else self._pygments_style_light)
         key = (language, style, code)
-        if key in self._highlight_cache:
+        if cache and key in self._highlight_cache:
+            self._highlight_cache.move_to_end(key)
             return self._highlight_cache[key]
 
         try:
@@ -1813,9 +1819,10 @@ class ChatDisplay(QTextEdit):
             # Cached too, so an unknown language is not retried every render.
             result = None
 
-        if len(self._highlight_cache) >= _HIGHLIGHT_CACHE_MAX:
-            self._highlight_cache.clear()
-        self._highlight_cache[key] = result
+        if cache:
+            self._highlight_cache[key] = result
+            if len(self._highlight_cache) > _HIGHLIGHT_CACHE_MAX:
+                self._highlight_cache.popitem(last=False)
         return result
 
     def _escape_html(self, text):

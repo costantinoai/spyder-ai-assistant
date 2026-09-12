@@ -104,6 +104,13 @@ def describe_provider_failure(
     where = f" at {endpoint}" if endpoint else ""
     is_ollama = provider_kind == PROVIDER_KIND_OLLAMA
 
+    import httpx
+    if isinstance(error, httpx.InvalidURL):
+        return (
+            f"{provider_label} has an invalid endpoint{where}. "
+            "Check the URL scheme, host, and port in the provider settings."
+        )
+
     if _is_connection_failure(error):
         if is_ollama:
             return (

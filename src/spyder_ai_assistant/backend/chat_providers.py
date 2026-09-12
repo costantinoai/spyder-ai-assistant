@@ -118,8 +118,13 @@ class OllamaChatProvider(BaseChatProvider):
 
     def __init__(self, host):
         self._host = host or DEFAULT_OLLAMA_HOST
-        self._client = OllamaClient(host=self._host)
+        self._client = None
         self.endpoint = self._host
+
+    def _get_client(self):
+        if self._client is None:
+            self._client = OllamaClient(host=self._host)
+        return self._client
 
     def is_configured(self):
         """Ollama is always available when a host is configured."""
@@ -139,12 +144,12 @@ class OllamaChatProvider(BaseChatProvider):
                 quantization=model.get("quantization", ""),
                 size_gb=model.get("size_gb", 0.0),
             )
-            for model in self._client.list_models()
+            for model in self._get_client().list_models()
         ]
 
     def chat_stream(self, model, messages, options=None):
         """Proxy Ollama streaming chunks unchanged."""
-        yield from self._client.chat_stream(model, messages, options)
+        yield from self._get_client().chat_stream(model, messages, options)
 
 
 class OpenAICompatibleChatProvider(BaseChatProvider):
@@ -172,7 +177,10 @@ class OpenAICompatibleChatProvider(BaseChatProvider):
         self.endpoint = self._base_url
         self.enabled = bool(enabled)
         self._client = None
-        if self._base_url and self.enabled:
+
+    def _get_client(self):
+        """Construct on use so one invalid profile cannot break the registry."""
+        if self._client is None:
             headers = {}
             if self._api_key:
                 headers["Authorization"] = f"Bearer {self._api_key}"
@@ -181,6 +189,7 @@ class OpenAICompatibleChatProvider(BaseChatProvider):
                 headers=headers,
                 timeout=30.0,
             )
+        return self._client
 
     def is_configured(self):
         """Return True when a compatible endpoint has been configured."""
@@ -191,10 +200,7 @@ class OpenAICompatibleChatProvider(BaseChatProvider):
         if not self.is_configured():
             return []
 
-        if self._client is None:
-            raise RuntimeError("OpenAI-compatible client is not initialized")
-
-        response = self._client.get("/models")
+        response = self._get_client().get("/models")
         response.raise_for_status()
         payload = response.json()
         models = []
@@ -217,8 +223,6 @@ class OpenAICompatibleChatProvider(BaseChatProvider):
         """Stream an OpenAI-compatible `/v1/chat/completions` response."""
         if not self.is_configured():
             raise RuntimeError("OpenAI-compatible provider is not configured")
-        if self._client is None:
-            raise RuntimeError("OpenAI-compatible client is not initialized")
 
         options = dict(options or {})
         payload = {
@@ -232,7 +236,7 @@ class OpenAICompatibleChatProvider(BaseChatProvider):
             payload["max_tokens"] = options["num_predict"]
 
         usage = {}
-        with self._client.stream(
+        with self._get_client().stream(
             "POST",
             "/chat/completions",
             json=payload,
@@ -311,15 +315,14 @@ def probe_compatible_profile(profile):
         result["error"] = "Add a Base URL before testing the connection."
         return result
 
-    provider = OpenAICompatibleChatProvider(
-        base_url=base_url,
-        api_key=profile.get("api_key", ""),
-        profile_id=result["profile_id"],
-        # Probed even when the profile is switched off, so an endpoint can
-        # be checked before it is enabled.
-        enabled=True,
-    )
+    provider = None
     try:
+        provider = OpenAICompatibleChatProvider(
+            base_url=base_url,
+            api_key=profile.get("api_key", ""),
+            profile_id=result["profile_id"],
+            enabled=True,
+        )
         models = provider.list_models()
     except Exception as error:
         result["error"] = describe_provider_failure(
@@ -330,7 +333,8 @@ def probe_compatible_profile(profile):
         )
         return result
     finally:
-        provider.close()
+        if provider is not None:
+            provider.close()
 
     result["ok"] = True
     result["model_count"] = len(models)

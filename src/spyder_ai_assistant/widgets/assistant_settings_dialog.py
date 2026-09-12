@@ -53,8 +53,9 @@ from spyder_ai_assistant.utils.assistant_settings import (
     NATIVE_POPUP_POLICY_LABELS,
     AssistantSettings,
 )
-from spyder_ai_assistant.utils.chat_inference import normalize_chat_temperature
+from spyder_ai_assistant.utils.chat_inference import decode_chat_temperature_conf
 from spyder_ai_assistant.utils.constants import DEFAULT_OLLAMA_HOST
+from spyder_ai_assistant.utils.provider_profiles import describe_http_url_problem
 from spyder_ai_assistant.utils.chat_themes import (
     EXPOSED_COLOR_KEYS,
     get_preset_names,
@@ -812,14 +813,7 @@ class AssistantSettingsDialog(QDialog):
         warning; anything else must carry a scheme and a host.
         """
         text = self.ollama_host_edit.text().strip()
-        if not text:
-            problem = ""
-        elif not text.startswith(("http://", "https://")):
-            problem = "Include the scheme, for example http://localhost:11434"
-        elif not text.split("//", 1)[1].strip(" /"):
-            problem = "Add the host, for example http://localhost:11434"
-        else:
-            problem = ""
+        problem = describe_http_url_problem(text, "http://localhost:11434")
         self.ollama_host_note_label.setText(problem)
         self.ollama_host_note_label.setVisible(bool(problem))
 
@@ -980,7 +974,7 @@ class AssistantSettingsDialog(QDialog):
         self.mcp_host_edit.setText(settings["mcp_host"])
         self.mcp_port_spin.setValue(settings["mcp_port"])
         self.chat_temperature_spin.setValue(
-            normalize_chat_temperature(settings["chat_temperature"])
+            decode_chat_temperature_conf(settings["chat_temperature"])
         )
         self.chat_max_tokens_spin.setValue(settings["max_tokens"])
         self.completions_enabled_checkbox.setChecked(settings["completions_enabled"])

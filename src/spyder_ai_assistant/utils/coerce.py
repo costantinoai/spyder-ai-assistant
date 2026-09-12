@@ -22,7 +22,7 @@ def bounded_int(value, default, minimum=None, maximum=None):
     """
     try:
         number = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         number = int(default)
 
     if minimum is not None:

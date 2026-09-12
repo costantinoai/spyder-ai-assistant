@@ -24,15 +24,22 @@ Nothing here writes to disk or to git.
 from __future__ import annotations
 
 import fnmatch
+import json
 import logging
 import os
 import re
 import subprocess
+import sys
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from spyder_ai_assistant.utils.coerce import bounded_int
-from spyder_ai_assistant.utils.context import SKIP_DIRS
+from spyder_ai_assistant.utils.bounded_process import run_bounded_command
+from spyder_ai_assistant.utils.project_files import (
+    SKIP_DIRS, MAX_WALK_ENTRIES, WalkBudget, resolve_project_path,
+    walk_project_files,
+)
 from spyder_ai_assistant.utils.tool_protocol import (
     PROJECT_TOOL_NAMES,  # noqa: F401 -- re-exported for existing importers
     is_project_tool,
@@ -56,6 +63,9 @@ MAX_FILE_BYTES = 2_000_000
 MAX_LIST_ENTRIES = 300
 MAX_SEARCH_RESULTS = 50
 MAX_SEARCH_FILES = 2_000
+MAX_SEARCH_BYTES = 256_000_000
+MAX_SEARCH_PATTERN_CHARS = 2_000
+SEARCH_TIMEOUT_S = 3.0
 MAX_GIT_CHARS = 20_000
 MAX_GIT_LOG_COUNT = 50
 GIT_TIMEOUT_S = 8
@@ -244,15 +254,7 @@ class ProjectToolsService:
         Raises ``ValueError`` for anything that escapes the root, including
         absolute paths elsewhere, ``..`` segments and symlinks pointing out.
         """
-        candidate = str(relative or "").strip()
-        joined = candidate if os.path.isabs(candidate) else os.path.join(root, candidate)
-        resolved = os.path.realpath(joined)
-        if resolved != root and not resolved.startswith(root + os.sep):
-            raise ValueError(
-                f"Path {candidate!r} is outside the project root; only files "
-                "under the project can be accessed."
-            )
-        return resolved
+        return resolve_project_path(root, relative)
 
     @staticmethod
     def _is_skipped_dir(name):
@@ -264,15 +266,9 @@ class ProjectToolsService:
             chunk = handle.read(_BINARY_SNIFF_BYTES)
         return b"\x00" in chunk
 
-    def _walk(self, root, start):
+    def _walk(self, root, start, budget=None):
         """Yield (relative_path, absolute_path) for files under ``start``."""
-        for dirpath, dirnames, filenames in os.walk(start):
-            dirnames[:] = sorted(
-                name for name in dirnames if not self._is_skipped_dir(name)
-            )
-            for filename in sorted(filenames):
-                absolute = os.path.join(dirpath, filename)
-                yield os.path.relpath(absolute, root), absolute
+        yield from walk_project_files(root, start, budget or WalkBudget())
 
     # --- handlers ----------------------------------------------------------
 
@@ -285,13 +281,15 @@ class ProjectToolsService:
         pattern = str(args.get("glob", "") or "").strip()
         files = []
         truncated = False
-        for relative, _absolute in self._walk(root, subdir):
+        budget = WalkBudget(max_entries=MAX_WALK_ENTRIES)
+        for relative, _absolute in self._walk(root, subdir, budget):
             if pattern and not fnmatch.fnmatch(relative, pattern):
                 continue
             if len(files) >= limit:
                 truncated = True
                 break
             files.append(relative)
+        truncated = truncated or bool(budget.reason)
         note = f"{len(files)} file(s)" + (" (truncated)" if truncated else "")
         return {"files": files, "truncated": truncated}, note
 
@@ -311,8 +309,11 @@ class ProjectToolsService:
             )
         if self._looks_binary(absolute):
             raise ValueError(f"{relative} looks like a binary file.")
-        with open(absolute, "r", encoding="utf-8", errors="replace") as handle:
-            lines = handle.read().splitlines()
+        with open(absolute, "rb") as handle:
+            data = handle.read(MAX_FILE_BYTES + 1)
+        if len(data) > MAX_FILE_BYTES:
+            raise ValueError(f"{relative} exceeds {MAX_FILE_BYTES} bytes; it is not read.")
+        lines = data.decode("utf-8", errors="replace").splitlines()
         total_lines = len(lines)
         start = bounded_int(args.get("start_line"), 1, 1, max(total_lines, 1))
         end = bounded_int(args.get("end_line"), total_lines, 1, max(total_lines, 1))
@@ -337,10 +338,64 @@ class ProjectToolsService:
         }, note
 
     def _search(self, root, args):
+        """Search in a process so regex and I/O can be stopped independently."""
+        request = {
+            "root": root, "args": args,
+            "limits": {
+                "max_files": MAX_SEARCH_FILES, "max_bytes": MAX_SEARCH_BYTES,
+                "max_entries": MAX_WALK_ENTRIES, "timeout_s": SEARCH_TIMEOUT_S,
+            },
+        }
+        timed_out = False
+        environment = dict(os.environ)
+        package_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        environment["PYTHONPATH"] = os.pathsep.join(filter(None, (
+            os.path.abspath(package_root), environment.get("PYTHONPATH", ""),
+        )))
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-m", "spyder_ai_assistant.utils.project_search"],
+                input=json.dumps(request), capture_output=True, text=True,
+                encoding="utf-8", timeout=SEARCH_TIMEOUT_S, check=False,
+                env=environment,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            output = completed.stdout
+            if completed.returncode:
+                logger.debug("Project search process failed: %s", completed.stderr[-2000:])
+                raise ValueError("The project search process failed.")
+        except subprocess.TimeoutExpired as error:
+            output = error.stdout or b""
+            timed_out = True
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        matches = []
+        for line in output.splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue  # A final record may have been interrupted by timeout.
+            if "error" in record:
+                raise ValueError(record["error"])
+            if "match" in record:
+                matches.append(record["match"])
+            if "payload" in record:
+                return record["payload"], record["note"]
+        if not timed_out:
+            raise ValueError("The project search process returned no result.")
+        return {"matches": matches, "truncated": True}, (
+            f"{len(matches)} match(es); search stopped after {SEARCH_TIMEOUT_S:g}s (truncated)"
+        )
+
+    def _search_files(self, root, args, *, on_match=None, max_files=MAX_SEARCH_FILES,
+                      max_bytes=MAX_SEARCH_BYTES, max_entries=MAX_WALK_ENTRIES,
+                      timeout_s=SEARCH_TIMEOUT_S):
         """Search project text files for a pattern (regex, case-insensitive)."""
         pattern = str(args.get("pattern", "") or "")
         if not pattern.strip():
             raise ValueError(f"{TOOL_PROJECT_SEARCH} needs a 'pattern' argument.")
+        if len(pattern) > MAX_SEARCH_PATTERN_CHARS:
+            raise ValueError(f"Search patterns are limited to {MAX_SEARCH_PATTERN_CHARS} characters.")
         try:
             regex = re.compile(pattern, re.IGNORECASE)
         except re.error as error:
@@ -349,32 +404,51 @@ class ProjectToolsService:
         limit = bounded_int(args.get("max_results"), MAX_SEARCH_RESULTS, 1, MAX_SEARCH_RESULTS)
         matches = []
         scanned = 0
+        used_bytes = 0
         truncated = False
-        for relative, absolute in self._walk(root, root):
+        budget = WalkBudget(max_entries=max_entries, timeout_s=timeout_s)
+        for relative, absolute in self._walk(root, root, budget):
             if file_glob and not fnmatch.fnmatch(relative, file_glob):
                 continue
-            scanned += 1
-            if scanned > MAX_SEARCH_FILES:
+            if scanned >= max_files or used_bytes >= max_bytes:
                 truncated = True
                 break
+            scanned += 1
             try:
-                if os.path.getsize(absolute) > MAX_FILE_BYTES or self._looks_binary(absolute):
+                if os.path.getsize(absolute) > MAX_FILE_BYTES:
                     continue
-                with open(absolute, "r", encoding="utf-8", errors="replace") as handle:
-                    for number, line in enumerate(handle, start=1):
-                        if regex.search(line):
-                            matches.append({
-                                "path": relative,
-                                "line": number,
-                                "text": line.rstrip("\n")[:300],
-                            })
-                            if len(matches) >= limit:
-                                truncated = True
-                                break
+                allowance = min(MAX_FILE_BYTES, max_bytes - used_bytes)
+                with open(absolute, "rb") as handle:
+                    data = handle.read(allowance + 1)
+                used_bytes += min(len(data), allowance)
+                if len(data) > allowance:
+                    truncated = True
+                    if allowance == MAX_FILE_BYTES:
+                        continue  # The file grew past the file-size limit.
+                data = data[:allowance]
+                if b"\x00" in data[:_BINARY_SNIFF_BYTES]:
+                    continue
+                for number, line in enumerate(data.decode("utf-8", errors="replace").splitlines(), start=1):
+                    if time.monotonic() >= budget.deadline:
+                        budget.reason = "time budget"
+                        break
+                    if regex.search(line):
+                        match = {
+                            "path": relative,
+                            "line": number,
+                            "text": line[:300],
+                        }
+                        matches.append(match)
+                        if on_match is not None:
+                            on_match(match)
+                        if len(matches) >= limit:
+                            truncated = True
+                            break
             except OSError:
                 continue
-            if len(matches) >= limit:
+            if len(matches) >= limit or budget.reason:
                 break
+        truncated = truncated or bool(budget.reason)
         note = f"{len(matches)} match(es) in {scanned} file(s)"
         if truncated:
             note += " (truncated)"
@@ -382,21 +456,18 @@ class ProjectToolsService:
 
     def _git_status(self, root, args):
         del args
-        output = self._run_git(root, ["status", "--short", "--branch"])
-        return {"status": output}, "git status"
+        output, truncated = self._run_git(root, ["status", "--short", "--branch"])
+        return {"status": output, "truncated": truncated}, "git status" + (" (truncated)" if truncated else "")
 
     def _git_diff(self, root, args):
-        command = ["diff", "--no-color"]
+        command = ["diff", "--no-color", "--no-ext-diff", "--no-textconv"]
         if bool(args.get("staged", False)):
             command.append("--cached")
         path = str(args.get("path", "") or "").strip()
         if path:
             command.extend(["--", os.path.relpath(self._resolve_path(root, path), root)])
         max_chars = bounded_int(args.get("max_chars"), MAX_GIT_CHARS, 1, MAX_GIT_CHARS)
-        output = self._run_git(root, command)
-        truncated = len(output) > max_chars
-        if truncated:
-            output = output[:max_chars]
+        output, truncated = self._run_git(root, command, max_chars=max_chars)
         note = "git diff" + (" (staged)" if "--cached" in command else "")
         if truncated:
             note += f", truncated to {max_chars} chars"
@@ -409,29 +480,28 @@ class ProjectToolsService:
         path = str(args.get("path", "") or "").strip()
         if path:
             command.extend(["--", os.path.relpath(self._resolve_path(root, path), root)])
-        output = self._run_git(root, command)
-        return {"log": output or "(no commits)"}, f"git log, last {count}"
+        output, truncated = self._run_git(root, command)
+        return {"log": output or "(no commits)", "truncated": truncated}, f"git log, last {count}" + (" (truncated)" if truncated else "")
 
     @staticmethod
-    def _run_git(root, arguments):
+    def _run_git(root, arguments, *, max_chars=MAX_GIT_CHARS):
         """Run one read-only git command in ``root`` and return its stdout."""
         try:
-            completed = subprocess.run(
-                ["git", "-C", root, *arguments],
-                capture_output=True,
-                text=True,
-                timeout=GIT_TIMEOUT_S,
-                check=False,
+            environment = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
+            code, data, byte_limited = run_bounded_command(
+                ["git", "--no-pager", "-c", "core.fsmonitor=false", "-C", root, *arguments],
+                max_bytes=(max_chars + 1) * 4, timeout=GIT_TIMEOUT_S,
+                env=environment,
             )
         except FileNotFoundError as error:
             raise ValueError("git is not installed or not on PATH.") from error
         except subprocess.TimeoutExpired as error:
             raise ValueError(f"git timed out after {GIT_TIMEOUT_S}s.") from error
-        if completed.returncode != 0:
-            message = (completed.stderr or completed.stdout or "").strip()
+        output = data.decode("utf-8", errors="replace").rstrip("\n")
+        truncated = byte_limited or len(output) > max_chars
+        if code != 0 and not byte_limited:
+            message = output.strip()
             if "not a git repository" in message.lower():
                 raise ValueError("The project root is not a git repository.")
-            raise ValueError(f"git failed: {message or completed.returncode}")
-        return completed.stdout.rstrip("\n")
-
-
+            raise ValueError(f"git failed: {message[:max_chars] or code}")
+        return output[:max_chars], truncated

@@ -163,6 +163,7 @@ class _QueuedCompletionRequest:
     req_id: int
     target: "_CompletionTarget"
     alternative: bool = False
+    manual: bool = False
 
 
 @dataclass(frozen=True)
@@ -330,18 +331,18 @@ class _LatestOnlyCompletionQueue:
         if self._active_req_id == req_id:
             self._active_req_id = None
 
-    def clear_pending(self):
+    def clear_pending(self, *, automatic_only=False):
         """Drop debounced and queued requests.
 
         Returns:
             List of request ids that should be answered immediately.
         """
         dropped_ids = []
-        for request in (self._debounced, self._queued):
-            if request is not None:
+        for attribute in ("_debounced", "_queued"):
+            request = getattr(self, attribute)
+            if request is not None and not (automatic_only and request.manual):
                 dropped_ids.append(request.req_id)
-        self._debounced = None
-        self._queued = None
+                setattr(self, attribute, None)
         return dropped_ids
 
 
@@ -1069,9 +1070,9 @@ class CompletionWorker(QObject):
     sig_perform_completion = Signal(int, str, str, str, dict)
     sig_update_backend_settings = Signal(dict)
     # sig_warm_up(backend settings incl. "model") — load the model off the
-    # main thread; sig_warm_up_done(model, ok, detail) reports the outcome.
+    # main thread; sig_warm_up_done(settings, ok, detail) reports the outcome.
     sig_warm_up = Signal(dict)
-    sig_warm_up_done = Signal(str, bool, str)
+    sig_warm_up_done = Signal(dict, bool, str)
     # Output signals: consumed by the provider on the main thread
     # sig_completion_ready(req_id, completion_text, suffix) — text for ghost display
     sig_completion_ready = Signal(int, str, str)
@@ -1243,7 +1244,7 @@ class CompletionWorker(QObject):
         model = str(settings.get("model", "") or "")
         provider_kind = str(settings.get("provider_kind", PROVIDER_KIND_OLLAMA))
         if not model or provider_kind != PROVIDER_KIND_OLLAMA:
-            self.sig_warm_up_done.emit(model, True, "warm-up not needed")
+            self.sig_warm_up_done.emit(settings, True, "warm-up not needed")
             return
         try:
             client = self._get_client(
@@ -1254,9 +1255,9 @@ class CompletionWorker(QObject):
             elapsed = client.warm_up(model)
         except Exception as error:
             logger.warning("AI completion model warm-up failed for %s: %s", model, error)
-            self.sig_warm_up_done.emit(model, False, str(error))
+            self.sig_warm_up_done.emit(settings, False, str(error))
             return
-        self.sig_warm_up_done.emit(model, True, f"loaded in {elapsed:.1f}s")
+        self.sig_warm_up_done.emit(settings, True, f"loaded in {elapsed:.1f}s")
 
     @Slot(dict)
     def _handle_update_backend_settings(self, settings):
@@ -1387,6 +1388,9 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._req_cache_keys = {}
         self._req_cycle_keys = {}
         self._req_related_terms = {}
+        self._req_manual = {}
+        self._req_revisions = {}
+        self._backend_revision = 0
         self._completion_cache = _CompletionCache()
         self._candidate_store = _CompletionCandidateStore()
         self._shown_candidates = {}
@@ -1439,6 +1443,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         # Model currently being loaded, or "" when idle. Late results for a
         # model the user already switched away from are ignored.
         self._warming_model = ""
+        self._warming_request = None
         self._last_warm_up_detail = ""
         # Runtime-only replacement when the configured completion model is
         # not installed but the chat model is (never written to config).
@@ -1517,6 +1522,8 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._document_states.clear()
         self._latest_target_by_filename.clear()
         self._req_targets.clear()
+        self._req_manual.clear()
+        self._req_revisions.clear()
         self._req_cache_keys.clear()
         self._req_cycle_keys.clear()
         self._req_related_terms.clear()
@@ -1734,6 +1741,11 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             self._emit_empty_response(req_id)
             return
 
+        manual = req.get("_ai_request_origin", "manual") == "manual"
+        if self.get_conf("completion_manual_only", False) and not manual:
+            self._emit_empty_response(req_id)
+            return
+
         if self._try_cycle_visible_candidate(target, req_id):
             return
 
@@ -1746,6 +1758,7 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             req_id=req_id,
             target=target,
             alternative=alternative,
+            manual=manual,
         )
 
         self._debounce_timer.stop()
@@ -1861,6 +1874,12 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         req = request.req
         req_id = request.req_id
         target = request.target
+        if (
+            not self.get_conf("completions_enabled")
+            or self.get_conf("completion_manual_only", False) and not request.manual
+        ):
+            self._emit_empty_response(req_id)
+            return
 
         # Extract file content and cursor position
         filename = target.filename
@@ -1981,6 +2000,8 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._req_related_terms[req_id] = tuple(
             extract_completion_terms(prefix, current_word=target.current_word)
         )
+        self._req_manual[req_id] = request.manual
+        self._req_revisions[req_id] = self._backend_revision
 
         cached_completion = self._completion_cache.get(cache_key)
         if cached_completion is not _CompletionCache._MISSING:
@@ -2056,6 +2077,18 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         logger.warning("AI completion error for req_id=%d: %s", req_id, error_msg)
         self._increment_metric("errors")
         self._emit_empty_response(req_id)
+        target = self._req_targets.pop(req_id, None)
+        self._req_cache_keys.pop(req_id, None)
+        self._req_cycle_keys.pop(req_id, None)
+        self._req_related_terms.pop(req_id, None)
+        manual = self._req_manual.pop(req_id, False)
+        revision = self._req_revisions.pop(req_id, None)
+        if (
+            revision != self._backend_revision or target is None
+            or self.get_conf("completion_manual_only", False) and not manual
+        ):
+            self._finish_request(req_id)
+            return
         restore_ready = True
         if self._looks_offline(error_msg):
             self._increment_metric("offline_errors")
@@ -2063,10 +2096,6 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
             restore_ready = False
         else:
             self._set_ready_status()
-        self._req_targets.pop(req_id, None)
-        self._req_cache_keys.pop(req_id, None)
-        self._req_cycle_keys.pop(req_id, None)
-        self._req_related_terms.pop(req_id, None)
         self._finish_request(req_id, restore_ready=restore_ready)
 
     # --- Status bar helper ---
@@ -2124,7 +2153,10 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._last_warm_up_detail = ""
         self._update_status(f"AI: loading {_short_completion_model_label(model)}…")
         logger.info("Requesting AI completion model warm-up for %s", model)
-        self._worker.sig_warm_up.emit({**backend_settings, "model": model})
+        self._warming_request = {
+            **backend_settings, "model": model, "revision": self._backend_revision,
+        }
+        self._worker.sig_warm_up.emit(dict(self._warming_request))
 
     def _pick_fallback_model(self, failed_model, detail):
         """Fall back to the chat model when the configured one is missing.
@@ -2154,19 +2186,21 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         self._request_model_warm_up()
         return True
 
-    def _on_warm_up_done(self, model, ok, detail):
+    def _on_warm_up_done(self, request, ok, detail):
         """Return to the ready status once the expected model is loaded."""
-        if model != self._warming_model:
+        model = request.get("model", "")
+        if request != self._warming_request:
             logger.info("Ignoring stale warm-up result for %s (%s)", model, detail)
             return
         self._warming_model = ""
+        self._warming_request = None
         self._last_warm_up_detail = "" if ok else detail
         self._warmed_signature = None
         if not ok and self._pick_fallback_model(model, detail):
             return
         if ok:
             self._warmed_signature = (
-                self._resolve_completion_backend_settings().get("endpoint", ""),
+                request.get("endpoint", ""),
                 model,
             )
             self._increment_metric("warm_ups")
@@ -2231,6 +2265,10 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
     def _on_completion_backend_changed(self):
         """Refresh worker-owned completion backend settings and caches."""
         backend_settings = self._resolve_completion_backend_settings()
+        self._invalidate_backend_requests()
+        self._model_fallback = ""
+        self._last_warm_up_detail = ""
+        self._warmed_signature = None
         logger.info(
             "Refreshing AI completion backend: provider=%s endpoint=%s profile_id=%s",
             backend_settings.get("provider_kind", "-"),
@@ -2347,9 +2385,11 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         "use the chat model" and must keep following the chat model.
         """
         self._model_fallback = ""
+        self._invalidate_backend_requests()
         self._last_warm_up_detail = ""
         self._completion_cache.clear()
         self._candidate_store.clear()
+        self._shown_candidates.clear()
         if self.get_conf("completions_enabled"):
             self._set_ready_status()
             self._request_model_warm_up()
@@ -2357,10 +2397,16 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
     @on_conf_change(option="chat_model")
     def on_chat_model_changed(self, _value):
         """The chat model backs completions when no completion model is set."""
+        following_chat = bool(self._model_fallback) or str(
+            self.get_conf("completion_model") or ""
+        ).strip() in _GENERIC_COMPLETION_MODEL_NAMES
         self._model_fallback = ""
-        if str(self.get_conf("completion_model") or "").strip() in _GENERIC_COMPLETION_MODEL_NAMES:
+        if following_chat:
+            self._invalidate_backend_requests()
+            self._last_warm_up_detail = ""
             self._completion_cache.clear()
             self._candidate_store.clear()
+            self._shown_candidates.clear()
             if self.get_conf("completions_enabled"):
                 self._set_ready_status()
                 self._request_model_warm_up()
@@ -2370,12 +2416,38 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         """Drop cached completions when the generation temperature changes."""
         self._completion_cache.clear()
         self._candidate_store.clear()
+        self._shown_candidates.clear()
+        self._invalidate_backend_requests(warm_up=False)
 
     @on_conf_change(option="completion_max_tokens")
     def on_completion_max_tokens_changed(self, _value):
         """Drop cached completions when the completion budget changes."""
         self._completion_cache.clear()
         self._candidate_store.clear()
+        self._shown_candidates.clear()
+        self._invalidate_backend_requests(warm_up=False)
+
+    def _invalidate_backend_requests(self, *, warm_up=True):
+        """Keep late completion and warm-up results on their original backend."""
+        self._backend_revision += 1
+        if warm_up:
+            self._warming_request = None
+            self._warming_model = ""
+        self._debounce_timer.stop()
+        for req_id in self._request_queue.clear_pending():
+            self._emit_empty_response(req_id)
+
+    @on_conf_change(option="completion_manual_only")
+    def on_manual_only_changed(self, value):
+        """Drop automatic pending work while keeping explicit requests alive."""
+        if not value:
+            return
+        self._debounce_timer.stop()
+        for req_id in self._request_queue.clear_pending(automatic_only=True):
+            self._emit_empty_response(req_id)
+        for req_id, manual in list(self._req_manual.items()):
+            if not manual:
+                self._req_targets.pop(req_id, None)
 
     @on_conf_change(option="completions_enabled")
     def on_enabled_changed(self, value):
@@ -2577,6 +2649,14 @@ class AIChatCompletionProvider(SpyderCompletionProvider):
         cache_key = self._req_cache_keys.pop(req_id, None)
         cycle_key = self._req_cycle_keys.pop(req_id, None)
         related_terms = self._req_related_terms.pop(req_id, ())
+        manual = self._req_manual.pop(req_id, False)
+        revision = self._req_revisions.pop(req_id, None)
+        if (
+            revision != self._backend_revision
+            or self.get_conf("completion_manual_only", False) and not manual
+        ):
+            self._finish_request(req_id)
+            return
         if target is None:
             logger.info(
                 "Dropping AI completion result req_id=%d from %s because request metadata is gone",

@@ -20,7 +20,7 @@ from spyder_ai_assistant.utils.chat_inference import (
     MIN_CHAT_MAX_TOKENS,
     MIN_CHAT_TEMPERATURE,
     normalize_chat_max_tokens,
-    normalize_chat_temperature,
+    decode_chat_temperature_conf,
 )
 from spyder_ai_assistant.utils.provider_profiles import (
     PROVIDER_KIND_OLLAMA,
@@ -219,6 +219,9 @@ COMPLETION_PROVIDER_CONF_DEFAULTS = [
     ("project_tools_enabled", ASSISTANT_CONF_DEFAULTS["project_tools_enabled"]),
     ("debounce_ms", ASSISTANT_CONF_DEFAULTS["debounce_ms"]),
 ]
+COMPLETION_PROVIDER_OPTION_KEYS = tuple(
+    key for key, _default in COMPLETION_PROVIDER_CONF_DEFAULTS
+)
 
 ASSISTANT_APPEARANCE_KEYS = (
     "chat_font_family",
@@ -275,7 +278,7 @@ def _normalize_float(value, default, minimum=None, maximum=None, precision=2):
 
 def _normalize_chat_temperature_conf(value):
     """Return the canonical stored config representation for chat temperature."""
-    return int(round(normalize_chat_temperature(value) * 10))
+    return int(round(decode_chat_temperature_conf(value) * 10))
 
 
 def _normalize_provider_profiles_value(raw_profiles):
@@ -595,12 +598,12 @@ class AssistantSettings:
 
     def chat_temperature_display_value(self):
         """Return the current chat temperature as a UI-friendly float."""
-        return normalize_chat_temperature(self.chat_temperature)
+        return decode_chat_temperature_conf(self.chat_temperature)
 
     def chat_default_options(self):
         """Return the normalized default chat request options."""
         return {
-            "temperature": normalize_chat_temperature(self.chat_temperature),
+            "temperature": self.chat_temperature_display_value(),
             "num_predict": normalize_chat_max_tokens(self.max_tokens),
         }
 
@@ -616,20 +619,7 @@ class AssistantSettings:
     def completion_provider_settings(self):
         """Return the completion-provider settings snapshot."""
         return {
-            "ollama_host": self.ollama_host,
-            "chat_provider": self.chat_provider,
-            "chat_model": self.chat_model,
-            "chat_provider_profile_id": self.chat_provider_profile_id,
-            "provider_profiles": self.provider_profiles,
-            "openai_compatible_base_url": self.openai_compatible_base_url,
-            "openai_compatible_api_key": self.openai_compatible_api_key,
-            "completion_model": self.completion_model,
-            "completion_temperature": self.completion_temperature,
-            "completion_max_tokens": self.completion_max_tokens,
-            "completions_enabled": self.completions_enabled,
-            "completion_manual_only": self.completion_manual_only,
-            "project_tools_enabled": self.project_tools_enabled,
-            "debounce_ms": self.debounce_ms,
+            key: getattr(self, key) for key in COMPLETION_PROVIDER_OPTION_KEYS
         }
 
     def mcp_server_config(self):
@@ -639,3 +629,6 @@ class AssistantSettings:
             "host": self.mcp_host,
             "port": self.mcp_port,
         }
+
+
+CHAT_BACKEND_OPTION_KEYS = tuple(AssistantSettings().chat_provider_settings())

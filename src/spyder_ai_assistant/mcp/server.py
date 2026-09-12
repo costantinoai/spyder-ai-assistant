@@ -6,8 +6,8 @@ import asyncio
 import contextlib
 import logging
 import threading
+from functools import partial, wraps
 from typing import Any
-
 
 try:
     import uvicorn
@@ -18,6 +18,7 @@ else:  # pragma: no cover - import guard
     _UVICORN_IMPORT_ERROR = None
 
 try:
+    import anyio
     from mcp.server.fastmcp import FastMCP
 except Exception as error:  # pragma: no cover - import guard
     FastMCP = None
@@ -135,8 +136,8 @@ class SpyderMCPServer:
         """Return the last startup or dependency error, if any."""
         return self._last_error
 
-    def start(self):
-        """Start the background HTTP MCP server."""
+    def start(self, *, block=True):
+        """Start HTTP serving; GUI callers can return before it is ready."""
         if self.is_running():
             return True
         if self._thread is not None and self._thread.is_alive():
@@ -169,6 +170,8 @@ class SpyderMCPServer:
             daemon=True,
         )
         self._thread.start()
+        if not block:
+            return True
         self._startup_complete.wait(timeout=SERVER_START_TIMEOUT_SECS)
 
         if self._startup_error is not None:
@@ -192,7 +195,6 @@ class SpyderMCPServer:
             return False
 
         self._last_error = ""
-        logger.info("Spyder MCP server listening on %s", self.endpoint_url)
         return True
 
     def stop(self, block=True):
@@ -269,6 +271,7 @@ class SpyderMCPServer:
             asyncio.run(self._serve())
         except (Exception, SystemExit) as error:
             self._startup_error = error
+            self._last_error = str(error)
             logger.exception("Spyder MCP server crashed during startup")
         finally:
             self._startup_complete.set()
@@ -295,20 +298,36 @@ class SpyderMCPServer:
         startup_task = asyncio.create_task(self._watch_startup(server))
         try:
             await server.serve()
-            if not getattr(server, "started", False) and self._startup_error is None:
+            if (not getattr(server, "started", False)
+                    and self._startup_error is None
+                    and not self._stop_requested.is_set()):
                 self._startup_error = RuntimeError(
                     "Uvicorn exited before the MCP server became ready."
                 )
+                self._last_error = str(self._startup_error)
+                logger.warning("MCP server failed to start: %s", self._last_error)
         finally:
             startup_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await startup_task
 
     async def _watch_startup(self, server):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + SERVER_START_TIMEOUT_SECS
         while not getattr(server, "started", False):
             if getattr(server, "should_exit", False):
                 break
+            if loop.time() >= deadline:
+                self._startup_error = RuntimeError(
+                    f"The MCP server did not finish startup on {self.endpoint_url}."
+                )
+                self._last_error = str(self._startup_error)
+                server.should_exit = True
+                logger.warning("%s", self._last_error)
+                break
             await asyncio.sleep(0.05)
+        if getattr(server, "started", False) and not self._stop_requested.is_set():
+            logger.info("Spyder MCP server listening on %s", self.endpoint_url)
         self._startup_complete.set()
 
     def _build_fastmcp(self):
@@ -328,22 +347,33 @@ class SpyderMCPServer:
             )
         self._configure_fastmcp_settings(mcp)
 
-        @mcp.tool()
+        limiter = anyio.CapacityLimiter(4)
+
+        def tool(function):
+            """Keep blocking bridge/I/O work off the transport event loop."""
+            @wraps(function)
+            async def run(**kwargs):
+                return await anyio.to_thread.run_sync(
+                    partial(function, **kwargs), limiter=limiter,
+                )
+            return mcp.tool()(run)
+
+        @tool
         def get_current_file() -> dict[str, Any]:
             """Get the active Spyder editor file, full content, cursor, and selection."""
             return self._bridge.get_current_file()
 
-        @mcp.tool()
+        @tool
         def get_open_files() -> list[dict[str, Any]]:
             """Get summaries of the other files currently open in Spyder."""
             return self._bridge.get_open_files()
 
-        @mcp.tool()
+        @tool
         def get_project_tree() -> dict[str, Any]:
             """Get the active Spyder project root and a bounded file-tree listing."""
             return self._bridge.get_project_tree()
 
-        @mcp.tool()
+        @tool
         def list_project_files(subdir: str = "", glob: str = "",
                                max_entries: int = 300) -> dict[str, Any]:
             """List files under the Spyder project root (bounded, skips caches/VCS dirs)."""
@@ -351,7 +381,7 @@ class SpyderMCPServer:
                 TOOL_PROJECT_LIST_FILES, subdir=subdir, glob=glob, max_entries=max_entries,
             ))
 
-        @mcp.tool()
+        @tool
         def read_project_file(path: str, start_line: int = 1, end_line: int = 0,
                               max_chars: int = 20000) -> dict[str, Any]:
             """Read one text file under the Spyder project root (relative path, optional line range)."""
@@ -362,7 +392,7 @@ class SpyderMCPServer:
                 self._bridge.execute_project_request(TOOL_PROJECT_READ_FILE, **args)
             )
 
-        @mcp.tool()
+        @tool
         def search_project(pattern: str, glob: str = "",
                            max_results: int = 50) -> dict[str, Any]:
             """Regex-search text files under the Spyder project root."""
@@ -370,14 +400,14 @@ class SpyderMCPServer:
                 TOOL_PROJECT_SEARCH, pattern=pattern, glob=glob, max_results=max_results,
             ))
 
-        @mcp.tool()
+        @tool
         def git_status() -> dict[str, Any]:
             """Short git status (with branch) of the Spyder project."""
             return self._normalize_runtime_result(
                 self._bridge.execute_project_request(TOOL_GIT_STATUS)
             )
 
-        @mcp.tool()
+        @tool
         def git_diff(path: str = "", staged: bool = False,
                      max_chars: int = 20000) -> dict[str, Any]:
             """Uncommitted (or staged) git diff of the Spyder project, optionally for one path."""
@@ -385,20 +415,20 @@ class SpyderMCPServer:
                 TOOL_GIT_DIFF, path=path, staged=staged, max_chars=max_chars,
             ))
 
-        @mcp.tool()
+        @tool
         def git_log(max_count: int = 10, path: str = "") -> dict[str, Any]:
             """Recent git commits of the Spyder project, optionally for one path."""
             return self._normalize_runtime_result(self._bridge.execute_project_request(
                 TOOL_GIT_LOG, max_count=max_count, path=path,
             ))
 
-        @mcp.tool()
+        @tool
         def get_consoles() -> dict[str, Any]:
             """List the available Spyder IPython console targets."""
             result = self._bridge.execute_runtime_request(TOOL_RUNTIME_LIST_SHELLS)
             return self._normalize_runtime_result(result)
 
-        @mcp.tool()
+        @tool
         def get_variables(limit: int = 12, shell_id: str = "") -> dict[str, Any]:
             """List visible variables from a Spyder IPython console."""
             result = self._bridge.execute_runtime_request(
@@ -408,7 +438,7 @@ class SpyderMCPServer:
             )
             return self._normalize_runtime_result(result)
 
-        @mcp.tool()
+        @tool
         def inspect_variable(name: str, shell_id: str = "") -> dict[str, Any]:
             """Inspect one named variable from a Spyder IPython console."""
             result = self._bridge.execute_runtime_request(
@@ -421,7 +451,7 @@ class SpyderMCPServer:
             normalized["variable"] = variables[0] if variables else {}
             return normalized
 
-        @mcp.tool()
+        @tool
         def get_traceback(shell_id: str = "") -> dict[str, Any]:
             """Get the latest traceback or error from a Spyder IPython console."""
             result = self._bridge.execute_runtime_request(
@@ -430,7 +460,7 @@ class SpyderMCPServer:
             )
             return self._normalize_runtime_result(result)
 
-        @mcp.tool()
+        @tool
         def get_console_output(max_chars: int = 3000,
                                shell_id: str = "") -> dict[str, Any]:
             """Get the recent visible console output from a Spyder IPython console."""
@@ -441,7 +471,7 @@ class SpyderMCPServer:
             )
             return self._normalize_runtime_result(result)
 
-        @mcp.tool()
+        @tool
         def preview_file_edit(
             code: str,
             mode: str = "insert",
@@ -460,7 +490,7 @@ class SpyderMCPServer:
                 selection_end=selection_end,
             )
 
-        @mcp.tool()
+        @tool
         def apply_file_edit(
             code: str,
             mode: str = "insert",
@@ -485,7 +515,7 @@ class SpyderMCPServer:
                 save=save,
             )
 
-        @mcp.tool()
+        @tool
         def execute_console_code(
             code: str,
             shell_id: str = "",

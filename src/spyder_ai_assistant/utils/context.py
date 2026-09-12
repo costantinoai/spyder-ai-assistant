@@ -9,6 +9,7 @@ import os
 import logging
 
 from spyder_ai_assistant.utils.runtime_context import build_runtime_context_blocks
+from spyder_ai_assistant.utils.project_files import SKIP_DIRS
 
 logger = logging.getLogger(__name__)
 
@@ -69,15 +70,6 @@ _EXTENSION_TO_LANGUAGE = {
     ".sql": "sql",
     ".xml": "xml",
 }
-
-# Directories to skip when building the project file tree.
-# These are typically large, auto-generated, or irrelevant for context.
-SKIP_DIRS = {
-    ".git", ".hg", ".svn", "__pycache__", ".mypy_cache", ".pytest_cache",
-    "node_modules", ".tox", ".venv", "venv", "env", ".env", ".eggs",
-    "dist", "build", ".spyproject", ".idea", ".vscode",
-}
-
 
 def _language_from_filename(filename):
     """Infer language from file extension.

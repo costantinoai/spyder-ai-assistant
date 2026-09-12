@@ -18,6 +18,7 @@ Multi-tab design:
 
 import logging
 import os
+from uuid import uuid4
 from datetime import datetime
 
 from qtpy.QtCore import Qt, Signal, QThread
@@ -141,6 +142,7 @@ class ChatWidget(PluginMainWidget):
             "chat_provider_profile_id", default=""
         )
         self._current_model = ""
+        self._worker_request_id = None
 
         # Callable that returns editor context dict (set by plugin).
         # When set, _send_message() enriches the system prompt with
@@ -481,7 +483,7 @@ class ChatWidget(PluginMainWidget):
         self._worker.moveToThread(self._thread)
         self._turn_ctrl = TurnController(
             send_chat_emitter=self.sig_send_chat.emit,
-            worker_abort=self._worker.abort,
+            worker_abort=self._abort_worker_request,
         )
         self._turn_ctrl.context_provider = self._context_provider
         self._turn_ctrl.runtime_status_notifier = self.status_label.setText
@@ -497,13 +499,14 @@ class ChatWidget(PluginMainWidget):
         )
 
         # Worker → main thread: receive results via signals
-        self._worker.chunk_received.connect(self._on_chunk)
-        self._worker.response_ready.connect(self._on_response)
+        self._worker.request_chunk_received.connect(self._on_request_chunk)
+        self._worker.request_response_ready.connect(self._on_request_response)
+        self._worker.request_error_occurred.connect(self._on_request_error)
         self._worker.models_listed.connect(self._on_models_listed)
         self._worker.provider_diagnostics_ready.connect(
             self._on_provider_diagnostics
         )
-        self._worker.error_occurred.connect(self._on_error)
+        self._worker.error_occurred.connect(self._on_discovery_error)
         self._worker.status_changed.connect(self._on_status_changed)
 
         # UI signal connections
@@ -751,6 +754,29 @@ class ChatWidget(PluginMainWidget):
         self._session_ctrl.close_tab(index)
 
     # --- Worker signal handlers (called on main thread) ---
+
+    def _abort_worker_request(self):
+        self._worker.abort(self._worker_request_id or "")
+        self._worker_request_id = None
+
+    def _on_request_chunk(self, request_id, text):
+        if request_id == self._worker_request_id:
+            self._on_chunk(text)
+
+    def _on_request_response(self, request_id, text, metrics):
+        if request_id == self._worker_request_id:
+            self._worker_request_id = None
+            self._on_response(text, metrics)
+
+    def _on_request_error(self, request_id, message):
+        if request_id == self._worker_request_id:
+            self._worker_request_id = None
+            self._on_error(message)
+
+    def _on_discovery_error(self, message):
+        self.status_label.setToolTip(message)
+        if not self._generating:
+            self.status_label.setText("Model discovery failed")
 
     def _on_chunk(self, text):
         """Append a streaming token to the generating session's display.
@@ -1187,6 +1213,7 @@ class ChatWidget(PluginMainWidget):
         finally:
             if self._assistant_settings_dialog is dialog:
                 self._assistant_settings_dialog = None
+            dialog.deleteLater()
 
     def _chat_temperature_conf_value(self):
         """Return one safe config-backed chat temperature source value."""
@@ -1293,12 +1320,15 @@ class ChatWidget(PluginMainWidget):
             return False
 
         dialog = self._create_chat_settings_dialog(session)
-        if dialog.exec_() != dialog.Accepted:
-            self._sync_chat_settings_button(session)
-            return False
+        try:
+            if dialog.exec_() != dialog.Accepted:
+                self._sync_chat_settings_button(session)
+                return False
 
-        changed = self.set_prompt_preset(dialog.selected_prompt_preset_id(), session)
-        return self._apply_chat_settings(session, dialog.selected_overrides()) or changed
+            changed = self.set_prompt_preset(dialog.selected_prompt_preset_id(), session)
+            return self._apply_chat_settings(session, dialog.selected_overrides()) or changed
+        finally:
+            dialog.deleteLater()
 
     # --- Public API (called by plugin) ---
 
@@ -1467,37 +1497,40 @@ class ChatWidget(PluginMainWidget):
             parent=self,
             connection_tester=self._provider_connection_tester,
         )
-        if dialog.exec_() != dialog.Accepted:
-            return False
+        try:
+            if dialog.exec_() != dialog.Accepted:
+                return False
 
-        profiles = dialog.selected_profiles()
-        previous_profile_id = self.get_conf(
-            "chat_provider_profile_id",
-            default="",
-        )
-        self.set_conf("provider_profiles", serialize_provider_profiles(profiles))
-        # Once the profile manager is used, migrate away from the legacy
-        # single-endpoint settings so deleted profiles do not reappear.
-        self.set_conf("openai_compatible_base_url", "")
-        self.set_conf("openai_compatible_api_key", "")
-        if self.get_conf("chat_provider", default="ollama") == PROVIDER_KIND_OPENAI_COMPATIBLE:
-            preferred = resolve_preferred_profile(
-                profiles,
-                previous_profile_id,
+            profiles = dialog.selected_profiles()
+            previous_profile_id = self.get_conf(
+                "chat_provider_profile_id",
+                default="",
             )
-            self.set_conf("chat_provider_profile_id", preferred.get("profile_id", ""))
-            if (
-                previous_profile_id
-                and preferred.get("profile_id", "") != previous_profile_id
-            ):
-                logger.info(
-                    "Provider profile selection fell back from %s to %s",
+            self.set_conf("provider_profiles", serialize_provider_profiles(profiles))
+            # Once the profile manager is used, migrate away from the legacy
+            # single-endpoint settings so deleted profiles do not reappear.
+            self.set_conf("openai_compatible_base_url", "")
+            self.set_conf("openai_compatible_api_key", "")
+            if self.get_conf("chat_provider", default="ollama") == PROVIDER_KIND_OPENAI_COMPATIBLE:
+                preferred = resolve_preferred_profile(
+                    profiles,
                     previous_profile_id,
-                    preferred.get("profile_id", "<none>"),
                 )
-        logger.info("Saved %d provider profile(s)", len(profiles))
-        self.update_chat_provider_settings()
-        return True
+                self.set_conf("chat_provider_profile_id", preferred.get("profile_id", ""))
+                if (
+                    previous_profile_id
+                    and preferred.get("profile_id", "") != previous_profile_id
+                ):
+                    logger.info(
+                        "Provider profile selection fell back from %s to %s",
+                        previous_profile_id,
+                        preferred.get("profile_id", "<none>"),
+                    )
+            logger.info("Saved %d provider profile(s)", len(profiles))
+            self.update_chat_provider_settings()
+            return True
+        finally:
+            dialog.deleteLater()
 
     def send_with_prompt(self, prompt):
         """Inject a prompt into the input and send it immediately.
@@ -1595,6 +1628,8 @@ class ChatWidget(PluginMainWidget):
 
         session.display.start_assistant_message()
         options = self._chat_options(session)
+        self._worker_request_id = uuid4().hex
+        options["_spyder_request_id"] = self._worker_request_id
         logger.info(
             "Dispatching chat request for session %s via %s/%s with options %s",
             session.session_id,
@@ -1612,6 +1647,8 @@ class ChatWidget(PluginMainWidget):
         )
         if dispatched:
             self._set_generating(True)
+        else:
+            self._worker_request_id = None
         return dispatched
 
     def _continue_turn_after_tool(self, session, request_messages, tool_calls):

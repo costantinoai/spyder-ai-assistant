@@ -1,94 +1,89 @@
-"""Run blocking, Qt-free tool calls off the GUI thread.
+"""A bounded daemon worker pool for blocking, Qt-free tool calls.
 
-Project and git tools are ordinary filesystem and subprocess work: a
-project-wide regex search walks up to ``MAX_SEARCH_FILES`` files, and a
-``git diff`` on a large repository can sit for seconds. Called straight from
-a Qt slot -- which is what the chat turn loop used to do -- that work freezes
-the whole IDE, including the transcript the user is reading and the editor
-they would switch to while waiting.
-
-This wraps Spyder's own ``WorkerManager`` so callers stay declarative: hand
-over a zero-argument callable plus a completion callback, and the callback
-runs back on the GUI thread once the worker finishes.
-
-Only submit work that touches no Qt object and no Spyder widget. Anything
-that reads editor, console or project state has to be resolved on the GUI
-thread first and passed in as plain data; ``ProjectToolsService`` splits
-itself along exactly that line (``prepare_request`` then ``run_prepared``).
+Resolve editor/project state on the GUI thread before submitting work.
+Results are queued back to that thread. Shutdown drops callbacks and queued
+jobs immediately; it never waits for a blocking callable to return.
 """
 
 from __future__ import annotations
 
-import logging
+import queue
+import threading
 
-from qtpy.QtCore import QObject
+from qtpy.QtCore import QObject, Qt, Signal, Slot
 
-from spyder.utils.workers import WorkerManager
-
-logger = logging.getLogger(__name__)
-
-# Two concurrent tool calls is already generous: a chat turn runs one tool at
-# a time, and the MCP server does its own project work on its own thread.
 MAX_BACKGROUND_TOOL_THREADS = 2
+MAX_QUEUED_TOOL_CALLS = 8
 
 
 class BackgroundToolExecutor(QObject):
-    """Submit blocking tool calls to a small worker-thread pool."""
+    """Run at most two tool calls concurrently, delivering results on Qt."""
+
+    _sig_finished = Signal(object, object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._worker_manager = WorkerManager(
-            parent=self,
-            max_threads=MAX_BACKGROUND_TOOL_THREADS,
-        )
-        # Worker object -> completion callback. Keyed by the worker itself
-        # rather than by ``id(worker)`` so a recycled id can never deliver a
-        # result to the wrong caller, and so the mapping keeps the worker
-        # alive until it has reported back.
         self._callbacks = {}
+        self._jobs = queue.Queue(maxsize=MAX_QUEUED_TOOL_CALLS)
+        self._stopping = threading.Event()
+        self._sig_finished.connect(self._deliver, Qt.QueuedConnection)
+        for index in range(MAX_BACKGROUND_TOOL_THREADS):
+            threading.Thread(
+                target=self._run_jobs,
+                args=(self._jobs, self._stopping, self._sig_finished),
+                name=f"SpyderAITool-{index + 1}",
+                daemon=True,
+            ).start()
 
     def submit(self, work, on_done):
-        """Run ``work()`` on a worker thread, reporting back on the GUI thread.
+        """Run work() and call on_done(output, error) once on Qt."""
+        if self._stopping.is_set():
+            raise RuntimeError("Background tool executor is shut down.")
+        token = object()
+        self._callbacks[token] = on_done
+        try:
+            self._jobs.put_nowait((token, work))
+        except queue.Full:
+            self._callbacks.pop(token)
+            raise RuntimeError("Background tools are busy. Try again shortly.") from None
+        return token
 
-        ``work`` takes no arguments and must not touch Qt or Spyder state.
-        ``on_done(output, error)`` is called on the GUI thread exactly once:
-        ``output`` is whatever ``work`` returned, and ``error`` is the
-        exception it raised, or None. Returns the worker so a caller can tell
-        two submissions apart in a test.
-        """
-        worker = self._worker_manager.create_python_worker(work)
-        self._callbacks[worker] = on_done
-        # Connected from the GUI thread to this GUI-thread QObject, so Qt
-        # queues the worker thread's emission back onto the event loop
-        # instead of running the callback on the worker.
-        worker.sig_finished.connect(self._deliver)
-        worker.start()
-        logger.debug(
-            "Submitted background tool work (%d in flight)",
-            len(self._callbacks),
-        )
-        return worker
+    @staticmethod
+    def _run_jobs(jobs, stopping, finished):
+        while not stopping.is_set():
+            try:
+                token, work = jobs.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                if stopping.is_set():
+                    continue
+                output, error = None, None
+                try:
+                    output = work()
+                except Exception as exception:
+                    error = exception
+                if not stopping.is_set():
+                    try:
+                        finished.emit(token, output, error)
+                    except RuntimeError:
+                        pass  # Qt parent was deleted during teardown.
+            finally:
+                jobs.task_done()
 
-    def _deliver(self, worker, output, error):
-        """Hand one finished worker's outcome to the caller that queued it."""
-        on_done = self._callbacks.pop(worker, None)
-        if on_done is None:
-            # Already delivered, or dropped by shutdown().
-            logger.debug("Ignoring a background result with no waiting caller")
-            return
-        on_done(output, error)
+    @Slot(object, object, object)
+    def _deliver(self, token, output, error):
+        on_done = self._callbacks.pop(token, None)
+        if on_done is not None:
+            on_done(output, error)
 
     def shutdown(self):
-        """Stop every worker and drop the callbacks still waiting.
-
-        Called from plugin teardown: a result delivered after the chat
-        widgets are gone would touch deleted Qt objects.
-        """
-        pending = len(self._callbacks)
+        """Discard waiting work without blocking the IDE on running I/O."""
+        self._stopping.set()
         self._callbacks.clear()
-        self._worker_manager.terminate_all()
-        if pending:
-            logger.info(
-                "Dropped %d in-flight background tool call(s) during shutdown",
-                pending,
-            )
+        while True:
+            try:
+                self._jobs.get_nowait()
+                self._jobs.task_done()
+            except queue.Empty:
+                break

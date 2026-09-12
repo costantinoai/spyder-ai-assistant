@@ -315,7 +315,13 @@ class ProviderProfilesDialog(QDialog):
         self.test_result_label.setText(
             f"Testing {compatible_api_url(profile['base_url'])}..."
         )
-        self._connection_tester(profile, lambda result: self._on_test_result(profile_id, result))
+        try:
+            self._connection_tester(profile, lambda result: self._on_test_result(profile_id, result))
+        except RuntimeError:
+            self._on_test_result(profile_id, {
+                "ok": False, "endpoint": compatible_api_url(profile["base_url"]),
+                "error": "Connection testing is busy or shutting down. Try again shortly.",
+            })
 
     def _on_test_result(self, profile_id, result):
         """Store and render one probe outcome.

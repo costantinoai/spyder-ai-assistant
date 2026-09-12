@@ -219,18 +219,21 @@ class TurnController:
         # the turn resumes from the callback below, so this returns a
         # sentinel rather than the next request payload. The turn stays
         # marked as generating until then.
-        self._pending_turn.awaiting_tool = True
+        turn = self._pending_turn
+        turn.awaiting_tool = True
         try:
             self.runtime_request_executor(
                 runtime_request,
-                partial(self._continue_after_tool_result, session, runtime_request),
+                partial(self._continue_after_tool_result, turn, runtime_request),
             )
         except Exception as error:
             logger.exception(
                 "Runtime request executor crashed for tool %s",
                 runtime_request["tool"],
             )
-            self._pending_turn.awaiting_tool = False
+            if self._pending_turn is not turn or not turn.awaiting_tool:
+                return PENDING_RUNTIME_REQUEST
+            turn.awaiting_tool = False
             return self.continue_after_runtime_observation(
                 session,
                 runtime_request,
@@ -262,7 +265,7 @@ class TurnController:
             "error": message,
         }
 
-    def _continue_after_tool_result(self, session, runtime_request, result):
+    def _continue_after_tool_result(self, turn, runtime_request, result):
         """Feed one tool result back into the turn that asked for it.
 
         Runs on the GUI thread. The turn may already be over by now -- the
@@ -270,14 +273,15 @@ class TurnController:
         in which case the observation is dropped instead of resurrecting a
         finished turn.
         """
-        if self._pending_turn is None or self._pending_turn.session is not session:
+        if self._pending_turn is not turn or not turn.awaiting_tool:
             logger.info(
                 "Dropping the %s observation: its chat turn is no longer active",
                 runtime_request.get("tool", "runtime.unknown"),
             )
             return
 
-        self._pending_turn.awaiting_tool = False
+        session = turn.session
+        turn.awaiting_tool = False
         logger.info(
             "Runtime request %s completed (ok=%s, source=%s)",
             runtime_request.get("tool", "runtime.unknown"),

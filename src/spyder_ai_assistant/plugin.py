@@ -56,6 +56,8 @@ from spyder_ai_assistant.utils.chat_persistence import (
 from spyder_ai_assistant.utils.assistant_settings import (
     ASSISTANT_APPEARANCE_KEYS,
     ASSISTANT_CONF_DEFAULTS,
+    CHAT_BACKEND_OPTION_KEYS,
+    COMPLETION_PROVIDER_OPTION_KEYS,
     GHOST_TEXT_OPTION_KEYS,
     AssistantSettings,
 )
@@ -219,6 +221,12 @@ class AIChatPlugin(SpyderDockablePlugin):
     # --- Plugin lifecycle ---
 
     def on_initialize(self):
+        self._closing = False
+        self._conf_reactions = set()
+        self._pending_appearance = {}
+        self._conf_reaction_timer = QTimer(self)
+        self._conf_reaction_timer.setSingleShot(True)
+        self._conf_reaction_timer.timeout.connect(self._flush_conf_reactions)
         # Spyder redirects stdout to its internal console after startup, so
         # the rotating log file is the only durable evidence of plugin
         # behaviour in real sessions (validation harnesses rely on it too).
@@ -403,6 +411,8 @@ class AIChatPlugin(SpyderDockablePlugin):
 
     def _reconfigure_mcp_server(self):
         """Restart the embedded MCP server from the current config."""
+        if getattr(self, "_closing", False):
+            return False
         config = self._mcp_server_config()
 
         if (
@@ -424,7 +434,7 @@ class AIChatPlugin(SpyderDockablePlugin):
         logger.info("Reconfiguring the embedded MCP server")
 
         if self._mcp_server is not None:
-            self._mcp_server.stop()
+            self._mcp_server.stop(block=False)
             if self._mcp_server.is_stopping():
                 logger.warning("MCP reconfiguration deferred until shutdown finishes")
                 QTimer.singleShot(250, self._reconfigure_mcp_server)
@@ -440,7 +450,7 @@ class AIChatPlugin(SpyderDockablePlugin):
             host=config["host"],
             port=config["port"],
         )
-        return self._mcp_server.start()
+        return self._mcp_server.start(block=False)
 
     def _resolve_project_tools_root(self):
         """Project root for file/git tools: active project, else file folder."""
@@ -621,6 +631,10 @@ class AIChatPlugin(SpyderDockablePlugin):
         Stops the background worker thread and cleans up ghost text
         managers. Returns True to allow Spyder to proceed with shutdown.
         """
+        self._closing = True
+        self._conf_reaction_timer.stop()
+        self._conf_reactions.clear()
+        self._pending_appearance.clear()
         self._flush_chat_session_state()
         if self._mcp_server is not None:
             self._mcp_server.stop(block=False)
@@ -1540,6 +1554,10 @@ class AIChatPlugin(SpyderDockablePlugin):
 
         req = {
             "file": filename,
+            "_ai_request_origin": (
+                "manual" if manager is None or getattr(manager, "_request_is_manual", True)
+                else "automatic"
+            ),
             "line": cursor.blockNumber(),
             "column": cursor.columnNumber(),
             "offset": cursor.position(),
@@ -1765,48 +1783,57 @@ class AIChatPlugin(SpyderDockablePlugin):
     # Grouped by the reaction they trigger; Spyder passes (option, value)
     # when a handler observes several options.
 
-    @on_conf_change(option=[
-        "ollama_host",
-        "openai_compatible_base_url",
-        "openai_compatible_api_key",
-        "provider_profiles",
-    ])
+    @on_conf_change(option=list(CHAT_BACKEND_OPTION_KEYS))
     def on_chat_backend_option_changed(self, option, value):
         """Any provider/endpoint change rebuilds the chat provider settings."""
         del option, value
-        self._refresh_chat_provider_settings()
+        self._defer_conf_reaction(self._refresh_chat_provider_settings)
 
     @on_conf_change(option=["mcp_enabled", "mcp_host", "mcp_port"])
     def on_mcp_option_changed(self, option, value):
         """Any MCP option change restarts the embedded server."""
         del option, value
-        self._reconfigure_mcp_server()
+        self._defer_conf_reaction(self._reconfigure_mcp_server)
 
     @on_conf_change(option=["chat_provider", "chat_model"])
     def on_chat_model_option_changed(self, option, value):
         """Selected provider/model drive both the chat toolbar and completions."""
-        del value
-        self._sync_chat_model_selection_from_conf()
-        if option == "chat_provider":
-            self._sync_completion_provider_settings()
+        del option, value
+        self._defer_conf_reaction(self._sync_chat_model_selection_from_conf)
 
-    @on_conf_change(option=[
-        "chat_provider_profile_id",
-        "completion_model",
-        "completion_temperature",
-        "completion_max_tokens",
-        "completions_enabled",
-        "debounce_ms",
-    ])
+    @on_conf_change(option=list(COMPLETION_PROVIDER_OPTION_KEYS))
     def on_completion_option_changed(self, option, value):
         """Completion-related options are pushed to the completion provider."""
         del option, value
-        self._sync_completion_provider_settings()
+        self._defer_conf_reaction(self._sync_completion_provider_settings)
 
     @on_conf_change(option=list(ASSISTANT_APPEARANCE_KEYS))
     def on_appearance_option_changed(self, option, value):
         """Appearance options are applied live to every chat display."""
-        self._propagate_appearance_setting(option, value)
+        if not hasattr(self, "_pending_appearance"):
+            return
+        self._pending_appearance[option] = value
+        self._defer_conf_reaction(self._flush_appearance_settings)
+
+    def _defer_conf_reaction(self, callback):
+        """Apply a settings burst once, using its final configuration."""
+        if getattr(self, "_closing", False) or not hasattr(self, "_conf_reaction_timer"):
+            return
+        self._conf_reactions.add(callback)
+        self._conf_reaction_timer.start(0)
+
+    def _flush_conf_reactions(self):
+        callbacks = self._conf_reactions
+        self._conf_reactions = set()
+        if self._refresh_chat_provider_settings in callbacks:
+            callbacks.discard(self._sync_completion_provider_settings)
+        for callback in callbacks:
+            callback()
+
+    def _flush_appearance_settings(self):
+        settings = self._pending_appearance
+        self._pending_appearance = {}
+        self.get_widget().update_all_display_appearance(**settings)
 
     def _propagate_appearance_setting(self, key, value):
         """Push a single appearance setting to all active chat displays."""
@@ -1828,6 +1855,7 @@ class AIChatPlugin(SpyderDockablePlugin):
         """
         for manager in self._ghost_managers.values():
             manager.set_manual_only(value)
+        self._sync_completion_provider_settings()
 
     @on_conf_change(option=list(GHOST_TEXT_OPTION_KEYS))
     def on_ghost_option_changed(self, option, value):

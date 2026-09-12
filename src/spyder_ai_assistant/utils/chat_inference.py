@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import math
+
+from spyder_ai_assistant.utils.coerce import bounded_int
+
 
 DEFAULT_CHAT_TEMPERATURE = 0.5
 DEFAULT_CHAT_MAX_TOKENS = 1024
@@ -11,13 +15,22 @@ MIN_CHAT_MAX_TOKENS = 64
 MAX_CHAT_MAX_TOKENS = 8192
 
 
+def decode_chat_temperature_conf(value):
+    """Decode global temperature: stored ints are x10, legacy floats literal."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        value = value / 10.0
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        return DEFAULT_CHAT_TEMPERATURE
+    return round(max(MIN_CHAT_TEMPERATURE, min(MAX_CHAT_TEMPERATURE, value)), 2)
+
+
 def normalize_chat_temperature(value):
     """Normalize stored chat temperature values to Ollama's expected range.
 
     The global preferences historically exposed ``temperature x10`` integers,
     so values greater than ``2.0`` are treated as legacy x10 inputs.
     """
-    if not isinstance(value, (int, float)):
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
         return DEFAULT_CHAT_TEMPERATURE
 
     normalized = float(value)
@@ -31,7 +44,7 @@ def normalize_chat_temperature_override(value):
     """Return one normalized per-tab temperature override or ``None``."""
     if value in (None, ""):
         return None
-    if not isinstance(value, (int, float)):
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
         return None
     return normalize_chat_temperature(value)
 
@@ -40,16 +53,15 @@ def normalize_chat_max_tokens(value):
     """Return one clamped max-token value for chat responses."""
     if not isinstance(value, (int, float)):
         return DEFAULT_CHAT_MAX_TOKENS
-    normalized = int(value)
-    normalized = max(MIN_CHAT_MAX_TOKENS, min(MAX_CHAT_MAX_TOKENS, normalized))
-    return normalized
+    return bounded_int(value, DEFAULT_CHAT_MAX_TOKENS,
+                       MIN_CHAT_MAX_TOKENS, MAX_CHAT_MAX_TOKENS)
 
 
 def normalize_chat_max_tokens_override(value):
     """Return one normalized per-tab max-token override or ``None``."""
     if value in (None, ""):
         return None
-    if not isinstance(value, (int, float)):
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
         return None
     return normalize_chat_max_tokens(value)
 
