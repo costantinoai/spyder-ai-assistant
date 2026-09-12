@@ -231,6 +231,36 @@ class UiTokens:
     extra: dict = field(default_factory=dict)
 
 
+def ghost_palette(tokens):
+    """Colours for an inline suggestion, derived from the assistant's accent.
+
+    Returns the ``(foreground, background, underline)`` triple the ghost text
+    manager expects. Three properties are load-bearing and must survive any
+    recolour: the background keeps an alpha, the underline stays dotted, and
+    the text stays italic, because that combination is how the manager
+    recognises its own selection when clearing it.
+
+    The suggestion sits on the editor's ground, not the chat pane's, so the
+    accent is softened rather than used at full strength: it has to read as
+    provisional text, not as a highlight.
+    """
+    accent = QColor(tokens.accent)
+    if not accent.isValid():
+        accent = QColor("#5ac8fa")
+
+    hue, saturation, lightness, _ = accent.getHsl()
+    if tokens.is_dark:
+        foreground = QColor.fromHsl(hue, int(saturation * 0.55), min(235, lightness + 40))
+        background = QColor.fromHsl(hue, int(saturation * 0.60), max(38, lightness - 62))
+        background.setAlpha(150)
+    else:
+        foreground = QColor.fromHsl(hue, int(saturation * 0.70), max(60, lightness - 55))
+        background = QColor.fromHsl(hue, int(saturation * 0.45), min(232, lightness + 78))
+        background.setAlpha(130)
+    underline = QColor(foreground)
+    return foreground, background, underline
+
+
 def build_tokens(theme_colors, is_dark):
     """Resolve one theme's colour dict into the full token set.
 

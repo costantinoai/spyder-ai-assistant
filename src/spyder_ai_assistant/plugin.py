@@ -68,6 +68,7 @@ from spyder_ai_assistant.utils.code_apply import (
 )
 from spyder_ai_assistant.utils.logging import configure_package_logging
 from spyder_ai_assistant.utils.ui_stylesheet import apply_dialog_theme
+from spyder_ai_assistant.utils.ui_tokens import ghost_palette
 from spyder_ai_assistant.utils.runtime_context import RuntimeContextService
 from spyder_ai_assistant.widgets.chat_widget import ChatWidget
 from spyder_ai_assistant.widgets.config_page import AIChatConfigPage
@@ -848,6 +849,18 @@ class AIChatPlugin(SpyderDockablePlugin):
             len(stale_documents),
         )
 
+    def _ghost_palette_for_theme(self):
+        """Ghost colours from the chat pane's tokens, or None to keep the default.
+
+        Resolved on each use rather than captured when the editor is created,
+        because the theme can change while that editor is still open.
+        """
+        widget = self.get_widget()
+        tokens = getattr(widget, "_ui_tokens", None)
+        if tokens is None:
+            return None
+        return ghost_palette(tokens)
+
     def _install_ghost_manager(self, codeeditor):
         """Install one ghost text manager and its shortcuts on an editor.
 
@@ -887,6 +900,7 @@ class AIChatPlugin(SpyderDockablePlugin):
                 default=ASSISTANT_CONF_DEFAULTS["native_popup_policy"],
             ),
             ai_available=self._inline_ai_available,
+            ghost_palette=self._ghost_palette_for_theme,
         )
         token = self._ghost_token(codeeditor, create=True)
         self._ghost_managers[token] = manager

@@ -262,10 +262,15 @@ class GhostTextManager:
         native_popup_policy=DEFAULT_NATIVE_POPUP_POLICY,
         ai_available=None,
         manual_only=False,
+        ghost_palette=None,
     ):
         self._editor = editor
         self._lifecycle_callback = lifecycle_callback
         self._manual_completion_requester = manual_completion_requester
+        # Injected so the suggestion can follow the assistant's theme. A
+        # callable rather than colours, because the theme changes while an
+        # editor lives. Absent, the built-in amber is used.
+        self._ghost_palette_provider = ghost_palette
         # Suggestions only when the user asks for them: both automatic
         # paths (idle and post-accept) stop scheduling, while
         # request_completion keeps working for the shortcut.
@@ -890,7 +895,22 @@ class GhostTextManager:
         self._editor.setExtraSelections(existing)
 
     def _build_ghost_palette(self):
-        """Return theme-aware colors that clearly mark inline ghost text."""
+        """Return colors that clearly mark inline ghost text.
+
+        An injected provider wins, so the suggestion can carry the assistant's
+        accent instead of a fixed amber that matches no preset. It is asked
+        each time because the theme can change while this editor lives, and it
+        may decline by returning None, which falls through to the built-in.
+        """
+        if self._ghost_palette_provider is not None:
+            try:
+                provided = self._ghost_palette_provider()
+            except Exception:
+                provided = None
+            if provided:
+                foreground, background, underline = provided
+                return QColor(foreground), QColor(background), QColor(underline)
+
         palette = self._editor.palette()
         base_color = palette.color(QPalette.Base)
         if not base_color.isValid():
@@ -926,14 +946,21 @@ class GhostTextManager:
         extra selections on the next editor update.
         """
         try:
-            # Filter out any selections with our ghost format (italic + gray).
-            # This is a heuristic — we check for italic since Spyder's own
-            # extra selections don't typically use italic.
+            # Identify our own selection by the format we give it: italic with
+            # a translucent background and a dotted underline. Spyder's own
+            # extra selections do not use that combination.
+            #
+            # This used to also require a grey the palette stopped emitting
+            # long ago, which made the predicate always true and left the
+            # selection in place. Only the undo of the inserted text hid it.
             existing = self._editor.extraSelections()
             filtered = [
                 s for s in existing
-                if not s.format.fontItalic()
-                or s.format.foreground().color() != QColor(110, 110, 110)
+                if not (
+                    s.format.fontItalic()
+                    and s.format.underlineStyle() == QTextCharFormat.DotLine
+                    and s.format.background().color().alpha() > 0
+                )
             ]
             self._editor.setExtraSelections(filtered)
         except (RuntimeError, AttributeError):
