@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from qtpy.QtCore import Qt
+from qtpy.QtGui import QPalette
 from qtpy.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -48,7 +49,14 @@ class SessionHistoryDialog(QDialog):
         if storage_path:
             path_label = QLabel(storage_path)
             path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            path_label.setStyleSheet("color: #666;")
+            # Dimmed through the palette rather than a fixed grey. This was
+            # "color: #666", which ignores the interface theme entirely and
+            # is close to unreadable on a dark one.
+            dimmed_palette = path_label.palette()
+            dimmed_text = dimmed_palette.color(QPalette.WindowText)
+            dimmed_text.setAlpha(160)
+            dimmed_palette.setColor(QPalette.WindowText, dimmed_text)
+            path_label.setPalette(dimmed_palette)
             layout.addWidget(path_label)
 
         controls = QHBoxLayout()

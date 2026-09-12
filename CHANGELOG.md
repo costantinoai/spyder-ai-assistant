@@ -54,6 +54,15 @@
 
 ### Fixed
 
+- dimmed reasoning text, error text and one message label were hard to read
+  in several colour presets. Measuring every preset in both interface modes
+  found six colour pairs below a 3:1 contrast ratio, the worst being nord's
+  reasoning text at 1.69:1 against its own background. Those six were
+  re-derived by keeping each palette's hue and saturation and adjusting only
+  lightness, so the themes still look like themselves; ordinary message text
+  was never affected and stays above 8:1
+- the chat history browser drew the storage path in a fixed grey that
+  ignored the interface theme and was close to unreadable on a dark one
 - a provider failure now says what to do about it instead of showing an
   exception. An unreachable local Ollama says to start it with
   `ollama serve`, a missing model gives the `ollama pull` command for that

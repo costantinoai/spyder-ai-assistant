@@ -53,6 +53,14 @@ EXPOSED_COLOR_KEYS = [
 # Built-in theme presets
 # ---------------------------------------------------------------------------
 
+# A few secondary colours deviate from their upstream palettes on purpose.
+# Measuring every preset found six foreground/background pairs below 3.0:1,
+# the worst being nord's dimmed reasoning text at 1.69:1 against its own
+# background, which is effectively invisible. Those six were re-derived by
+# holding the original hue and saturation and moving only lightness until
+# the pair cleared 3.2:1, so each colour still reads as the palette's own.
+# Primary body text was never affected: it starts above 8:1 everywhere.
+# tests/test_chat_themes_contrast.py keeps both floors honest.
 THEME_PRESETS = {
     "default": {
         "dark": {
@@ -124,7 +132,7 @@ THEME_PRESETS = {
             "code_block_bg": "#002b36", "code_block_text": "#93a1a1",
             "inline_code_bg": "#eee8d5", "inline_code_text": "#073642",
             "link_color": "#2aa198",
-            "thinking_bg": "#eee8d5", "thinking_text": "#93a1a1",
+            "thinking_bg": "#eee8d5", "thinking_text": "#708181",
             "thinking_border": "#93a1a1",
             "scroll_btn_bg": "rgba(0, 43, 54, 150)",
             "scroll_btn_text": "#fdf6e3",
@@ -145,7 +153,7 @@ THEME_PRESETS = {
             "code_block_bg": "#2e3440", "code_block_text": "#d8dee9",
             "inline_code_bg": "#3b4252", "inline_code_text": "#eceff4",
             "link_color": "#88c0d0",
-            "thinking_bg": "#2e3440", "thinking_text": "#4c566a",
+            "thinking_bg": "#2e3440", "thinking_text": "#75829c",
             "thinking_border": "#4c566a",
             "scroll_btn_bg": "rgba(216, 222, 233, 150)",
             "scroll_btn_text": "#2e3440",
@@ -156,10 +164,10 @@ THEME_PRESETS = {
         },
         "light": {
             "user_bg": "#d8dee9", "user_text": "#2e3440",
-            "user_label": "#5e81ac",
+            "user_label": "#5579a5",
             "assistant_bg": "#eceff4", "assistant_text": "#2e3440",
             "assistant_label": "#4c566a",
-            "error_bg": "#f0d5d8", "error_text": "#bf616a",
+            "error_bg": "#f0d5d8", "error_text": "#bb5660",
             "error_label": "#d08770",
             "code_block_bg": "#2e3440", "code_block_text": "#d8dee9",
             "inline_code_bg": "#d8dee9", "inline_code_text": "#2e3440",
@@ -199,7 +207,7 @@ THEME_PRESETS = {
             "user_label": "#7c3aed",
             "assistant_bg": "#f8f8f2", "assistant_text": "#282a36",
             "assistant_label": "#6272a4",
-            "error_bg": "#fde8e8", "error_text": "#ff5555",
+            "error_bg": "#fde8e8", "error_text": "#ff2727",
             "error_label": "#ff79c6",
             "code_block_bg": "#282a36", "code_block_text": "#f8f8f2",
             "inline_code_bg": "#e8e6f0", "inline_code_text": "#282a36",
@@ -244,7 +252,7 @@ THEME_PRESETS = {
             "code_block_bg": "#282828", "code_block_text": "#ebdbb2",
             "inline_code_bg": "#ebdbb2", "inline_code_text": "#282828",
             "link_color": "#427b58",
-            "thinking_bg": "#ebdbb2", "thinking_text": "#928374",
+            "thinking_bg": "#ebdbb2", "thinking_text": "#827466",
             "thinking_border": "#a89984",
             "scroll_btn_bg": "rgba(40, 40, 40, 150)",
             "scroll_btn_text": "#fbf1c7",
