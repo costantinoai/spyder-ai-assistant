@@ -44,6 +44,7 @@ from spyder_ai_assistant.mcp.settings import (
     normalize_mcp_port,
 )
 from spyder_ai_assistant.utils.assistant_settings import (
+    ASSISTANT_OPTION_RANGES,
     DEFAULT_NATIVE_POPUP_POLICY,
     NATIVE_POPUP_POLICIES,
     NATIVE_POPUP_POLICY_DESCRIPTIONS,
@@ -212,10 +213,10 @@ class AssistantSettingsDialog(QDialog):
         chat_form = QFormLayout(chat_group)
         self.chat_temperature_spin = QDoubleSpinBox(chat_group)
         self.chat_temperature_spin.setDecimals(1)
-        self.chat_temperature_spin.setRange(0.0, 2.0)
+        self.chat_temperature_spin.setRange(*ASSISTANT_OPTION_RANGES["chat_temperature"])
         self.chat_temperature_spin.setSingleStep(0.1)
         self.chat_max_tokens_spin = QSpinBox(chat_group)
-        self.chat_max_tokens_spin.setRange(64, 8192)
+        self.chat_max_tokens_spin.setRange(*ASSISTANT_OPTION_RANGES["max_tokens"])
         self.chat_max_tokens_spin.setSingleStep(64)
         chat_form.addRow("Temperature", self.chat_temperature_spin)
         chat_form.addRow("Max tokens", self.chat_max_tokens_spin)
@@ -229,13 +230,17 @@ class AssistantSettingsDialog(QDialog):
         )
         self.completion_temperature_spin = QDoubleSpinBox(completion_group)
         self.completion_temperature_spin.setDecimals(2)
-        self.completion_temperature_spin.setRange(0.0, 2.0)
+        self.completion_temperature_spin.setRange(
+            *ASSISTANT_OPTION_RANGES["completion_temperature"]
+        )
         self.completion_temperature_spin.setSingleStep(0.05)
         self.completion_max_tokens_spin = QSpinBox(completion_group)
-        self.completion_max_tokens_spin.setRange(16, 4096)
+        self.completion_max_tokens_spin.setRange(
+            *ASSISTANT_OPTION_RANGES["completion_max_tokens"]
+        )
         self.completion_max_tokens_spin.setSingleStep(16)
         self.debounce_spin = QSpinBox(completion_group)
-        self.debounce_spin.setRange(0, 5000)
+        self.debounce_spin.setRange(*ASSISTANT_OPTION_RANGES["debounce_ms"])
         self.debounce_spin.setSingleStep(50)
         completion_form.addRow(self.completions_enabled_checkbox)
         completion_form.addRow("Temperature", self.completion_temperature_spin)
@@ -317,10 +322,12 @@ class AssistantSettingsDialog(QDialog):
         chat_font_form = QFormLayout(chat_font_group)
         self.chat_font_combo = QFontComboBox(chat_font_group)
         self.chat_font_size_spin = QSpinBox(chat_font_group)
-        self.chat_font_size_spin.setRange(6, 24)
+        self.chat_font_size_spin.setRange(*ASSISTANT_OPTION_RANGES["chat_font_size"])
         self.chat_font_size_spin.setSuffix(" pt")
         self.chat_line_height_spin = QDoubleSpinBox(chat_font_group)
-        self.chat_line_height_spin.setRange(1.0, 3.0)
+        self.chat_line_height_spin.setRange(
+            *ASSISTANT_OPTION_RANGES["chat_line_height"]
+        )
         self.chat_line_height_spin.setSingleStep(0.1)
         self.chat_line_height_spin.setDecimals(1)
         chat_font_form.addRow("Font family", self.chat_font_combo)
@@ -333,7 +340,7 @@ class AssistantSettingsDialog(QDialog):
         code_font_form = QFormLayout(code_font_group)
         self.code_font_combo = QFontComboBox(code_font_group)
         self.code_font_size_spin = QSpinBox(code_font_group)
-        self.code_font_size_spin.setRange(6, 24)
+        self.code_font_size_spin.setRange(*ASSISTANT_OPTION_RANGES["code_font_size"])
         self.code_font_size_spin.setSuffix(" pt")
         self.pygments_dark_combo = QComboBox(code_font_group)
         self.pygments_light_combo = QComboBox(code_font_group)
@@ -348,13 +355,15 @@ class AssistantSettingsDialog(QDialog):
         bubble_group = QGroupBox("Message bubbles", appearance_tab)
         bubble_form = QFormLayout(bubble_group)
         self.bubble_padding_spin = QSpinBox(bubble_group)
-        self.bubble_padding_spin.setRange(4, 32)
+        self.bubble_padding_spin.setRange(*ASSISTANT_OPTION_RANGES["bubble_padding"])
         self.bubble_padding_spin.setSuffix(" px")
         self.bubble_radius_spin = QSpinBox(bubble_group)
-        self.bubble_radius_spin.setRange(0, 24)
+        self.bubble_radius_spin.setRange(
+            *ASSISTANT_OPTION_RANGES["bubble_border_radius"]
+        )
         self.bubble_radius_spin.setSuffix(" px")
         self.bubble_spacing_spin = QSpinBox(bubble_group)
-        self.bubble_spacing_spin.setRange(0, 16)
+        self.bubble_spacing_spin.setRange(*ASSISTANT_OPTION_RANGES["bubble_spacing"])
         self.bubble_spacing_spin.setSuffix(" px")
         bubble_form.addRow("Padding", self.bubble_padding_spin)
         bubble_form.addRow("Border radius", self.bubble_radius_spin)
@@ -370,11 +379,15 @@ class AssistantSettingsDialog(QDialog):
         ghost_group = QGroupBox("Ghost text timing", behavior_tab)
         ghost_form = QFormLayout(ghost_group)
         self.idle_delay_spin = QSpinBox(ghost_group)
-        self.idle_delay_spin.setRange(100, 5000)
+        self.idle_delay_spin.setRange(
+            *ASSISTANT_OPTION_RANGES["idle_completion_delay_ms"]
+        )
         self.idle_delay_spin.setSingleStep(100)
         self.idle_delay_spin.setSuffix(" ms")
         self.post_accept_delay_spin = QSpinBox(ghost_group)
-        self.post_accept_delay_spin.setRange(0, 1000)
+        self.post_accept_delay_spin.setRange(
+            *ASSISTANT_OPTION_RANGES["post_accept_completion_delay_ms"]
+        )
         self.post_accept_delay_spin.setSingleStep(25)
         self.post_accept_delay_spin.setSuffix(" ms")
         ghost_form.addRow("Idle completion delay", self.idle_delay_spin)
@@ -434,7 +447,7 @@ class AssistantSettingsDialog(QDialog):
         self.mcp_host_edit = QLineEdit(mcp_server_group)
         self.mcp_host_edit.setPlaceholderText(DEFAULT_MCP_HOST)
         self.mcp_port_spin = QSpinBox(mcp_server_group)
-        self.mcp_port_spin.setRange(1, 65535)
+        self.mcp_port_spin.setRange(*ASSISTANT_OPTION_RANGES["mcp_port"])
         self.mcp_port_spin.setValue(DEFAULT_MCP_PORT)
         self.mcp_endpoint_edit = QLineEdit(mcp_server_group)
         self.mcp_endpoint_edit.setReadOnly(True)
@@ -742,126 +755,77 @@ class AssistantSettingsDialog(QDialog):
         )
 
     def _load_settings(self):
-        """Load the current config-backed settings into the dialog widgets."""
-        # One owner for the legacy x10 encoding and the valid range.
-        chat_temperature = normalize_chat_temperature(
-            self._settings.get("chat_temperature", 0.5)
-        )
+        """Load the current config-backed settings into the dialog widgets.
 
-        self.ollama_host_edit.setText(
-            str(self._settings.get("ollama_host", DEFAULT_OLLAMA_HOST) or "")
+        ``self._settings`` came from ``AssistantSettings.from_mapping`` in
+        ``__init__``, so every value is already the right type, inside its
+        bounds, and present. This method therefore only moves values into
+        widgets: no defaults, no coercion, no clamping. The one exception is
+        the chat temperature, which is stored as the legacy "x10" integer and
+        decoded by its owning helper.
+        """
+        settings = self._settings
+
+        self.ollama_host_edit.setText(settings["ollama_host"])
+        self.mcp_enabled_checkbox.setChecked(settings["mcp_enabled"])
+        self.mcp_host_edit.setText(settings["mcp_host"])
+        self.mcp_port_spin.setValue(settings["mcp_port"])
+        self.chat_temperature_spin.setValue(
+            normalize_chat_temperature(settings["chat_temperature"])
         )
-        self.mcp_enabled_checkbox.setChecked(
-            bool(self._settings.get("mcp_enabled", True))
-        )
-        self.mcp_host_edit.setText(
-            str(self._settings.get("mcp_host", DEFAULT_MCP_HOST) or DEFAULT_MCP_HOST)
-        )
-        self.mcp_port_spin.setValue(
-            normalize_mcp_port(self._settings.get("mcp_port", DEFAULT_MCP_PORT))
-        )
-        self.chat_temperature_spin.setValue(chat_temperature)
-        self.chat_max_tokens_spin.setValue(
-            int(self._settings.get("max_tokens", 1024) or 1024)
-        )
-        self.completions_enabled_checkbox.setChecked(
-            bool(self._settings.get("completions_enabled", True))
-        )
-        self.project_tools_checkbox.setChecked(
-            bool(self._settings.get("project_tools_enabled", True))
-        )
-        self.completion_temperature_spin.setValue(
-            float(self._settings.get("completion_temperature", 0.15) or 0.15)
-        )
-        self.completion_max_tokens_spin.setValue(
-            int(self._settings.get("completion_max_tokens", 256) or 256)
-        )
-        self.debounce_spin.setValue(
-            int(self._settings.get("debounce_ms", 300) or 300)
-        )
-        self.completion_shortcut_edit.setText(
-            str(self._settings.get("completion_shortcut", "Ctrl+Shift+Space") or "")
-        )
+        self.chat_max_tokens_spin.setValue(settings["max_tokens"])
+        self.completions_enabled_checkbox.setChecked(settings["completions_enabled"])
+        self.project_tools_checkbox.setChecked(settings["project_tools_enabled"])
+        self.completion_temperature_spin.setValue(settings["completion_temperature"])
+        self.completion_max_tokens_spin.setValue(settings["completion_max_tokens"])
+        self.debounce_spin.setValue(settings["debounce_ms"])
+        self.completion_shortcut_edit.setText(settings["completion_shortcut"])
         self.accept_word_shortcut_edit.setText(
-            str(self._settings.get("completion_accept_word_shortcut", "Alt+Right") or "")
+            settings["completion_accept_word_shortcut"]
         )
         self.accept_line_shortcut_edit.setText(
-            str(self._settings.get("completion_accept_line_shortcut", "Alt+Shift+Right") or "")
+            settings["completion_accept_line_shortcut"]
         )
-        self.system_prompt_edit.setPlainText(
-            str(self._settings.get("chat_system_prompt", "") or "")
-        )
-        self.prompt_explain_edit.setPlainText(
-            str(self._settings.get("prompt_explain", "") or "")
-        )
-        self.prompt_fix_edit.setPlainText(
-            str(self._settings.get("prompt_fix", "") or "")
-        )
-        self.prompt_docstring_edit.setPlainText(
-            str(self._settings.get("prompt_docstring", "") or "")
-        )
-        self.prompt_ask_edit.setPlainText(
-            str(self._settings.get("prompt_ask", "") or "")
-        )
+        self.system_prompt_edit.setPlainText(settings["chat_system_prompt"])
+        self.prompt_explain_edit.setPlainText(settings["prompt_explain"])
+        self.prompt_fix_edit.setPlainText(settings["prompt_fix"])
+        self.prompt_docstring_edit.setPlainText(settings["prompt_docstring"])
+        self.prompt_ask_edit.setPlainText(settings["prompt_ask"])
 
         # Theme preset and color overrides
-        preset = str(self._settings.get("theme_preset", "default") or "default")
-        idx = self.theme_preset_combo.findData(preset)
-        if idx >= 0:
-            self.theme_preset_combo.setCurrentIndex(idx)
-        overrides_raw = self._settings.get("theme_color_overrides", "{}")
+        preset_index = self.theme_preset_combo.findData(settings["theme_preset"])
+        if preset_index >= 0:
+            self.theme_preset_combo.setCurrentIndex(preset_index)
         self._color_overrides = parse_color_overrides(
-            overrides_raw if isinstance(overrides_raw, str) else "{}"
+            settings["theme_color_overrides"]
         )
         self._refresh_color_swatches()
 
         # Appearance settings
-        chat_font = str(self._settings.get("chat_font_family", "sans-serif") or "sans-serif")
-        self.chat_font_combo.setCurrentFont(
-            QFont(chat_font)
-        )
-        self.chat_font_size_spin.setValue(
-            int(self._settings.get("chat_font_size", 10) or 10)
-        )
-        self.chat_line_height_spin.setValue(
-            float(self._settings.get("chat_line_height", 1.5) or 1.5)
-        )
-        code_font = str(self._settings.get("code_font_family", "Courier New") or "Courier New")
-        self.code_font_combo.setCurrentFont(
-            QFont(code_font)
-        )
-        self.code_font_size_spin.setValue(
-            int(self._settings.get("code_font_size", 9) or 9)
-        )
+        self.chat_font_combo.setCurrentFont(QFont(settings["chat_font_family"]))
+        self.chat_font_size_spin.setValue(settings["chat_font_size"])
+        self.chat_line_height_spin.setValue(settings["chat_line_height"])
+        self.code_font_combo.setCurrentFont(QFont(settings["code_font_family"]))
+        self.code_font_size_spin.setValue(settings["code_font_size"])
         # Select the configured Pygments style in each combo
-        dark_style = str(self._settings.get("pygments_style_dark", "monokai") or "monokai")
-        light_style = str(self._settings.get("pygments_style_light", "default") or "default")
-        idx = self.pygments_dark_combo.findText(dark_style)
-        if idx >= 0:
-            self.pygments_dark_combo.setCurrentIndex(idx)
-        idx = self.pygments_light_combo.findText(light_style)
-        if idx >= 0:
-            self.pygments_light_combo.setCurrentIndex(idx)
-        self.bubble_padding_spin.setValue(
-            int(self._settings.get("bubble_padding", 12) or 12)
+        dark_index = self.pygments_dark_combo.findText(settings["pygments_style_dark"])
+        if dark_index >= 0:
+            self.pygments_dark_combo.setCurrentIndex(dark_index)
+        light_index = self.pygments_light_combo.findText(
+            settings["pygments_style_light"]
         )
-        self.bubble_radius_spin.setValue(
-            int(self._settings.get("bubble_border_radius", 8) or 8)
-        )
-        self.bubble_spacing_spin.setValue(
-            int(self._settings.get("bubble_spacing", 4) or 4)
-        )
+        if light_index >= 0:
+            self.pygments_light_combo.setCurrentIndex(light_index)
+        self.bubble_padding_spin.setValue(settings["bubble_padding"])
+        self.bubble_radius_spin.setValue(settings["bubble_border_radius"])
+        self.bubble_spacing_spin.setValue(settings["bubble_spacing"])
 
         # Behavior settings
-        self.idle_delay_spin.setValue(
-            int(self._settings.get("idle_completion_delay_ms", 1000) or 1000)
-        )
+        self.idle_delay_spin.setValue(settings["idle_completion_delay_ms"])
         self.post_accept_delay_spin.setValue(
-            int(self._settings.get("post_accept_completion_delay_ms", 75) or 75)
+            settings["post_accept_completion_delay_ms"]
         )
-        self._select_native_popup_policy(
-            self._settings.get("native_popup_policy", DEFAULT_NATIVE_POPUP_POLICY)
-        )
+        self._select_native_popup_policy(settings["native_popup_policy"])
 
         self._select_chat_model()
         self._refresh_completion_model_options()

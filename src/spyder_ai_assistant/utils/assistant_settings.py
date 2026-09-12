@@ -15,6 +15,10 @@ from spyder_ai_assistant.utils.coerce import bounded_int
 from spyder_ai_assistant.utils.constants import DEFAULT_OLLAMA_HOST
 from spyder_ai_assistant.utils.chat_inference import (
     DEFAULT_CHAT_MAX_TOKENS,
+    MAX_CHAT_MAX_TOKENS,
+    MAX_CHAT_TEMPERATURE,
+    MIN_CHAT_MAX_TOKENS,
+    MIN_CHAT_TEMPERATURE,
     normalize_chat_max_tokens,
     normalize_chat_temperature,
 )
@@ -148,6 +152,28 @@ ASSISTANT_CONF_DEFAULTS = {
     "idle_completion_delay_ms": DEFAULT_IDLE_COMPLETION_DELAY_MS,
     "post_accept_completion_delay_ms": DEFAULT_POST_ACCEPT_COMPLETION_DELAY_MS,
     "native_popup_policy": DEFAULT_NATIVE_POPUP_POLICY,
+}
+
+# Numeric bounds for the options the settings dialog edits with spin boxes.
+# One owner for the clamps applied in ``from_mapping`` and the ranges the
+# dialog gives its widgets, which previously disagreed silently whenever one
+# side was corrected. Values are ``(minimum, maximum)``.
+ASSISTANT_OPTION_RANGES = {
+    "chat_temperature": (MIN_CHAT_TEMPERATURE, MAX_CHAT_TEMPERATURE),
+    "max_tokens": (MIN_CHAT_MAX_TOKENS, MAX_CHAT_MAX_TOKENS),
+    "completion_temperature": (0.0, 2.0),
+    "completion_max_tokens": (16, 4096),
+    "debounce_ms": (0, 5000),
+    "chat_font_size": (6, 24),
+    "chat_line_height": (1.0, 3.0),
+    "code_font_size": (6, 24),
+    "bubble_padding": (4, 32),
+    "bubble_border_radius": (0, 24),
+    "bubble_spacing": (0, 16),
+    "idle_completion_delay_ms": (100, 5000),
+    "post_accept_completion_delay_ms": (0, 1000),
+    # Enforced by ``normalize_mcp_port``; repeated here for the dialog widget.
+    "mcp_port": (1, 65535),
 }
 
 # Options every editor's ghost text manager reads directly (the plugin pushes
@@ -387,8 +413,7 @@ class AssistantSettings:
                     DEFAULT_COMPLETION_TEMPERATURE,
                 ),
                 DEFAULT_COMPLETION_TEMPERATURE,
-                minimum=0.0,
-                maximum=2.0,
+                *ASSISTANT_OPTION_RANGES["completion_temperature"],
             ),
             max_tokens=normalize_chat_max_tokens(
                 values.get("max_tokens", DEFAULT_CHAT_MAX_TOKENS)
@@ -399,8 +424,7 @@ class AssistantSettings:
                     DEFAULT_COMPLETION_MAX_TOKENS,
                 ),
                 DEFAULT_COMPLETION_MAX_TOKENS,
-                minimum=16,
-                maximum=4096,
+                *ASSISTANT_OPTION_RANGES["completion_max_tokens"],
             ),
             completions_enabled=_normalize_bool(
                 values.get("completions_enabled", DEFAULT_COMPLETIONS_ENABLED),
@@ -452,14 +476,12 @@ class AssistantSettings:
             chat_font_size=bounded_int(
                 values.get("chat_font_size", DEFAULT_CHAT_FONT_SIZE),
                 DEFAULT_CHAT_FONT_SIZE,
-                minimum=6,
-                maximum=24,
+                *ASSISTANT_OPTION_RANGES["chat_font_size"],
             ),
             chat_line_height=_normalize_float(
                 values.get("chat_line_height", DEFAULT_CHAT_LINE_HEIGHT),
                 DEFAULT_CHAT_LINE_HEIGHT,
-                minimum=1.0,
-                maximum=3.0,
+                *ASSISTANT_OPTION_RANGES["chat_line_height"],
                 precision=1,
             ),
             code_font_family=_normalize_string(
@@ -470,8 +492,7 @@ class AssistantSettings:
             code_font_size=bounded_int(
                 values.get("code_font_size", DEFAULT_CODE_FONT_SIZE),
                 DEFAULT_CODE_FONT_SIZE,
-                minimum=6,
-                maximum=24,
+                *ASSISTANT_OPTION_RANGES["code_font_size"],
             ),
             pygments_style_dark=_normalize_string(
                 values.get("pygments_style_dark", DEFAULT_PYGMENTS_STYLE_DARK),
@@ -486,20 +507,17 @@ class AssistantSettings:
             bubble_padding=bounded_int(
                 values.get("bubble_padding", DEFAULT_BUBBLE_PADDING),
                 DEFAULT_BUBBLE_PADDING,
-                minimum=4,
-                maximum=32,
+                *ASSISTANT_OPTION_RANGES["bubble_padding"],
             ),
             bubble_border_radius=bounded_int(
                 values.get("bubble_border_radius", DEFAULT_BUBBLE_BORDER_RADIUS),
                 DEFAULT_BUBBLE_BORDER_RADIUS,
-                minimum=0,
-                maximum=24,
+                *ASSISTANT_OPTION_RANGES["bubble_border_radius"],
             ),
             bubble_spacing=bounded_int(
                 values.get("bubble_spacing", DEFAULT_BUBBLE_SPACING),
                 DEFAULT_BUBBLE_SPACING,
-                minimum=0,
-                maximum=16,
+                *ASSISTANT_OPTION_RANGES["bubble_spacing"],
             ),
             theme_preset=_normalize_string(
                 values.get("theme_preset", DEFAULT_THEME_PRESET),
@@ -514,8 +532,7 @@ class AssistantSettings:
             debounce_ms=bounded_int(
                 values.get("debounce_ms", DEFAULT_DEBOUNCE_MS),
                 DEFAULT_DEBOUNCE_MS,
-                minimum=0,
-                maximum=5000,
+                *ASSISTANT_OPTION_RANGES["debounce_ms"],
             ),
             idle_completion_delay_ms=bounded_int(
                 values.get(
@@ -523,8 +540,7 @@ class AssistantSettings:
                     DEFAULT_IDLE_COMPLETION_DELAY_MS,
                 ),
                 DEFAULT_IDLE_COMPLETION_DELAY_MS,
-                minimum=100,
-                maximum=5000,
+                *ASSISTANT_OPTION_RANGES["idle_completion_delay_ms"],
             ),
             post_accept_completion_delay_ms=bounded_int(
                 values.get(
@@ -532,8 +548,7 @@ class AssistantSettings:
                     DEFAULT_POST_ACCEPT_COMPLETION_DELAY_MS,
                 ),
                 DEFAULT_POST_ACCEPT_COMPLETION_DELAY_MS,
-                minimum=0,
-                maximum=1000,
+                *ASSISTANT_OPTION_RANGES["post_accept_completion_delay_ms"],
             ),
         )
 
