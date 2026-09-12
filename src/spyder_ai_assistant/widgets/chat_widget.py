@@ -1166,7 +1166,23 @@ class ChatWidget(PluginMainWidget):
 
         The transcript themes itself from the same colours, so both surfaces
         move together; this only covers the chrome Qt draws as widgets.
+
+        Guarded against re-entry: ``setStyleSheet`` re-polishes the widget and
+        Qt answers with another palette change, which arrives back here. Qt
+        swallows exceptions raised in an event handler, so without the guard
+        each theme change recursed until the stack ran out and every rebuild
+        was abandoned half-applied, leaving the pane partly unstyled.
         """
+        if getattr(self, "_applying_ui_theme", False):
+            return
+        self._applying_ui_theme = True
+        try:
+            self._rebuild_ui_theme()
+        finally:
+            self._applying_ui_theme = False
+
+    def _rebuild_ui_theme(self):
+        """Resolve the theme and push it to the chrome and every transcript."""
         is_dark = is_dark_interface()
         try:
             preset = self.get_conf("theme_preset")

@@ -366,10 +366,11 @@ class MarkdownRenderer:
                 # actions. Uses the unescaped version so insertions clean.
                 index = len(self._code_blocks)
                 self._code_blocks.append(raw_code)
-                # The actions ride in the header strip beside the language
-                # rather than trailing under the block, so they read as
-                # controls belonging to the card. No underline there: the
-                # strip already frames them.
+                # Right-aligned under the block, so they read as that card's
+                # controls. No background chip: Qt honours a background on a
+                # link but ignores its padding, so the colour hugs the text
+                # and reads as a highlighter mark rather than a button. No
+                # ellipsis either; these are controls, not menu items.
                 action_style = (
                     f'color:{link_color}; font-size:'
                     f'{max(7, self.code_font_size - 1)}pt; font-weight:600;'
@@ -377,8 +378,8 @@ class MarkdownRenderer:
                 )
                 actions = (
                     f'<a href="copy://{index}" style="{action_style}">Copy</a>'
-                    f'&nbsp;&nbsp;&nbsp;'
-                    f'<a href="apply://{index}" style="{action_style}">Apply...</a>'
+                    f'&nbsp;&nbsp;&nbsp;&nbsp;'
+                    f'<a href="apply://{index}" style="{action_style}">Apply</a>'
                 )
 
             block_html = self.code_block_html(lang, code, highlighted, actions)
@@ -744,18 +745,29 @@ class MarkdownRenderer:
         color = "" if highlighted else f' color:{t["code_block_text"]};'
         # Explicit vertical margin: Qt's default <pre> margin is larger than
         # the spacing used around lists and tables in the transcript.
-        # The strip lives inside the <pre>, never in a wrapper around it. A
+        # The block keeps its own margin, and never a wrapper around it: a
         # table wrapper stops <pre> being the block opener, which the
         # transcript pins, and contributes its own block spacing on top of the
         # block margin, which brings back the blank gap fixed in 0.7.2.
-        return (
+        block = (
             f'<pre style="background-color:{t["code_block_bg"]};{color}'
-            f' margin:6px 0;'
+            f' margin:6px 0{" 0 0" if actions else ""};'
             f' font-family:{self.code_font_family},monospace;'
             f' font-size:{self.code_font_size}pt;'
             f' padding:8px 12px; white-space:pre-wrap;'
             f' word-wrap:break-word;">'
-            f'{self.code_header_html(lang, actions)}{body}</pre>'
+            f'{self.code_header_html(lang)}{body}</pre>'
+        )
+        if not actions:
+            return block
+        # The actions go in a row *after* the block, which is the only place
+        # Qt will align to the right edge: inside a <pre> it ignores float and
+        # breaks an aligned paragraph out above the code. What comes after the
+        # block is unconstrained, unlike what precedes it.
+        return block + (
+            f'<table width="100%" cellspacing="0" cellpadding="0"'
+            f' style="margin:0 0 6px 0;">'
+            f'<tr><td align="right">{actions}</td></tr></table>'
         )
 
     def code_header_html(self, lang, actions=""):
