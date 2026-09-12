@@ -30,6 +30,7 @@ import re
 import subprocess
 from typing import Any, Callable, Optional
 
+from spyder_ai_assistant.utils.coerce import bounded_int
 from spyder_ai_assistant.utils.context import SKIP_DIRS
 
 logger = logging.getLogger(__name__)
@@ -209,7 +210,7 @@ class ProjectToolsService:
         subdir = self._resolve_path(root, args.get("subdir", ""))
         if not os.path.isdir(subdir):
             raise ValueError(f"Not a directory: {os.path.relpath(subdir, root)}")
-        limit = _bounded_int(args.get("max_entries"), MAX_LIST_ENTRIES, MAX_LIST_ENTRIES)
+        limit = bounded_int(args.get("max_entries"), MAX_LIST_ENTRIES, 1, MAX_LIST_ENTRIES)
         pattern = str(args.get("glob", "") or "").strip()
         files = []
         truncated = False
@@ -242,13 +243,13 @@ class ProjectToolsService:
         with open(absolute, "r", encoding="utf-8", errors="replace") as handle:
             lines = handle.read().splitlines()
         total_lines = len(lines)
-        start = _bounded_int(args.get("start_line"), 1, max(total_lines, 1))
-        end = _bounded_int(args.get("end_line"), total_lines, max(total_lines, 1))
+        start = bounded_int(args.get("start_line"), 1, 1, max(total_lines, 1))
+        end = bounded_int(args.get("end_line"), total_lines, 1, max(total_lines, 1))
         if end < start:
             raise ValueError("end_line must not be smaller than start_line.")
         selected = lines[start - 1:end]
         text = "\n".join(selected)
-        max_chars = _bounded_int(args.get("max_chars"), MAX_READ_CHARS, MAX_READ_CHARS)
+        max_chars = bounded_int(args.get("max_chars"), MAX_READ_CHARS, 1, MAX_READ_CHARS)
         truncated = len(text) > max_chars
         if truncated:
             text = text[:max_chars]
@@ -274,7 +275,7 @@ class ProjectToolsService:
         except re.error as error:
             raise ValueError(f"Invalid search pattern: {error}") from error
         file_glob = str(args.get("glob", "") or "").strip()
-        limit = _bounded_int(args.get("max_results"), MAX_SEARCH_RESULTS, MAX_SEARCH_RESULTS)
+        limit = bounded_int(args.get("max_results"), MAX_SEARCH_RESULTS, 1, MAX_SEARCH_RESULTS)
         matches = []
         scanned = 0
         truncated = False
@@ -320,7 +321,7 @@ class ProjectToolsService:
         path = str(args.get("path", "") or "").strip()
         if path:
             command.extend(["--", os.path.relpath(self._resolve_path(root, path), root)])
-        max_chars = _bounded_int(args.get("max_chars"), MAX_GIT_CHARS, MAX_GIT_CHARS)
+        max_chars = bounded_int(args.get("max_chars"), MAX_GIT_CHARS, 1, MAX_GIT_CHARS)
         output = self._run_git(root, command)
         truncated = len(output) > max_chars
         if truncated:
@@ -331,7 +332,7 @@ class ProjectToolsService:
         return {"diff": output or "(no changes)", "truncated": truncated}, note
 
     def _git_log(self, root, args):
-        count = _bounded_int(args.get("max_count"), 10, MAX_GIT_LOG_COUNT)
+        count = bounded_int(args.get("max_count"), 10, 1, MAX_GIT_LOG_COUNT)
         command = ["log", "--no-color", f"--max-count={count}", "--date=short",
                    "--format=%h %ad %an%n    %s"]
         path = str(args.get("path", "") or "").strip()
@@ -363,10 +364,3 @@ class ProjectToolsService:
         return completed.stdout.rstrip("\n")
 
 
-def _bounded_int(value, default, maximum):
-    """Coerce ``value`` to an int in ``[1, maximum]`` with a default."""
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        number = int(default)
-    return max(1, min(int(maximum), number))

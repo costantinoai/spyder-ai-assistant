@@ -41,6 +41,7 @@ from spyder_ai_assistant.utils.context import (
     build_action_prompt,
 )
 from spyder_ai_assistant.utils.context_service import EditorContextService
+from spyder_ai_assistant.utils.spyder_plugins import safe_get_plugin
 from spyder_ai_assistant.utils.project_tools import (
     ProjectToolsService,
     dispatch_chat_tool_request,
@@ -469,7 +470,7 @@ class AIChatPlugin(SpyderDockablePlugin):
         if project_path and os.path.isdir(project_path):
             return project_path
 
-        editor_plugin = self.get_plugin(Plugins.Editor, error=False)
+        editor_plugin = safe_get_plugin(self, Plugins.Editor)
         if editor_plugin is not None:
             editor = editor_plugin.get_current_editor()
             filename = str(getattr(editor, "filename", "") or "").strip()
@@ -962,27 +963,11 @@ class AIChatPlugin(SpyderDockablePlugin):
 
     def _safe_get_editor_plugin(self):
         """Return the Spyder Editor plugin without raising."""
-        try:
-            return self.get_plugin(Plugins.Editor, error=False)
-        except TypeError:
-            try:
-                return self.get_plugin(Plugins.Editor)
-            except Exception:
-                return None
-        except Exception:
-            return None
+        return safe_get_plugin(self, Plugins.Editor)
 
     def _safe_get_projects_plugin(self):
         """Return the Spyder Projects plugin without raising."""
-        try:
-            return self.get_plugin(Plugins.Projects, error=False)
-        except TypeError:
-            try:
-                return self.get_plugin(Plugins.Projects)
-            except Exception:
-                return None
-        except Exception:
-            return None
+        return safe_get_plugin(self, Plugins.Projects)
 
     # --- Chat session persistence ---
 
@@ -1000,7 +985,7 @@ class AIChatPlugin(SpyderDockablePlugin):
 
     def _get_active_project_path(self):
         """Return the active Spyder project path, if any."""
-        projects_plugin = self.get_plugin(Plugins.Projects, error=False)
+        projects_plugin = safe_get_plugin(self, Plugins.Projects)
         if projects_plugin is None:
             return None
 
@@ -1128,7 +1113,7 @@ class AIChatPlugin(SpyderDockablePlugin):
         ipython_plugin = self.get_plugin(Plugins.IPythonConsole)
         self._runtime_context.bind_ipython_console(ipython_plugin)
 
-        variable_explorer = self.get_plugin(Plugins.VariableExplorer, error=False)
+        variable_explorer = safe_get_plugin(self, Plugins.VariableExplorer)
         self._runtime_context.set_variable_explorer_plugin(variable_explorer)
         shell_targets, selected_shell_id = self._runtime_context.get_shell_targets()
         self.get_widget().update_runtime_shell_targets(

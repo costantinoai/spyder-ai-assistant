@@ -15,6 +15,7 @@ from ollama import ResponseError
 from qtpy.QtCore import QObject, QMutex, QMutexLocker, Signal
 
 from spyder_ai_assistant.backend.chat_providers import ChatProviderRegistry
+from spyder_ai_assistant.utils.constants import DEFAULT_OLLAMA_HOST
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +212,7 @@ class ChatWorker(QObject):
             return record["endpoint"]
         if provider_id == "openai_compatible":
             return self._settings.get("openai_compatible_base_url", "<unset>")
-        return self._settings.get("ollama_host", "http://localhost:11434")
+        return self._settings.get("ollama_host", DEFAULT_OLLAMA_HOST)
 
 
 # Backward-compatible alias kept for older imports and docs.

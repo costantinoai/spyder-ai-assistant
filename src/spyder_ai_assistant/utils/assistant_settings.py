@@ -11,6 +11,8 @@ from spyder_ai_assistant.mcp.settings import (
     normalize_mcp_host,
     normalize_mcp_port,
 )
+from spyder_ai_assistant.utils.coerce import bounded_int
+from spyder_ai_assistant.utils.constants import DEFAULT_OLLAMA_HOST
 from spyder_ai_assistant.utils.chat_inference import (
     DEFAULT_CHAT_MAX_TOKENS,
     normalize_chat_max_tokens,
@@ -23,7 +25,8 @@ from spyder_ai_assistant.utils.provider_profiles import (
 )
 
 
-DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+# DEFAULT_OLLAMA_HOST is imported above from utils.constants and re-exported
+# here, so the callers that already import settings keep working.
 DEFAULT_CHAT_MODEL = "qwen3-coder-next"
 DEFAULT_COMPLETION_MODEL = "qwen3-coder-next"
 DEFAULT_COMPLETION_TEMPERATURE = 0.15
@@ -222,20 +225,6 @@ def _normalize_bool(value, default=False):
     return bool(value)
 
 
-def _normalize_int(value, default, minimum=None, maximum=None):
-    """Return one normalized integer setting."""
-    try:
-        normalized = int(value)
-    except (TypeError, ValueError):
-        normalized = int(default)
-
-    if minimum is not None:
-        normalized = max(int(minimum), normalized)
-    if maximum is not None:
-        normalized = min(int(maximum), normalized)
-    return normalized
-
-
 def _normalize_float(value, default, minimum=None, maximum=None, precision=2):
     """Return one normalized floating-point setting."""
     try:
@@ -404,7 +393,7 @@ class AssistantSettings:
             max_tokens=normalize_chat_max_tokens(
                 values.get("max_tokens", DEFAULT_CHAT_MAX_TOKENS)
             ),
-            completion_max_tokens=_normalize_int(
+            completion_max_tokens=bounded_int(
                 values.get(
                     "completion_max_tokens",
                     DEFAULT_COMPLETION_MAX_TOKENS,
@@ -460,7 +449,7 @@ class AssistantSettings:
                 DEFAULT_CHAT_FONT_FAMILY,
                 default_on_blank=True,
             ),
-            chat_font_size=_normalize_int(
+            chat_font_size=bounded_int(
                 values.get("chat_font_size", DEFAULT_CHAT_FONT_SIZE),
                 DEFAULT_CHAT_FONT_SIZE,
                 minimum=6,
@@ -478,7 +467,7 @@ class AssistantSettings:
                 DEFAULT_CODE_FONT_FAMILY,
                 default_on_blank=True,
             ),
-            code_font_size=_normalize_int(
+            code_font_size=bounded_int(
                 values.get("code_font_size", DEFAULT_CODE_FONT_SIZE),
                 DEFAULT_CODE_FONT_SIZE,
                 minimum=6,
@@ -494,19 +483,19 @@ class AssistantSettings:
                 DEFAULT_PYGMENTS_STYLE_LIGHT,
                 default_on_blank=True,
             ),
-            bubble_padding=_normalize_int(
+            bubble_padding=bounded_int(
                 values.get("bubble_padding", DEFAULT_BUBBLE_PADDING),
                 DEFAULT_BUBBLE_PADDING,
                 minimum=4,
                 maximum=32,
             ),
-            bubble_border_radius=_normalize_int(
+            bubble_border_radius=bounded_int(
                 values.get("bubble_border_radius", DEFAULT_BUBBLE_BORDER_RADIUS),
                 DEFAULT_BUBBLE_BORDER_RADIUS,
                 minimum=0,
                 maximum=24,
             ),
-            bubble_spacing=_normalize_int(
+            bubble_spacing=bounded_int(
                 values.get("bubble_spacing", DEFAULT_BUBBLE_SPACING),
                 DEFAULT_BUBBLE_SPACING,
                 minimum=0,
@@ -522,13 +511,13 @@ class AssistantSettings:
                 DEFAULT_THEME_COLOR_OVERRIDES,
                 default_on_blank=True,
             ),
-            debounce_ms=_normalize_int(
+            debounce_ms=bounded_int(
                 values.get("debounce_ms", DEFAULT_DEBOUNCE_MS),
                 DEFAULT_DEBOUNCE_MS,
                 minimum=0,
                 maximum=5000,
             ),
-            idle_completion_delay_ms=_normalize_int(
+            idle_completion_delay_ms=bounded_int(
                 values.get(
                     "idle_completion_delay_ms",
                     DEFAULT_IDLE_COMPLETION_DELAY_MS,
@@ -537,7 +526,7 @@ class AssistantSettings:
                 minimum=100,
                 maximum=5000,
             ),
-            post_accept_completion_delay_ms=_normalize_int(
+            post_accept_completion_delay_ms=bounded_int(
                 values.get(
                     "post_accept_completion_delay_ms",
                     DEFAULT_POST_ACCEPT_COMPLETION_DELAY_MS,

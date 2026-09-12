@@ -362,15 +362,7 @@ class SpyderMCPBridge(QObject):
 
     def _get_plugin(self, plugin_name):
         """Return one optional Spyder plugin without raising."""
-        try:
-            return self._plugin.get_plugin(plugin_name, error=False)
-        except TypeError:
-            try:
-                return self._plugin.get_plugin(plugin_name)
-            except Exception:
-                return None
-        except Exception:
-            return None
+        return safe_get_plugin(self._plugin, plugin_name)
 
     def _resolve_editor_target(self, editor_plugin, filename=""):
         """Return the current or explicitly addressed Spyder editor."""

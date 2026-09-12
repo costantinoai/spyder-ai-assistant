@@ -50,6 +50,8 @@ from spyder_ai_assistant.utils.assistant_settings import (
     NATIVE_POPUP_POLICY_LABELS,
     AssistantSettings,
 )
+from spyder_ai_assistant.utils.chat_inference import normalize_chat_temperature
+from spyder_ai_assistant.utils.constants import DEFAULT_OLLAMA_HOST
 from spyder_ai_assistant.utils.chat_themes import (
     EXPOSED_COLOR_KEYS,
     get_preset_names,
@@ -176,7 +178,7 @@ class AssistantSettingsDialog(QDialog):
         local_group = QGroupBox("Local endpoint", models_tab)
         local_form = QFormLayout(local_group)
         self.ollama_host_edit = QLineEdit(local_group)
-        self.ollama_host_edit.setPlaceholderText("http://localhost:11434")
+        self.ollama_host_edit.setPlaceholderText(DEFAULT_OLLAMA_HOST)
         local_form.addRow("Ollama host", self.ollama_host_edit)
         models_layout.addWidget(local_group)
 
@@ -741,16 +743,13 @@ class AssistantSettingsDialog(QDialog):
 
     def _load_settings(self):
         """Load the current config-backed settings into the dialog widgets."""
-        chat_temperature = self._settings.get("chat_temperature", 0.5)
-        try:
-            chat_temperature = float(chat_temperature)
-        except (TypeError, ValueError):
-            chat_temperature = 0.5
-        if chat_temperature > 2.0:
-            chat_temperature /= 10.0
+        # One owner for the legacy x10 encoding and the valid range.
+        chat_temperature = normalize_chat_temperature(
+            self._settings.get("chat_temperature", 0.5)
+        )
 
         self.ollama_host_edit.setText(
-            str(self._settings.get("ollama_host", "http://localhost:11434") or "")
+            str(self._settings.get("ollama_host", DEFAULT_OLLAMA_HOST) or "")
         )
         self.mcp_enabled_checkbox.setChecked(
             bool(self._settings.get("mcp_enabled", True))
@@ -949,7 +948,7 @@ class AssistantSettingsDialog(QDialog):
         completion_payload = self.completion_model_combo.currentData() or {}
         selected = dict(self._settings)
         selected.update({
-            "ollama_host": self.ollama_host_edit.text().strip() or "http://localhost:11434",
+            "ollama_host": self.ollama_host_edit.text().strip() or DEFAULT_OLLAMA_HOST,
             "mcp_enabled": bool(self.mcp_enabled_checkbox.isChecked()),
             "mcp_host": self._current_mcp_host(),
             "mcp_port": self._current_mcp_port(),

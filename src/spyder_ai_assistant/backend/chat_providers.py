@@ -20,6 +20,7 @@ import httpx
 from spyder_ai_assistant.utils.provider_profiles import compatible_api_url
 
 from spyder_ai_assistant.backend.client import OllamaClient
+from spyder_ai_assistant.utils.constants import DEFAULT_OLLAMA_HOST
 from spyder_ai_assistant.utils.provider_profiles import (
     DEFAULT_COMPATIBLE_PROFILE_LABEL,
     PROVIDER_KIND_OLLAMA,
@@ -115,7 +116,7 @@ class OllamaChatProvider(BaseChatProvider):
     provider_kind = PROVIDER_KIND_OLLAMA
 
     def __init__(self, host):
-        self._host = host or "http://localhost:11434"
+        self._host = host or DEFAULT_OLLAMA_HOST
         self._client = OllamaClient(host=self._host)
         self.endpoint = self._host
 
@@ -385,7 +386,7 @@ class ChatProviderRegistry:
         )
         providers = {
             OllamaChatProvider.provider_id: OllamaChatProvider(
-                self._settings.get("ollama_host", "http://localhost:11434")
+                self._settings.get("ollama_host", DEFAULT_OLLAMA_HOST)
             )
         }
         for profile in profiles:

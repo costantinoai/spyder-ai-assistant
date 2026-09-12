@@ -23,6 +23,8 @@ from qtpy.QtCore import QObject, Signal
 
 from spyder.config.base import CHECK_ALL, EXCLUDED_NAMES
 
+from spyder_ai_assistant.utils.coerce import bounded_int
+
 logger = logging.getLogger(__name__)
 
 
@@ -835,7 +837,7 @@ class RuntimeContextService(QObject):
         return result
 
     def _build_console_result(self, tool, runtime_context, args, query_note):
-        max_chars = _bounded_int(
+        max_chars = bounded_int(
             args.get("max_chars"),
             default=MAX_RUNTIME_CONSOLE_CHARS,
             minimum=200,
@@ -857,7 +859,7 @@ class RuntimeContextService(QObject):
         return result
 
     def _build_list_variables_result(self, tool, shellwidget, runtime_context, args, query_note):
-        limit = _bounded_int(
+        limit = bounded_int(
             args.get("limit"),
             default=MAX_RUNTIME_REQUEST_VARIABLES,
             minimum=1,
@@ -1929,14 +1931,6 @@ def _stringify_scalar(value):
         except Exception:
             pass
     return str(value)
-
-
-def _bounded_int(value, default, minimum, maximum):
-    try:
-        numeric = int(value)
-    except (TypeError, ValueError):
-        numeric = default
-    return max(minimum, min(numeric, maximum))
 
 
 def _normalize_dtype(dtype):

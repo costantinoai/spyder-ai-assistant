@@ -11,6 +11,7 @@ import time
 
 import httpx
 
+from spyder_ai_assistant.utils.constants import DEFAULT_OLLAMA_HOST
 from spyder_ai_assistant.utils.provider_profiles import compatible_api_url
 from ollama import Client
 
@@ -151,7 +152,7 @@ class OllamaClient:
         host: Ollama server URL (e.g., "http://localhost:11434").
     """
 
-    def __init__(self, host="http://localhost:11434"):
+    def __init__(self, host=DEFAULT_OLLAMA_HOST):
         self._host = host
         self._client = Client(host=host)
         # Track models that don't support FIM (suffix) to avoid retrying

@@ -39,6 +39,7 @@ from spyder_ai_assistant.utils.assistant_settings import (
     COMPLETION_PROVIDER_CONF_DEFAULTS,
     AssistantSettings,
 )
+from spyder_ai_assistant.utils.constants import DEFAULT_OLLAMA_HOST
 from spyder_ai_assistant.utils.logging import configure_package_logging
 from spyder_ai_assistant.utils.text_positions import python_index, utf16_length
 from spyder_ai_assistant.utils.provider_profiles import (
@@ -390,7 +391,7 @@ def _build_completion_backend_cache_id(provider_kind, endpoint, profile_id=""):
             if normalized_profile_id
             else f"{normalized_kind}:{normalized_endpoint}"
         )
-    return f"{normalized_kind}:{normalized_endpoint or 'http://localhost:11434'}"
+    return f"{normalized_kind}:{normalized_endpoint or DEFAULT_OLLAMA_HOST}"
 
 
 def _summarize_text_for_log(text, max_chars=80):
@@ -512,13 +513,13 @@ def resolve_completion_backend_settings(
     chat_provider=PROVIDER_KIND_OLLAMA,
     chat_provider_profile_id="",
     provider_profiles="[]",
-    ollama_host="http://localhost:11434",
+    ollama_host=DEFAULT_OLLAMA_HOST,
     openai_compatible_base_url="",
     openai_compatible_api_key="",
 ):
     """Resolve the active completion backend from plugin config values."""
     normalized_ollama_host = (
-        str(ollama_host or "").strip() or "http://localhost:11434"
+        str(ollama_host or "").strip() or DEFAULT_OLLAMA_HOST
     )
     normalized_provider = (
         str(chat_provider or PROVIDER_KIND_OLLAMA).strip()
@@ -1081,7 +1082,7 @@ class CompletionWorker(QObject):
         self._backend_settings = dict(
             backend_settings or {
                 "provider_kind": PROVIDER_KIND_OLLAMA,
-                "endpoint": "http://localhost:11434",
+                "endpoint": DEFAULT_OLLAMA_HOST,
                 "api_key": "",
             }
         )
@@ -1299,13 +1300,13 @@ class CompletionWorker(QObject):
             )
         else:
             self._client = OllamaClient(
-                host=endpoint or "http://localhost:11434"
+                host=endpoint or DEFAULT_OLLAMA_HOST
             )
         self._client_signature = signature
         logger.info(
             "Created AI completion client for provider=%s endpoint=%s",
             provider_kind,
-            endpoint or "http://localhost:11434",
+            endpoint or DEFAULT_OLLAMA_HOST,
         )
         return self._client
 
