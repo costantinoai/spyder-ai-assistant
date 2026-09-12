@@ -52,6 +52,15 @@ provider profiles on **Advanced**.
 | Provider profile ID | `chat_provider_profile_id` | `""` |
 | Provider profiles (JSON) | `provider_profiles` | `"[]"` |
 
+**Provider Profiles...**, in the chat pane's **Settings** menu, manages those
+profiles. Each takes a name, a Base URL and an optional API key, and the form
+flags a Base URL with no scheme or host, one that already includes the request
+path (the client appends `/v1` and asks for `/models` itself), and a remote
+endpoint left without a key. **Test connection** probes the endpoint being
+edited and reports how many models it returned, or why it could not be
+reached; the probe runs off the GUI thread, so the dialog stays usable while
+the request is in flight.
+
 ### Chat and Completions: generation
 
 Controls inference parameters. The chat rows are on the **Chat** tab

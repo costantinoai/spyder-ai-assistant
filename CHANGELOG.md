@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Added
+
+- "Test connection" in Provider Profiles: probe the endpoint you are
+  editing and see how many models it returns, or the transport error if it
+  cannot be reached. The probe runs on a worker thread, so the dialog stays
+  usable while the request is in flight, and every profile keeps its own
+  last result
+- inline notes in Provider Profiles for a Base URL with no scheme or no
+  host, for one that already includes the request path (the client appends
+  `/v1` and asks for `/models` itself, so it would be requested twice), and
+  for a remote endpoint left without an API key. A mistyped endpoint used
+  to fail silently: its models were simply missing from the dropdown
+
 ### Changed
 
 - project and git tools (`project.search`, `git.diff`, and the rest) now run

@@ -124,7 +124,7 @@ An edit must be previewed first, then applied with `confirm=true` and the docume
 
 ### Other providers
 
-Add OpenAI-compatible endpoints (cloud or self-hosted) under **Provider Profiles...** in the **Settings** menu, each with a name, URL and API key. Their models join the same dropdowns for chat and completions.
+Add OpenAI-compatible endpoints (cloud or self-hosted) under **Provider Profiles...** in the **Settings** menu, each with a name, URL and API key. **Test connection** checks one before you rely on it. Their models join the same dropdowns for chat and completions.
 
 ## Choosing a model
 

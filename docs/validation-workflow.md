@@ -227,6 +227,11 @@ it clears stale local build artifacts before rebuilding the sdist and wheel.
 - switch between multiple compatible profiles in the shared model selector
 - remove one compatible profile and confirm stale selection falls back cleanly
 - confirm a failing profile does not prevent working profiles from answering
+- click the real "Test connection" button for a reachable endpoint and for a
+  dead one, confirming the probe runs off the GUI thread, the modal dialog
+  keeps being serviced while the request is in flight, the pending state is
+  shown, and the button re-enables afterwards
+- confirm a malformed Base URL is flagged inline and cannot be probed at all
 
 ### Phase 13 history-discovery validation
 

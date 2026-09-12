@@ -156,6 +156,8 @@ class ChatWidget(PluginMainWidget):
         self._runtime_shells = []
         # Latest provider diagnostics emitted by the worker after model refresh.
         self._provider_diagnostics = []
+        # Set by the plugin: probes one profile endpoint on a worker thread.
+        self._provider_connection_tester = None
         # Latest provider-aware model payloads emitted by the worker.
         self._available_model_payloads = []
         # Currently open global assistant settings dialog, if any.
@@ -1226,6 +1228,15 @@ class ChatWidget(PluginMainWidget):
         """Set the callable that returns the embedded MCP server status."""
         self._mcp_server_status_provider = provider
 
+    def set_provider_connection_tester(self, tester):
+        """Set the callable that probes one provider profile's endpoint.
+
+        Called as ``tester(profile, on_result)``. The profile dialog is
+        modal, so the probe has to run off the GUI thread or the whole
+        dialog freezes for the length of the HTTP request.
+        """
+        self._provider_connection_tester = tester
+
     def set_mcp_client_launcher(self, launcher):
         """Set the callable that launches one external MCP-aware client."""
         self._mcp_client_launcher = launcher
@@ -1319,6 +1330,7 @@ class ChatWidget(PluginMainWidget):
             profiles=self._provider_profiles(),
             diagnostics=self._provider_diagnostics,
             parent=self,
+            connection_tester=self._provider_connection_tester,
         )
         if dialog.exec_() != dialog.Accepted:
             return False

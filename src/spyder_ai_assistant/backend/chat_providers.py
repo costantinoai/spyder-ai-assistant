@@ -282,6 +282,56 @@ class OpenAICompatibleChatProvider(BaseChatProvider):
         }
 
 
+# How many model names one probe reports back, so a large catalogue does
+# not fill the dialog.
+PROBE_MODEL_SAMPLE = 5
+
+
+def probe_compatible_profile(profile):
+    """Fetch the model list for one profile and describe the outcome.
+
+    Written for a worker thread: it builds its own client, touches no Qt
+    object and no shared registry, and never raises -- the caller renders
+    whatever dictionary comes back. That is what lets the modal profile
+    dialog offer "Test connection" without freezing while the request is
+    in flight.
+    """
+    profile = dict(profile or {})
+    base_url = str(profile.get("base_url", "") or "").strip()
+    result = {
+        "ok": False,
+        "profile_id": str(profile.get("profile_id", "") or ""),
+        "endpoint": compatible_api_url(base_url) if base_url else "",
+        "model_count": 0,
+        "models": [],
+        "error": "",
+    }
+    if not base_url:
+        result["error"] = "Add a Base URL before testing the connection."
+        return result
+
+    provider = OpenAICompatibleChatProvider(
+        base_url=base_url,
+        api_key=profile.get("api_key", ""),
+        profile_id=result["profile_id"],
+        # Probed even when the profile is switched off, so an endpoint can
+        # be checked before it is enabled.
+        enabled=True,
+    )
+    try:
+        models = provider.list_models()
+    except Exception as error:
+        result["error"] = f"{type(error).__name__}: {error}"
+        return result
+    finally:
+        provider.close()
+
+    result["ok"] = True
+    result["model_count"] = len(models)
+    result["models"] = [model.name for model in models[:PROBE_MODEL_SAMPLE]]
+    return result
+
+
 class ChatProviderRegistry:
     """Build and dispatch the set of configured chat providers."""
 

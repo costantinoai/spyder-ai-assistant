@@ -29,6 +29,7 @@ from spyder.api.plugin_registration.decorators import (
 )
 from spyder.plugins.completion.api import CompletionRequestTypes
 
+from spyder_ai_assistant.backend.chat_providers import probe_compatible_profile
 from spyder_ai_assistant.mcp import (
     SpyderMCPBridge,
     SpyderMCPServer,
@@ -286,6 +287,7 @@ class AIChatPlugin(SpyderDockablePlugin):
         widget.set_runtime_target_handler(self._runtime_context.set_target_shell_id)
         widget.set_mcp_server_status_provider(self._get_mcp_server_status)
         widget.set_mcp_client_launcher(self._launch_mcp_client)
+        widget.set_provider_connection_tester(self._test_provider_profile)
         self._runtime_context.sig_current_context_changed.connect(
             widget.update_runtime_context
         )
@@ -515,6 +517,45 @@ class AIChatPlugin(SpyderDockablePlugin):
                 )
             )
             return
+        on_result(output)
+
+    def _test_provider_profile(self, profile, on_result):
+        """Probe one provider profile's endpoint on a worker thread.
+
+        The profile dialog is modal, so probing inline would freeze it --
+        and the rest of Spyder with it -- for the whole HTTP request.
+        """
+        logger.info(
+            "Testing provider profile %s",
+            profile.get("label", "<unnamed>"),
+        )
+        self._background_tools.submit(
+            partial(probe_compatible_profile, profile),
+            partial(self._deliver_provider_probe_result, profile, on_result),
+        )
+
+    @staticmethod
+    def _deliver_provider_probe_result(profile, on_result, output, error):
+        """Hand one probe outcome back to the dialog that asked for it."""
+        if error is not None:
+            logger.error(
+                "Provider profile probe failed on its worker thread: %s",
+                error,
+            )
+            on_result({
+                "ok": False,
+                "profile_id": profile.get("profile_id", ""),
+                "endpoint": "",
+                "model_count": 0,
+                "models": [],
+                "error": f"{type(error).__name__}: {error}",
+            })
+            return
+        logger.info(
+            "Provider profile probe finished: ok=%s models=%s",
+            output.get("ok"),
+            output.get("model_count"),
+        )
         on_result(output)
 
     def _get_mcp_server_status(self):

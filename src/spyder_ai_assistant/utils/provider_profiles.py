@@ -144,3 +144,64 @@ def compatible_api_url(base_url):
     """Accept either an endpoint root or an explicit compatible /v1 URL."""
     url = str(base_url or '').strip().rstrip('/')
     return url if url.endswith('/v1') else f'{url}/v1'
+
+
+# Hosts that normally serve an unauthenticated endpoint, so a missing API
+# key is not worth flagging for them.
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+
+
+def base_url_host(base_url):
+    """Return the host part of one base URL, or "" when it has none.
+
+    Credentials, port and IPv6 brackets are stripped so the result can be
+    compared against a plain host list.
+    """
+    text = str(base_url or "").strip()
+    if "//" not in text:
+        return ""
+    remainder = text.split("//", 1)[1].strip(" /")
+    if not remainder:
+        return ""
+    authority = remainder.split("/", 1)[0].rsplit("@", 1)[-1]
+    if authority.startswith("["):
+        return authority[1:].split("]", 1)[0]
+    return authority.split(":", 1)[0]
+
+
+def describe_base_url_problem(base_url):
+    """Return a short problem description for a base URL, or "" when usable.
+
+    Empty is not a problem: a profile with no endpoint is simply unused,
+    and ``resolve_preferred_profile`` skips it. Anything else has to be a
+    URL the compatible client can actually reach, because a malformed one
+    previously produced an empty model list and no explanation.
+    """
+    text = str(base_url or "").strip()
+    if not text:
+        return ""
+    if not text.startswith(("http://", "https://")):
+        return "Include the scheme, for example https://api.example.com/v1"
+    if not base_url_host(text):
+        return "Add the host, for example https://api.example.com/v1"
+    lowered = text.rstrip("/").lower()
+    if lowered.endswith("/models") or "/chat/completions" in lowered:
+        # compatible_api_url appends /v1 and the client then requests
+        # /models, so a full request path here is requested twice over.
+        return "Enter the endpoint root or its /v1 URL; the request path is added for you"
+    return ""
+
+
+def describe_api_key_problem(base_url, api_key):
+    """Return a note when a remote endpoint is configured with no API key.
+
+    Local endpoints (llama.cpp, vLLM, LM Studio and friends) usually serve
+    without authentication, so only remote hosts are flagged.
+    """
+    text = str(base_url or "").strip()
+    if not text or str(api_key or "").strip():
+        return ""
+    host = base_url_host(text)
+    if not host or host.lower() in _LOCAL_HOSTS:
+        return ""
+    return "Most hosted endpoints reject requests without an API key"
